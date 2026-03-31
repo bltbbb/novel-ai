@@ -1,21 +1,31 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import { Download, FileText, Plus, Save, Settings2, Sparkles, Trash2, WifiOff } from 'lucide-react';
+import { ChevronDown, Download, FileText, History, Plus, Save, Settings2, Sparkles, Target, Trash2, WifiOff } from 'lucide-react';
 import { streamChat } from '@/lib/ai-client';
+import { retrieveChapterSearchResults } from '@/lib/chapter-search';
 import { assembleContinueWritingContext } from '@/lib/context-assembler';
 import { countDocumentCharacters, createParagraphDocument, richTextToPlainText } from '@/lib/editor-content';
 import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { chapterToMarkdown, downloadMarkdown, projectToMarkdown } from '@/lib/export';
 import { createId } from '@/lib/identity';
-import { useEditorStore, useLoreStore, useServerStatusStore, useSettingsStore } from '@/stores';
+import {
+  useEditorStore,
+  useForeshadowStore,
+  useIdeaCardStore,
+  useLoreStore,
+  useServerStatusStore,
+  useSettingsStore,
+  useSnapshotStore,
+} from '@/stores';
 import { useToast } from '@/components/Toast';
-import { EMPTY_DOCUMENT, type Chapter, type Id, type RichTextDocument } from '@/types';
+import { EMPTY_DOCUMENT, type Chapter, type Id, type RichTextDocument, type SearchResult, type Snapshot } from '@/types';
 
 interface EditorWorkspaceProps {
   projectId: Id;
   projectTitle: string;
   projectDescription?: string;
   onOpenSettings: () => void;
+  onOpenForeshadow: () => void;
 }
 
 const RichTextEditor = lazy(async () => {
@@ -26,6 +36,11 @@ const RichTextEditor = lazy(async () => {
 const ContextInspector = lazy(async () => {
   const module = await import('@/components/ContextInspector');
   return { default: module.ContextInspector };
+});
+
+const CreativeRecordsDialog = lazy(async () => {
+  const module = await import('@/components/CreativeRecordsDialog');
+  return { default: module.CreativeRecordsDialog };
 });
 
 function EditorChunkFallback({ label }: { label: string }) {
@@ -53,6 +68,7 @@ export function EditorWorkspace({
   projectTitle,
   projectDescription = '',
   onOpenSettings,
+  onOpenForeshadow,
 }: EditorWorkspaceProps) {
   const {
     chapters,
@@ -68,6 +84,9 @@ export function EditorWorkspace({
     markDirty,
     clearDirty,
   } = useEditorStore();
+  const createForeshadow = useForeshadowStore((state) => state.createForeshadow);
+  const createSnapshot = useSnapshotStore((state) => state.createSnapshot);
+  const createIdeaCard = useIdeaCardStore((state) => state.createIdeaCard);
   const entities = useLoreStore((state) => state.entities);
   const settings = useSettingsStore((state) => state.settings);
   const serverAvailability = useServerStatusStore((state) => state.availability);
@@ -78,6 +97,10 @@ export function EditorWorkspace({
   const [draftTitle, setDraftTitle] = useState('');
   const [draftDocument, setDraftDocument] = useState<RichTextDocument>(EMPTY_DOCUMENT);
   const [isAiWriting, setIsAiWriting] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showCreativeRecords, setShowCreativeRecords] = useState(false);
+  const [lastAiGeneratedText, setLastAiGeneratedText] = useState('');
+  const exportMenuRef = useRef<HTMLDivElement>(null);
   const previousAvailabilityRef = useRef(serverAvailability);
 
   const currentChapter = useMemo(
@@ -86,6 +109,9 @@ export function EditorWorkspace({
   );
   const draftWordCount = useMemo(() => countDocumentCharacters(draftDocument), [draftDocument]);
   const isAiAvailable = serverAvailability !== 'offline';
+  const chapterTitleMap = useMemo(() => {
+    return new Map(chapters.map((chapter) => [chapter.id, chapter.title] as const));
+  }, [chapters]);
 
   useEffect(() => {
     void loadChapters(projectId).catch(() => {
@@ -148,6 +174,17 @@ export function EditorWorkspace({
     };
   }, [clearDirty, currentChapter, draftDocument, isAiWriting, isDirty, saveChapterContent]);
 
+  useEffect(() => {
+    if (!showExportMenu) return;
+    function handleClickOutside(event: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
+        setShowExportMenu(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showExportMenu]);
+
   async function persistCurrentDraft() {
     if (!currentChapter) {
       return;
@@ -193,6 +230,136 @@ export function EditorWorkspace({
     toast(`已删除「${currentChapter.title}」`, 'warning');
   }
 
+  async function handleCreateForeshadowFromChapter() {
+    if (!currentChapter) {
+      return;
+    }
+
+    await persistCurrentDraft();
+
+    const plainText = richTextToPlainText(draftDocument).trim();
+
+    if (!plainText) {
+      toast('请先写一些正文，再将当前章节记为伏笔', 'warning');
+      return;
+    }
+
+    const suggestedTitle = `${draftTitle || currentChapter.title} 的伏笔`;
+    const foreshadowTitle = window.prompt('输入伏笔标题', suggestedTitle)?.trim();
+
+    if (!foreshadowTitle) {
+      return;
+    }
+
+    const excerpt = plainText.replace(/\s+/g, ' ').slice(0, 120);
+    const foreshadow = await createForeshadow({
+      projectId,
+      title: foreshadowTitle,
+      excerpt,
+      sourceChapterId: currentChapter.id,
+    });
+
+    toast(`已记录伏笔「${foreshadow.title}」`, 'success');
+  }
+
+  async function handleCreateManualSnapshot() {
+    if (!currentChapter) {
+      return;
+    }
+
+    try {
+      await persistCurrentDraft();
+
+      await createSnapshot({
+        projectId,
+        chapterId: currentChapter.id,
+        chapterTitle: draftTitle || currentChapter.title,
+        content: draftDocument,
+        source: 'manual',
+        note: '手动创建快照',
+      });
+
+      toast('已创建章节快照', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`创建快照失败：${message}`, 'error');
+    }
+  }
+
+  async function handleRestoreSnapshot(snapshot: Snapshot) {
+    setDraftDocument(snapshot.content);
+    markDirty();
+    toast('已恢复到所选快照，内容会自动保存', 'success');
+  }
+
+  async function handleCreateManualIdeaCard() {
+    if (!currentChapter) {
+      return;
+    }
+
+    try {
+      const plainText = richTextToPlainText(draftDocument).trim();
+
+      if (!plainText) {
+        toast('请先写一些正文，再保存为灵感卡片', 'warning');
+        return;
+      }
+
+      const title = window.prompt('输入灵感卡片标题', `${draftTitle || currentChapter.title} 的灵感`)?.trim();
+
+      if (!title) {
+        return;
+      }
+
+      const ideaCard = await createIdeaCard({
+        projectId,
+        sourceChapterId: currentChapter.id,
+        title,
+        content: plainText,
+        source: 'manual',
+      });
+
+      toast(`已保存灵感卡片「${ideaCard.title}」`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`保存灵感卡片失败：${message}`, 'error');
+    }
+  }
+
+  async function handleCreateAiIdeaCard() {
+    if (!currentChapter) {
+      return;
+    }
+
+    try {
+      const content = lastAiGeneratedText.trim();
+
+      if (!content) {
+        toast('最近还没有可保存的 AI 输出', 'warning');
+        return;
+      }
+
+      const title = window.prompt('输入灵感卡片标题', `${draftTitle || currentChapter.title} 的 AI 灵感`)?.trim();
+
+      if (!title) {
+        return;
+      }
+
+      const ideaCard = await createIdeaCard({
+        projectId,
+        sourceChapterId: currentChapter.id,
+        title,
+        content,
+        source: 'ai_output',
+      });
+
+      toast(`已保存灵感卡片「${ideaCard.title}」`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`保存 AI 灵感失败：${message}`, 'error');
+    }
+  }
+
   async function handleContinueWriting() {
     if (!currentChapter) {
       return;
@@ -210,7 +377,35 @@ export function EditorWorkspace({
 
     await persistCurrentDraft();
 
+    try {
+      await createSnapshot({
+        projectId,
+        chapterId: currentChapter.id,
+        chapterTitle: draftTitle || currentChapter.title,
+        content: draftDocument,
+        source: 'ai_continue',
+        note: 'AI 续写前自动快照',
+      });
+    } catch {
+      toast('自动快照创建失败，本次续写仍会继续', 'warning');
+    }
+
     const basePlainText = richTextToPlainText(draftDocument);
+    let searchResults: SearchResult[] = [];
+
+    try {
+      searchResults = await retrieveChapterSearchResults({
+        serverUrl: settings.serverUrl,
+        projectId,
+        chapterId: currentChapter.id,
+        content: draftDocument,
+        chapters,
+        topK: 3,
+      });
+    } catch {
+      toast('历史检索暂不可用，本次已回退为当前上下文', 'warning');
+    }
+
     const assembled = assembleContinueWritingContext({
       projectId,
       chapterId: currentChapter.id,
@@ -218,20 +413,25 @@ export function EditorWorkspace({
       content: draftDocument,
       settings,
       entities,
+      searchResults,
       messageId: createId(),
     });
 
     let nextPlainText = basePlainText;
+    let generatedText = '';
 
     setIsAiWriting(true);
+    setLastAiGeneratedText('');
     toast('AI 正在续写...', 'info');
 
     try {
       for await (const delta of streamChat(settings.serverUrl, assembled.request)) {
+        generatedText += delta;
         nextPlainText += delta;
         setDraftDocument(createParagraphDocument(nextPlainText));
       }
 
+      setLastAiGeneratedText(generatedText.trim());
       markDirty();
       toast('AI 续写完成', 'success');
     } catch (error) {
@@ -345,78 +545,120 @@ export function EditorWorkspace({
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">编辑器</p>
-            <p className="mt-1 text-sm text-neutral-400">
-              {formatSavedAt(lastSavedAt)}
-              <span className="mx-2 text-neutral-600">|</span>
-              当前 {draftWordCount} 字
-            </p>
+        <div className="border-b border-neutral-800 px-5 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3 text-sm text-neutral-400">
+              <span className="text-xs uppercase tracking-[0.2em] text-neutral-500">编辑器</span>
+              <span className="text-neutral-700">|</span>
+              <span>{formatSavedAt(lastSavedAt)}</span>
+              <span className="text-neutral-700">|</span>
+              <span>{draftWordCount} 字</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void persistCurrentDraft()}
+                disabled={isAiWriting}
+                className="inline-flex items-center rounded-xl p-1.5 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+                title="立即保存"
+              >
+                <Save size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteCurrentChapter()}
+                disabled={!currentChapter || isAiWriting}
+                className="inline-flex items-center rounded-xl p-1.5 text-neutral-400 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"
+                title="删除当前章节"
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void handleCreateChapter()}
-              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 xl:hidden"
-            >
-              <Plus size={15} />
-              新建章节
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleExportCurrentChapter()}
-              disabled={!currentChapter || isAiWriting}
-              className="hidden items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 xl:inline-flex"
-            >
-              <Download size={15} />
-              导出章节
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleExportProject()}
-              disabled={chapters.length === 0 || isAiWriting}
-              className="hidden items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 xl:inline-flex"
-            >
-              <Download size={15} />
-              导出整书
-            </button>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => void handleContinueWriting()}
               disabled={!currentChapter || isAiWriting || !isAiAvailable}
-              className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
               title={!isAiAvailable ? `AI 功能暂不可用：${serverMessage}` : undefined}
             >
-              <Sparkles size={15} />
-              {isAiWriting ? 'AI 续写中' : !isAiAvailable ? 'AI 不可用' : 'AI 续写'}
+              <Sparkles size={14} />
+              {isAiWriting ? '续写中...' : !isAiAvailable ? 'AI 不可用' : 'AI 续写'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleCreateForeshadowFromChapter()}
+              disabled={!currentChapter || isAiWriting}
+              className="hidden items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 xl:inline-flex"
+            >
+              <Target size={14} />
+              记为伏笔
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCreativeRecords(true)}
+              disabled={!currentChapter}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <History size={14} />
+              记录
+            </button>
+            <div ref={exportMenuRef} className="relative hidden xl:block">
+              <button
+                type="button"
+                onClick={() => setShowExportMenu((prev) => !prev)}
+                disabled={(!currentChapter && chapters.length === 0) || isAiWriting}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download size={14} />
+                导出
+                <ChevronDown size={12} />
+              </button>
+              {showExportMenu && (
+                <div className="absolute left-0 top-full z-20 mt-1.5 w-36 rounded-xl border border-neutral-700 bg-neutral-900 py-1 shadow-xl">
+                  <button
+                    type="button"
+                    onClick={() => { setShowExportMenu(false); void handleExportCurrentChapter(); }}
+                    disabled={!currentChapter}
+                    className="flex w-full items-center px-3 py-2 text-sm text-neutral-200 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    导出章节
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setShowExportMenu(false); void handleExportProject(); }}
+                    disabled={chapters.length === 0}
+                    className="flex w-full items-center px-3 py-2 text-sm text-neutral-200 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    导出整书
+                  </button>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleCreateChapter()}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 xl:hidden"
+            >
+              <Plus size={14} />
+              新建章节
+            </button>
+            <button
+              type="button"
+              onClick={onOpenForeshadow}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 xl:hidden"
+            >
+              <Target size={14} />
+              伏笔
             </button>
             <button
               type="button"
               onClick={() => void handleExportCurrentChapter()}
               disabled={!currentChapter || isAiWriting}
-              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 xl:hidden"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50 xl:hidden"
             >
-              <Download size={15} />
-              导出
-            </button>
-            <button
-              type="button"
-              onClick={() => void persistCurrentDraft()}
-              disabled={isAiWriting}
-              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
-            >
-              <Save size={15} />
-              立即保存
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleDeleteCurrentChapter()}
-              disabled={!currentChapter || isAiWriting}
-              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-red-500/50 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Trash2 size={15} />
-              删除
+              <Download size={14} />
             </button>
           </div>
         </div>
@@ -521,15 +763,9 @@ export function EditorWorkspace({
             )}
             <p className="text-xs leading-6 text-neutral-500">
               {isAiAvailable
-                ? '当前已接入最小 Slash Menu。输入 `/` 后可执行“续写当前段落”。'
-                : '当前仅保留本地写作能力。恢复服务连接后，Slash Menu 和 AI 续写会自动可用。'}
+                ? '输入 / 可呼出 AI 指令菜单；创作记录里可以查看快照并保存灵感卡片。'
+                : '当前仅保留本地写作能力，恢复服务连接后 AI 续写会自动可用。'}
             </p>
-            <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 px-4 py-3 text-sm text-neutral-400">
-              <p className="mb-2 text-neutral-300">正文纯文本预览</p>
-              <p className="line-clamp-3 whitespace-pre-wrap text-neutral-500">
-                {richTextToPlainText(draftDocument) || '暂无正文内容'}
-              </p>
-            </div>
           </div>
         )}
       </section>
@@ -545,6 +781,21 @@ export function EditorWorkspace({
           />
         </Suspense>
       )}
+
+      <Suspense fallback={null}>
+        <CreativeRecordsDialog
+          open={showCreativeRecords}
+          onClose={() => setShowCreativeRecords(false)}
+          projectId={projectId}
+          currentChapterId={currentChapter?.id ?? null}
+          chapterTitleMap={chapterTitleMap}
+          hasAiIdeaCandidate={Boolean(lastAiGeneratedText.trim())}
+          onCreateManualSnapshot={handleCreateManualSnapshot}
+          onRestoreSnapshot={handleRestoreSnapshot}
+          onCreateManualIdeaCard={handleCreateManualIdeaCard}
+          onCreateAiIdeaCard={handleCreateAiIdeaCard}
+        />
+      </Suspense>
     </div>
   );
 }

@@ -33,9 +33,27 @@ export interface AIStreamChunk {
   error?: string;
 }
 
+export interface SearchCandidate {
+  chapterId: Id;
+  chapterTitle: string;
+  snippet: string;
+}
+
 export interface SearchResult {
   chapterId: Id;
   chapterTitle: string;
   snippet: string;
   score: number;
+}
+
+export interface SearchRequest {
+  projectId: Id;
+  chapterId?: Id;
+  query: string;
+  candidates: SearchCandidate[];
+  topK?: number;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
 }

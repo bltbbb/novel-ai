@@ -2,7 +2,7 @@ import Dexie, { type Table } from 'dexie';
 import { createParagraphDocument, countDocumentCharacters } from '@/lib/editor-content';
 import { createId, createTimestamp } from '@/lib/identity';
 import { DEFAULT_SETTINGS } from '@/lib/runtime-config';
-import type { AppSettings, Chapter, Id, LoreEntity, Project } from '@/types';
+import type { AppSettings, Chapter, Foreshadow, IdeaCard, Id, LoreEntity, Project, Snapshot } from '@/types';
 
 export interface SettingsRecord {
   key: string;
@@ -16,6 +16,9 @@ class NovelDatabase extends Dexie {
   projects!: Table<Project, Id>;
   chapters!: Table<Chapter, Id>;
   entities!: Table<LoreEntity, Id>;
+  foreshadows!: Table<Foreshadow, Id>;
+  snapshots!: Table<Snapshot, Id>;
+  ideaCards!: Table<IdeaCard, Id>;
   settings!: Table<SettingsRecord, string>;
 
   constructor() {
@@ -25,6 +28,24 @@ class NovelDatabase extends Dexie {
       projects: 'id, updatedAt, createdAt',
       chapters: 'id, projectId, [projectId+order], updatedAt',
       entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      settings: 'key, updatedAt',
+    });
+
+    this.version(2).stores({
+      projects: 'id, updatedAt, createdAt',
+      chapters: 'id, projectId, [projectId+order], updatedAt',
+      entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+      settings: 'key, updatedAt',
+    });
+
+    this.version(3).stores({
+      projects: 'id, updatedAt, createdAt',
+      chapters: 'id, projectId, [projectId+order], updatedAt',
+      entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+      snapshots: 'id, projectId, chapterId, [projectId+chapterId], source, createdAt, updatedAt',
+      ideaCards: 'id, projectId, sourceChapterId, source, updatedAt, createdAt',
       settings: 'key, updatedAt',
     });
   }
@@ -83,10 +104,13 @@ export async function recalculateProjectWordCount(projectId: Id) {
 }
 
 export async function deleteProjectCascade(projectId: Id) {
-  await db.transaction('rw', db.projects, db.chapters, db.entities, async () => {
+  await db.transaction('rw', db.projects, db.chapters, db.entities, db.foreshadows, db.snapshots, db.ideaCards, async () => {
     await db.projects.delete(projectId);
     await db.chapters.where('projectId').equals(projectId).delete();
     await db.entities.where('projectId').equals(projectId).delete();
+    await db.foreshadows.where('projectId').equals(projectId).delete();
+    await db.snapshots.where('projectId').equals(projectId).delete();
+    await db.ideaCards.where('projectId').equals(projectId).delete();
   });
 }
 
@@ -101,6 +125,9 @@ export async function seedDemoData() {
   const projectId = createId();
   const chapterId = createId();
   const entityId = createId();
+  const foreshadowId = createId();
+  const snapshotId = createId();
+  const ideaCardId = createId();
   const chapterContent = createParagraphDocument('灵气枯竭之后，最后一名修仙者在废墟里醒来。');
 
   const demoProject: Project = {
@@ -141,10 +168,53 @@ export async function seedDemoData() {
     updatedAt: now,
   };
 
-  await db.transaction('rw', db.projects, db.chapters, db.entities, db.settings, async () => {
+  const demoForeshadow: Foreshadow = {
+    id: foreshadowId,
+    projectId,
+    title: '黑铁片的真实来历',
+    excerpt: '灵气枯竭之后，最后一名修仙者在废墟里醒来。',
+    notes: '后续进入炼器宗主线时需要回收，解释黑铁片与旧时代的关系。',
+    status: 'planted',
+    sourceChapterId: chapterId,
+    resolvedChapterId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const demoSnapshot: Snapshot = {
+    id: snapshotId,
+    projectId,
+    chapterId,
+    chapterTitle: demoChapter.title,
+    content: chapterContent,
+    source: 'manual',
+    note: '开篇版本快照',
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const demoIdeaCard: IdeaCard = {
+    id: ideaCardId,
+    projectId,
+    sourceChapterId: chapterId,
+    title: '废墟开篇的氛围方向',
+    content: '强化“末法时代 + 赛博废土”的反差感，让开篇同时具备破败感和旧修仙文明残响。',
+    source: 'manual',
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  await db.transaction(
+    'rw',
+    [db.projects, db.chapters, db.entities, db.foreshadows, db.snapshots, db.ideaCards, db.settings],
+    async () => {
     await db.projects.add(demoProject);
     await db.chapters.add(demoChapter);
     await db.entities.add(demoEntity);
+    await db.foreshadows.add(demoForeshadow);
+    await db.snapshots.add(demoSnapshot);
+    await db.ideaCards.add(demoIdeaCard);
     await saveAppSettings(DEFAULT_SETTINGS);
-  });
+    },
+  );
 }

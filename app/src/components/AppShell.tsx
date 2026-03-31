@@ -1,14 +1,23 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { BookOpen, LibraryBig, LoaderCircle, Settings2, Sparkles } from 'lucide-react';
+import { BookOpen, LibraryBig, LoaderCircle, Settings2, Share2, Sparkles, Target } from 'lucide-react';
 import { useToast } from '@/components/Toast';
 import { seedDemoData } from '@/lib/db';
-import { useEditorStore, useLoreStore, useProjectStore, useServerStatusStore, useSettingsStore } from '@/stores';
+import {
+  useEditorStore,
+  useForeshadowStore,
+  useLoreStore,
+  useProjectStore,
+  useServerStatusStore,
+  useSettingsStore,
+} from '@/stores';
 
-type AppView = 'editor' | 'lore';
+type AppView = 'editor' | 'lore' | 'foreshadow' | 'graph';
 
 const navItems = [
   { key: 'editor' as const, label: '编辑器', icon: BookOpen },
   { key: 'lore' as const, label: '设定库', icon: LibraryBig },
+  { key: 'foreshadow' as const, label: '伏笔追踪', icon: Target },
+  { key: 'graph' as const, label: '关系图谱', icon: Share2 },
 ];
 
 const ProjectList = lazy(async () => {
@@ -26,6 +35,16 @@ const LoreWorkspace = lazy(async () => {
   return { default: module.LoreWorkspace };
 });
 
+const ForeshadowWorkspace = lazy(async () => {
+  const module = await import('@/components/ForeshadowWorkspace');
+  return { default: module.ForeshadowWorkspace };
+});
+
+const GraphWorkspace = lazy(async () => {
+  const module = await import('@/components/GraphWorkspace');
+  return { default: module.GraphWorkspace };
+});
+
 const SettingsDialog = lazy(async () => {
   const module = await import('@/components/SettingsDialog');
   return { default: module.SettingsDialog };
@@ -41,7 +60,8 @@ function ViewLoadingFallback({ label }: { label: string }) {
 
 export function AppShell() {
   const { projects, activeProjectId, loadProjects, setActiveProject } = useProjectStore();
-  const { loadChapters } = useEditorStore();
+  const { loadChapters, setActiveChapter } = useEditorStore();
+  const { loadForeshadows } = useForeshadowStore();
   const { loadEntities } = useLoreStore();
   const settings = useSettingsStore((state) => state.settings);
   const { loadSettings } = useSettingsStore();
@@ -56,6 +76,10 @@ export function AppShell() {
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, projects],
+  );
+  const activeViewLabel = useMemo(
+    () => navItems.find((item) => item.key === activeView)?.label ?? '编辑器',
+    [activeView],
   );
 
   useEffect(() => {
@@ -89,10 +113,18 @@ export function AppShell() {
       return;
     }
 
-    void Promise.all([loadChapters(activeProjectId), loadEntities(activeProjectId)]).catch(() => {
+    void Promise.all([loadChapters(activeProjectId), loadEntities(activeProjectId), loadForeshadows(activeProjectId)]).catch(() => {
       toast('加载项目数据失败', 'error');
     });
-  }, [activeProjectId, loadChapters, loadEntities, toast]);
+  }, [activeProjectId, loadChapters, loadEntities, loadForeshadows, toast]);
+
+  function openEditor(chapterId?: string | null) {
+    if (chapterId) {
+      setActiveChapter(chapterId);
+    }
+
+    setActiveView('editor');
+  }
 
   useEffect(() => {
     if (isBootstrapping) {
@@ -139,14 +171,14 @@ export function AppShell() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      <div className="mx-auto flex min-h-screen w-full max-w-[1440px] gap-6 px-6 py-6 lg:px-8">
-        <aside className="hidden w-64 flex-shrink-0 flex-col rounded-3xl border border-neutral-800 bg-neutral-900/70 p-4 backdrop-blur lg:flex">
+    <div className="h-screen overflow-hidden bg-neutral-950 text-neutral-100">
+      <div className="mx-auto flex h-full w-full max-w-[1440px] gap-6 px-6 py-6 lg:px-8">
+        <aside className="hidden w-64 flex-shrink-0 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-900/70 p-4 backdrop-blur lg:flex">
           <div className="mb-6 rounded-2xl bg-neutral-950/70 p-4">
             <p className="text-xs uppercase tracking-[0.2em] text-indigo-300">AI Novel Studio</p>
             <h1 className="mt-2 text-lg font-semibold text-neutral-100">{activeProject.title}</h1>
             <p className="mt-2 text-sm leading-6 text-neutral-400">
-              正式工程当前已经接通真实项目、章节和设定数据。
+              {activeProject.description || '暂无项目简介'}
             </p>
           </div>
 
@@ -173,10 +205,6 @@ export function AppShell() {
             })}
           </nav>
 
-          <div className="mt-6 rounded-2xl border border-dashed border-neutral-800 p-4 text-sm leading-6 text-neutral-500">
-            伏笔追踪、灵感发散等页面暂不进入当前 MVP 主流程，会在后续阶段继续接入。
-          </div>
-
           <button
             type="button"
             onClick={() => setShowSettings(true)}
@@ -195,14 +223,14 @@ export function AppShell() {
           </button>
         </aside>
 
-        <div className="flex min-w-0 flex-1 flex-col gap-5">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-5">
           <header className="flex flex-col gap-4 rounded-3xl border border-neutral-800 bg-neutral-900/70 px-5 py-4 backdrop-blur md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">当前项目</p>
               <div className="mt-2 flex items-center gap-3">
                 <h2 className="text-2xl font-semibold text-neutral-100">{activeProject.title}</h2>
                 <span className="rounded-full bg-indigo-500/15 px-2.5 py-1 text-xs text-indigo-300">
-                  {activeView === 'editor' ? '编辑器' : '设定库'}
+                  {activeViewLabel}
                 </span>
               </div>
               <p className="mt-2 text-sm leading-6 text-neutral-400">
@@ -227,7 +255,7 @@ export function AppShell() {
               <div className="rounded-2xl bg-neutral-950/70 px-4 py-3 text-sm text-neutral-400">
                 <div className="flex items-center gap-2 text-neutral-300">
                   <Sparkles size={15} className="text-indigo-400" />
-                  当前已完成 M0 / M1 / M2 / M3 基础链路
+                  {activeProject.genre.length > 0 ? activeProject.genre.join(' / ') : '小说项目'}
                 </div>
                 <p className="mt-2">{activeProject.wordCount} 字</p>
                 <p className={`mt-1 text-xs ${serverAvailability === 'online' ? 'text-green-400' : serverAvailability === 'offline' ? 'text-yellow-400' : 'text-neutral-500'}`}>
@@ -264,16 +292,30 @@ export function AppShell() {
             })}
           </div>
 
-          <Suspense fallback={<ViewLoadingFallback label={activeView === 'editor' ? '编辑器' : '设定库'} />}>
+          <Suspense fallback={<ViewLoadingFallback label={activeViewLabel} />}>
             {activeView === 'editor' ? (
               <EditorWorkspace
                 projectId={activeProject.id}
                 projectTitle={activeProject.title}
                 projectDescription={activeProject.description}
                 onOpenSettings={() => setShowSettings(true)}
+                onOpenForeshadow={() => setActiveView('foreshadow')}
+              />
+            ) : activeView === 'lore' ? (
+              <LoreWorkspace projectId={activeProject.id} />
+            ) : activeView === 'foreshadow' ? (
+              <ForeshadowWorkspace
+                projectId={activeProject.id}
+                onOpenEditor={() => openEditor()}
+                onOpenChapter={(chapterId) => openEditor(chapterId)}
               />
             ) : (
-              <LoreWorkspace projectId={activeProject.id} />
+              <GraphWorkspace
+                projectId={activeProject.id}
+                onOpenChapter={(chapterId) => openEditor(chapterId)}
+                onOpenForeshadow={(_foreshadowId) => setActiveView('foreshadow')}
+                onOpenLore={() => setActiveView('lore')}
+              />
             )}
           </Suspense>
         </div>

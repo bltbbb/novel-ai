@@ -7,6 +7,7 @@ import type {
   AppSettings,
   LoreEntity,
   RichTextDocument,
+  SearchResult,
 } from '@/types';
 
 export interface ContextAssemblerInput {
@@ -17,6 +18,7 @@ export interface ContextAssemblerInput {
   messages: AIChatMessage[];
   settings: AppSettings;
   entities: LoreEntity[];
+  searchResults?: SearchResult[];
   maxReferences?: number;
 }
 
@@ -24,6 +26,7 @@ export interface ContextAssemblerResult {
   request: AIChatRequest;
   references: AIContextReference[];
   matchedEntities: LoreEntity[];
+  searchResults: SearchResult[];
   plainText: string;
   estimatedPromptTokens: number;
 }
@@ -35,6 +38,7 @@ export interface ContinueWritingContextInput {
   content: RichTextDocument;
   settings: AppSettings;
   entities: LoreEntity[];
+  searchResults?: SearchResult[];
   messageId: string;
   maxReferences?: number;
 }
@@ -86,6 +90,15 @@ function buildEntityReference(entity: LoreEntity): AIContextReference {
   };
 }
 
+function buildSearchReference(result: SearchResult): AIContextReference {
+  return {
+    id: `${result.chapterId}:${result.score}`,
+    label: result.chapterTitle,
+    type: 'chapter',
+    excerpt: result.snippet,
+  };
+}
+
 function buildSystemPrompt(input: ContextAssemblerInput, references: AIContextReference[]) {
   const sections: string[] = [];
 
@@ -111,13 +124,16 @@ function buildSystemPrompt(input: ContextAssemblerInput, references: AIContextRe
 
 export function assembleChatContext(input: ContextAssemblerInput): ContextAssemblerResult {
   const plainText = richTextToPlainText(input.content);
+  const searchResults = input.searchResults ?? [];
+  const chapterReferences = searchResults.map(buildSearchReference);
   const pinnedEntities = input.entities.filter((entity) => entity.pinned);
   const matchedEntities = matchEntitiesByContent(plainText, input.entities);
   const mergedEntities = deduplicateEntities([...pinnedEntities, ...matchedEntities]).slice(
     0,
     input.maxReferences ?? 8,
   );
-  const references = mergedEntities.map(buildEntityReference);
+  const loreReferences = mergedEntities.map(buildEntityReference);
+  const references = [...chapterReferences, ...loreReferences].slice(0, input.maxReferences ?? 8);
   const systemPrompt = buildSystemPrompt(input, references);
   const estimatedPromptTokens =
     estimateTextTokens(systemPrompt) +
@@ -136,6 +152,7 @@ export function assembleChatContext(input: ContextAssemblerInput): ContextAssemb
     },
     references,
     matchedEntities: mergedEntities,
+    searchResults,
     plainText,
     estimatedPromptTokens,
   };
@@ -167,6 +184,7 @@ export function assembleContinueWritingContext(input: ContinueWritingContextInpu
     content: input.content,
     settings: input.settings,
     entities: input.entities,
+    searchResults: input.searchResults,
     maxReferences: input.maxReferences,
     messages: [
       {

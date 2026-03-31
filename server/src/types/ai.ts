@@ -30,3 +30,28 @@ export interface AIStreamChunk {
   done: boolean;
   error?: string;
 }
+
+export interface SearchCandidate {
+  chapterId: string;
+  chapterTitle: string;
+  snippet: string;
+}
+
+export interface SearchResult {
+  chapterId: string;
+  chapterTitle: string;
+  snippet: string;
+  score: number;
+}
+
+export interface SearchRequest {
+  projectId: string;
+  chapterId?: string;
+  query: string;
+  candidates: SearchCandidate[];
+  topK?: number;
+}
+
+export interface SearchResponse {
+  results: SearchResult[];
+}

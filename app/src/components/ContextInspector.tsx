@@ -1,11 +1,13 @@
-import { useMemo } from 'react';
-import { Activity, BookOpen, Pin, Sparkles } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Activity, AlertTriangle, BookOpen, Pin, Search, Sparkles } from 'lucide-react';
 import { assembleContinueWritingContext } from '@/lib/context-assembler';
+import { retrieveChapterSearchResults } from '@/lib/chapter-search';
+import { analyzeLoreConsistency } from '@/lib/lore-consistency';
 import { estimateTextTokens } from '@/lib/token-counter';
-import { useLoreStore, useSettingsStore } from '@/stores';
+import { useEditorStore, useLoreStore, useSettingsStore } from '@/stores';
 import { createId } from '@/lib/identity';
 import { richTextToPlainText } from '@/lib/editor-content';
-import type { Id, RichTextDocument } from '@/types';
+import type { Id, RichTextDocument, SearchResult } from '@/types';
 
 interface ContextInspectorProps {
   projectId: Id;
@@ -22,8 +24,11 @@ export function ContextInspector({
   content,
   isAiWriting,
 }: ContextInspectorProps) {
+  const chapters = useEditorStore((state) => state.chapters);
   const entities = useLoreStore((state) => state.entities);
   const settings = useSettingsStore((state) => state.settings);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'degraded'>('idle');
 
   const preview = useMemo(() => {
     return assembleContinueWritingContext({
@@ -33,24 +38,73 @@ export function ContextInspector({
       content,
       settings,
       entities,
+      searchResults,
       messageId: createId(),
       maxReferences: 6,
     });
-  }, [chapterId, chapterTitle, content, entities, projectId, settings]);
+  }, [chapterId, chapterTitle, content, entities, projectId, searchResults, settings]);
 
   const plainText = richTextToPlainText(content);
   const contentTokens = estimateTextTokens(plainText);
   const pinnedCount = entities.filter((entity) => entity.pinned).length;
+  const consistencyHints = useMemo(() => {
+    return analyzeLoreConsistency({
+      content,
+      matchedEntities: preview.matchedEntities,
+      allEntities: entities,
+      searchResults: preview.searchResults,
+    });
+  }, [content, entities, preview.matchedEntities, preview.searchResults]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadSearchResults() {
+      setSearchState('loading');
+
+      try {
+        const results = await retrieveChapterSearchResults({
+          serverUrl: settings.serverUrl,
+          projectId,
+          chapterId,
+          content,
+          chapters,
+          topK: 3,
+          signal: controller.signal,
+        });
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setSearchResults(results);
+        setSearchState('ready');
+      } catch {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setSearchResults([]);
+        setSearchState('degraded');
+      }
+    }
+
+    void loadSearchResults();
+
+    return () => {
+      controller.abort();
+    };
+  }, [chapterId, chapters, content, projectId, settings.serverUrl]);
 
   return (
-    <aside className="hidden w-80 flex-shrink-0 flex-col border-l border-neutral-800 bg-neutral-950/70 2xl:flex">
+    <aside className="hidden w-80 flex-shrink-0 flex-col overflow-hidden border-l border-neutral-800 bg-neutral-950/70 2xl:flex">
       <div className="border-b border-neutral-800 px-4 py-4">
         <div className="flex items-center gap-2 text-sm font-medium text-neutral-200">
           <Activity size={15} className="text-indigo-400" />
           AI 监控面板
         </div>
         <p className="mt-2 text-xs leading-6 text-neutral-500">
-          当前展示的是前端本地组装出的 prompt 预览，等联调完成后会与真实续写链路共用。
+          实时展示 AI 续写时的上下文组装情况。
         </p>
       </div>
 
@@ -79,6 +133,69 @@ export function ContextInspector({
             <p>正文预估：{contentTokens}</p>
             <p>总 prompt 预估：{preview.estimatedPromptTokens}</p>
             <p>参考条目数：{preview.references.length}</p>
+          </div>
+        </section>
+
+        <section className="mb-5 rounded-2xl border border-neutral-800 bg-neutral-900/70 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm text-neutral-200">
+            <Search size={14} className="text-indigo-400" />
+            历史检索
+          </div>
+          <div className="space-y-2 text-xs text-neutral-400">
+            <p>
+              检索状态：
+              {searchState === 'loading'
+                ? '检索中'
+                : searchState === 'degraded'
+                  ? '已降级'
+                  : '可用'}
+            </p>
+            <p>命中条数：{preview.searchResults.length}</p>
+            {preview.searchResults.length === 0 ? (
+              <p className="text-neutral-500">
+                {searchState === 'degraded' ? '检索不可用，当前已回退为 Lite 上下文。' : '当前没有命中的历史章节片段。'}
+              </p>
+            ) : (
+              preview.searchResults.map((result) => (
+                <div key={`${result.chapterId}-${result.score}`} className="rounded-xl border border-neutral-800 bg-neutral-950/60 px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm text-neutral-200">{result.chapterTitle}</p>
+                    <span className="text-[11px] text-neutral-500">score {result.score.toFixed(2)}</span>
+                  </div>
+                  <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-neutral-500">{result.snippet}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="mb-5 rounded-2xl border border-neutral-800 bg-neutral-900/70 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm text-neutral-200">
+            <AlertTriangle size={14} className="text-indigo-400" />
+            一致性提示
+          </div>
+          <div className="space-y-3 text-xs text-neutral-400">
+            {consistencyHints.length === 0 ? (
+              <p className="text-neutral-500">当前没有明显的一致性风险。</p>
+            ) : (
+              consistencyHints.map((hint) => (
+                <div
+                  key={hint.id}
+                  className={`rounded-xl border px-3 py-3 ${
+                    hint.level === 'warning'
+                      ? 'border-yellow-500/30 bg-yellow-500/10'
+                      : 'border-neutral-800 bg-neutral-950/60'
+                  }`}
+                >
+                  <p className={hint.level === 'warning' ? 'text-sm text-yellow-100' : 'text-sm text-neutral-200'}>
+                    {hint.title}
+                  </p>
+                  <p className={`mt-2 whitespace-pre-wrap leading-5 ${hint.level === 'warning' ? 'text-yellow-200/80' : 'text-neutral-500'}`}>
+                    {hint.description}
+                  </p>
+                </div>
+              ))
+            )}
           </div>
         </section>
 

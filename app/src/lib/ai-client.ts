@@ -1,4 +1,4 @@
-import type { AIChatRequest, AIStreamChunk } from '@/types';
+import type { AIChatRequest, AIStreamChunk, SearchRequest, SearchResponse } from '@/types';
 
 function createApiUrl(serverUrl: string, path: string) {
   return `${serverUrl.replace(/\/+$/, '')}${path}`;
@@ -21,6 +21,28 @@ function extractErrorMessage(rawText: string) {
   } catch {
     return rawText;
   }
+}
+
+function isSearchResponse(value: unknown): value is SearchResponse {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<SearchResponse>;
+
+  return (
+    Array.isArray(candidate.results) &&
+    candidate.results.every((result) => {
+      return (
+        result &&
+        typeof result === 'object' &&
+        typeof result.chapterId === 'string' &&
+        typeof result.chapterTitle === 'string' &&
+        typeof result.snippet === 'string' &&
+        typeof result.score === 'number'
+      );
+    })
+  );
 }
 
 export async function* streamChat(
@@ -94,4 +116,29 @@ export async function* streamChat(
       break;
     }
   }
+}
+
+export async function searchProject(serverUrl: string, request: SearchRequest, signal?: AbortSignal) {
+  const response = await fetch(createApiUrl(serverUrl, '/api/search'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(extractErrorMessage(errorText) || `检索请求失败：${response.status}`);
+  }
+
+  const parsed = (await response.json()) as unknown;
+
+  if (!isSearchResponse(parsed)) {
+    throw new Error('服务端返回了无法识别的检索结果');
+  }
+
+  return parsed.results;
 }

@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { loadServerEnv } from './config/env.js';
 import { registerAIRoutes } from './routes/ai.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerSearchRoutes } from './routes/search.js';
 
 async function bootstrap() {
   const env = loadServerEnv();
@@ -19,6 +20,7 @@ async function bootstrap() {
 
   await registerHealthRoutes(app);
   await registerAIRoutes(app, env);
+  await registerSearchRoutes(app);
 
   await app.listen({
     port: env.port,

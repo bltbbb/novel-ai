@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Pin, PinOff, Plus, Trash2, Users } from 'lucide-react';
+import { getLoreEntityTypeLabel } from '@/lib/lore-meta';
 import { useLoreStore } from '@/stores';
 import { useToast } from '@/components/Toast';
 import type { Id, LoreEntityType } from '@/types';
@@ -14,7 +15,10 @@ const filterOptions: Array<{ key: LoreFilter; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'character', label: '人物' },
   { key: 'faction', label: '势力' },
+  { key: 'location', label: '地点' },
   { key: 'magic_system', label: '力量体系' },
+  { key: 'item', label: '物品' },
+  { key: 'event', label: '事件' },
 ];
 
 export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
@@ -35,6 +39,7 @@ export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
 
     return entities.filter((entity) => entity.type === activeFilter);
   }, [activeFilter, entities]);
+  const activeFilterLabel = activeFilter === 'all' ? '全部设定' : getLoreEntityTypeLabel(activeFilter);
 
   async function handleCreateEntity() {
     const targetType = activeFilter === 'all' ? 'character' : activeFilter;
@@ -112,7 +117,9 @@ export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
               </div>
               <h2 className="text-xl font-medium text-neutral-100">当前分类还没有设定</h2>
               <p className="mt-3 text-sm leading-6 text-neutral-400">
-                这里已经接到真实 Store 数据。现在可以开始创建人物、势力和力量体系条目。
+                {activeFilter === 'all'
+                  ? '创建人物、势力、地点、物品和事件条目，为你的故事构建完整世界观。'
+                  : `当前还没有${activeFilterLabel}条目，可以先从最关键的一条开始补。`}
               </p>
             </div>
           </div>
@@ -127,7 +134,7 @@ export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
                   <div>
                     <h2 className="text-lg font-medium text-neutral-100">{entity.name}</h2>
                     <p className="mt-1 text-xs uppercase tracking-[0.2em] text-neutral-500">
-                      {entity.type}
+                      {getLoreEntityTypeLabel(entity.type)}
                     </p>
                   </div>
                   <div className="flex items-center gap-1">

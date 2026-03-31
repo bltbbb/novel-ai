@@ -1,12 +1,26 @@
 import { create } from 'zustand';
+import { countDocumentCharacters, createParagraphDocument } from '@/lib/editor-content';
 import { db, deleteProjectCascade } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
-import type { Id, Project } from '@/types';
+import { buildProjectArchive, importProjectArchive as importArchiveToDb } from '@/lib/project-archive';
+import type { Chapter, Id, LoreEntity, LoreEntityFields, LoreEntityType, Project, ProjectArchive } from '@/types';
 
 interface CreateProjectInput {
   title?: string;
   description?: string;
   genre?: string[];
+  seedChapters?: Array<{
+    title: string;
+    content?: string;
+  }>;
+  seedEntities?: Array<{
+    type: LoreEntityType;
+    name: string;
+    description?: string;
+    fields?: LoreEntityFields;
+    tags?: string[];
+    pinned?: boolean;
+  }>;
 }
 
 interface UpdateProjectInput {
@@ -23,6 +37,8 @@ interface ProjectStoreState {
   createProject: (input?: CreateProjectInput) => Promise<Project>;
   updateProject: (projectId: Id, input: UpdateProjectInput) => Promise<void>;
   deleteProject: (projectId: Id) => Promise<void>;
+  exportProjectArchive: (projectId: Id) => Promise<ProjectArchive>;
+  importProjectArchive: (archive: ProjectArchive) => Promise<Project>;
   setActiveProject: (projectId: Id | null) => void;
 }
 
@@ -47,17 +63,55 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   async createProject(input) {
     const now = createTimestamp();
-    const project: Project = {
+    const projectId = createId();
+    const chapters: Chapter[] = (input?.seedChapters ?? []).map((seedChapter, index) => {
+      const content = createParagraphDocument(seedChapter.content ?? '');
+
+      return {
+        id: createId(),
+        projectId,
+        title: seedChapter.title.trim() || `第${index + 1}章`,
+        order: index + 1,
+        content,
+        wordCount: countDocumentCharacters(content),
+        status: 'draft',
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+    const entities: LoreEntity[] = (input?.seedEntities ?? []).map((seedEntity) => ({
       id: createId(),
+      projectId,
+      type: seedEntity.type,
+      name: seedEntity.name.trim() || '未命名设定',
+      description: seedEntity.description?.trim() || '',
+      fields: seedEntity.fields ?? {},
+      tags: seedEntity.tags ?? [],
+      pinned: seedEntity.pinned ?? false,
+      createdAt: now,
+      updatedAt: now,
+    }));
+    const project: Project = {
+      id: projectId,
       title: input?.title?.trim() || '未命名项目',
       description: input?.description?.trim() || '',
       genre: input?.genre ?? [],
-      wordCount: 0,
+      wordCount: chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0),
       createdAt: now,
       updatedAt: now,
     };
 
-    await db.projects.put(project);
+    await db.transaction('rw', [db.projects, db.chapters, db.entities], async () => {
+      await db.projects.put(project);
+
+      if (chapters.length > 0) {
+        await db.chapters.bulkAdd(chapters);
+      }
+
+      if (entities.length > 0) {
+        await db.entities.bulkAdd(entities);
+      }
+    });
 
     set((state) => ({
       projects: sortProjects([project, ...state.projects]),
@@ -105,6 +159,23 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
           state.activeProjectId === projectId ? projects[0]?.id ?? null : state.activeProjectId,
       };
     });
+  },
+
+  async exportProjectArchive(projectId) {
+    return buildProjectArchive(projectId);
+  },
+
+  async importProjectArchive(archive) {
+    const project = await importArchiveToDb(archive);
+    const projects = sortProjects(await db.projects.toArray());
+
+    set({
+      projects,
+      activeProjectId: project.id,
+      isLoaded: true,
+    });
+
+    return project;
   },
 
   setActiveProject(projectId) {

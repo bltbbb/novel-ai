@@ -44,6 +44,7 @@ body {
 
 .ProseMirror {
   min-height: 420px;
+  line-height: 1.8;
   white-space: pre-wrap;
 }
 
