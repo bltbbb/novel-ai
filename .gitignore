@@ -1,0 +1,14 @@
+.claude/
+
+app/node_modules/
+app/dist/
+app/.logs/
+app/test-results/
+app/playwright-report/
+app/blob-report/
+app/*.tsbuildinfo
+
+server/node_modules/
+server/dist/
+server/.logs/
+server/.env

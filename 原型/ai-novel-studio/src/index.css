@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+/* Toast animations */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-8px); }
+}
+.toast-enter { animation: toast-in 0.2s ease-out; }
+.toast-exit { animation: toast-out 0.2s ease-in forwards; }
+
+/* Skeleton loading animation */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, rgb(38 38 38) 25%, rgb(64 64 64) 50%, rgb(38 38 38) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* AI typing indicator */
+@keyframes blink {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+.ai-typing span:nth-child(1) { animation: blink 1.4s 0s infinite; }
+.ai-typing span:nth-child(2) { animation: blink 1.4s 0.2s infinite; }
+.ai-typing span:nth-child(3) { animation: blink 1.4s 0.4s infinite; }
+
+/* Scrollbar styling for dark theme */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(64 64 64); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(82 82 82); }

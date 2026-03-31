@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background-color: rgb(10 10 10);
+  color: rgb(229 229 229);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at top, rgba(79, 70, 229, 0.16), transparent 28%),
+    linear-gradient(180deg, rgb(10 10 10), rgb(23 23 23));
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(64 64 64);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(82 82 82);
+}
+
+.ProseMirror {
+  min-height: 420px;
+  white-space: pre-wrap;
+}
+
+.ProseMirror:focus {
+  outline: none;
+}
+
+.ProseMirror p {
+  margin: 0 0 1em;
+}
+
+.ProseMirror ul,
+.ProseMirror ol {
+  margin: 0 0 1em;
+  padding-left: 1.5em;
+}
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3 {
+  margin: 1.25em 0 0.75em;
+  font-weight: 600;
+  color: rgb(245 245 245);
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: rgb(115 115 115);
+  pointer-events: none;
+}
