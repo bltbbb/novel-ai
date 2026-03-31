@@ -195,24 +195,26 @@ function remapForeshadows(foreshadows: Foreshadow[], projectId: Id, chapterIdMap
 function remapSnapshots(snapshots: Snapshot[], projectId: Id, chapterIdMap: Map<Id, Id>, chapters: Chapter[]) {
   const chapterTitleMap = new Map(chapters.map((chapter) => [chapter.id, chapter.title] as const));
 
-  return snapshots
-    .map((snapshot) => {
-      const nextChapterId = chapterIdMap.get(snapshot.chapterId);
+  const remappedSnapshots: Snapshot[] = [];
 
-      if (!nextChapterId) {
-        return null;
-      }
+  for (const snapshot of snapshots) {
+    const nextChapterId = chapterIdMap.get(snapshot.chapterId);
 
-      return {
-        ...snapshot,
-        id: createId(),
-        projectId,
-        chapterId: nextChapterId,
-        chapterTitle: chapterTitleMap.get(nextChapterId) ?? snapshot.chapterTitle,
-        note: snapshot.note?.trim() || '',
-      };
-    })
-    .filter((snapshot): snapshot is Snapshot => snapshot !== null);
+    if (!nextChapterId) {
+      continue;
+    }
+
+    remappedSnapshots.push({
+      ...snapshot,
+      id: createId(),
+      projectId,
+      chapterId: nextChapterId,
+      chapterTitle: chapterTitleMap.get(nextChapterId) ?? snapshot.chapterTitle,
+      note: snapshot.note?.trim() || '',
+    });
+  }
+
+  return remappedSnapshots;
 }
 
 function remapIdeaCards(ideaCards: IdeaCard[], projectId: Id, chapterIdMap: Map<Id, Id>) {

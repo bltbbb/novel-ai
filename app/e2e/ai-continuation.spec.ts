@@ -32,7 +32,7 @@ test('验证 AI 续写最小闭环', async ({ page }) => {
 
   await page.getByRole('button', { name: 'AI 续写' }).click();
 
-  await expect(page.getByRole('button', { name: 'AI 续写中' })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole('button', { name: '续写中...' })).toBeVisible({ timeout: 15000 });
   await expect
     .poll(async () => ((await editor.innerText()).trim().length), { timeout: 60000 })
     .toBeGreaterThan(beforeLength);

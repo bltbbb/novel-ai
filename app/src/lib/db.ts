@@ -104,7 +104,7 @@ export async function recalculateProjectWordCount(projectId: Id) {
 }
 
 export async function deleteProjectCascade(projectId: Id) {
-  await db.transaction('rw', db.projects, db.chapters, db.entities, db.foreshadows, db.snapshots, db.ideaCards, async () => {
+  await db.transaction('rw', [db.projects, db.chapters, db.entities, db.foreshadows, db.snapshots, db.ideaCards], async () => {
     await db.projects.delete(projectId);
     await db.chapters.where('projectId').equals(projectId).delete();
     await db.entities.where('projectId').equals(projectId).delete();

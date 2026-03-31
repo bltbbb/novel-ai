@@ -10,7 +10,7 @@ AI Novel Studio 是一个面向长篇小说创作的本地优先写作工作台�
 - 上下文预览与 AI 监控面板
 - Markdown 导出
 - AI 服务离线降级
-- 基础 e2e 验证脚本
+- 多条 e2e 回归验证脚本
 
 ## 仓库结构
 
@@ -57,18 +57,26 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 ## e2e 验证
 
-前端目录内提供了两条最小回归：
+前端目录内当前提供以下回归脚本：
 
 ```powershell
 cd app
-npx playwright test e2e/ai-continuation.spec.ts --reporter=line --workers=1
-npx playwright test e2e/export.spec.ts --reporter=line --workers=1
+npm run test:e2e:ai
+npm run test:e2e:export
+npm run test:e2e:records
+npm run test:e2e:archive
+npm run test:e2e:graph
+npm run test:e2e:inspector
 ```
 
 它们分别验证：
 
 - 点击 AI 续写后正文会变长
 - 章节导出和整书导出会生成正确的 Markdown 文件
+- 快照、灵感卡片与伏笔最小闭环
+- 项目归档导入导出
+- 模板创建与关系图谱可见
+- Inspector 中的历史检索与一致性提示
 
 ## 原型目录说明
 

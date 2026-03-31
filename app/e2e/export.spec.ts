@@ -12,6 +12,7 @@ test('验证 Markdown 导出', async ({ page }) => {
     await projectCard.click();
   }
 
+  await page.getByRole('button', { name: '导出' }).click();
   const chapterDownload = page.waitForEvent('download');
   await page.getByRole('button', { name: '导出章节' }).click();
   const chapterFile = await chapterDownload;
@@ -27,6 +28,7 @@ test('验证 Markdown 导出', async ({ page }) => {
   expect(chapterContent).toContain('# 第1章：废墟苏醒');
   expect(chapterContent).toContain('灵气枯竭之后，最后一名修仙者在废墟里醒来。');
 
+  await page.getByRole('button', { name: '导出' }).click();
   const projectDownload = page.waitForEvent('download');
   await page.getByRole('button', { name: '导出整书' }).click();
   const projectFile = await projectDownload;
