@@ -161,6 +161,10 @@ export const useEditorStore = create<EditorStoreState>((set, get) => ({
 
     await db.chapters.delete(chapterId);
     await db.snapshots.where('chapterId').equals(chapterId).delete();
+    await db.chapterOutlines.where('chapterId').equals(chapterId).delete();
+    await db.chapterSummaries.where('chapterId').equals(chapterId).delete();
+    await db.stateChanges.where('chapterId').equals(chapterId).delete();
+    await db.generationQueue.where('chapterId').equals(chapterId).delete();
     await recalculateProjectWordCount(target.projectId);
     await useProjectStore.getState().loadProjects();
 

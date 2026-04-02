@@ -3,12 +3,28 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "seed:calibration": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/seed-calibration-sample.ts",
+    "calibration:round2": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round2.ts",
+    "calibration:round43a-context": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round43a-context.ts",
+    "calibration:round43a-expansion": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round43a-expansion.ts",
+    "calibration:round43b-expansion": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round43b-expansion.ts",
+    "calibration:round43b-gate": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round43b-gate.ts",
+    "calibration:round43b-preview": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round43b-preview.ts",
+    "seed:43b-relationship": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/seed-relationship-query-2hop-sample.ts",
+    "seed:43b-relationship-negative": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/seed-relationship-query-2hop-negative-samples.ts",
+    "sqlite-vec:poc": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-sqlite-vec-poc.ts",
+    "sqlite-vec:write-smoke": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-sqlite-vec-write-sync-smoke.ts",
+    "calibration:round45-backend-compare": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round45-vector-backend-compare.ts"
   },
   "dependencies": {
+    "@dao-xyz/sqlite3-vec": "^0.0.19",
     "@fastify/cors": "^10.0.2",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",

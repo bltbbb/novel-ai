@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Download, FileText, History, Plus, Save, Settings2, Sparkles, Target, Trash2, WifiOff } from 'lucide-react';
+import { ChevronDown, Download, FileText, FlaskConical, History, Plus, Save, Settings2, Sparkles, Target, Trash2, WifiOff } from 'lucide-react';
 import { streamChat } from '@/lib/ai-client';
 import { retrieveChapterSearchResults } from '@/lib/chapter-search';
 import { assembleContinueWritingContext } from '@/lib/context-assembler';
@@ -41,6 +41,11 @@ const ContextInspector = lazy(async () => {
 const CreativeRecordsDialog = lazy(async () => {
   const module = await import('@/components/CreativeRecordsDialog');
   return { default: module.CreativeRecordsDialog };
+});
+
+const GenerationLabDialog = lazy(async () => {
+  const module = await import('@/components/GenerationLabDialog');
+  return { default: module.GenerationLabDialog };
 });
 
 function EditorChunkFallback({ label }: { label: string }) {
@@ -99,6 +104,7 @@ export function EditorWorkspace({
   const [isAiWriting, setIsAiWriting] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showCreativeRecords, setShowCreativeRecords] = useState(false);
+  const [showGenerationLab, setShowGenerationLab] = useState(false);
   const [lastAiGeneratedText, setLastAiGeneratedText] = useState('');
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const previousAvailabilityRef = useRef(serverAvailability);
@@ -604,6 +610,15 @@ export function EditorWorkspace({
               <History size={14} />
               记录
             </button>
+            <button
+              type="button"
+              onClick={() => setShowGenerationLab(true)}
+              disabled={!currentChapter || !isAiAvailable}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <FlaskConical size={14} />
+              生成实验
+            </button>
             <div ref={exportMenuRef} className="relative hidden xl:block">
               <button
                 type="button"
@@ -763,7 +778,7 @@ export function EditorWorkspace({
             )}
             <p className="text-xs leading-6 text-neutral-500">
               {isAiAvailable
-                ? '输入 / 可呼出 AI 指令菜单；创作记录里可以查看快照并保存灵感卡片。'
+                ? '输入 / 可呼出 AI 指令菜单；创作记录里可以查看快照，生成实验里可以测试 Plan → Write → Extract。'
                 : '当前仅保留本地写作能力，恢复服务连接后 AI 续写会自动可用。'}
             </p>
           </div>
@@ -794,6 +809,26 @@ export function EditorWorkspace({
           onRestoreSnapshot={handleRestoreSnapshot}
           onCreateManualIdeaCard={handleCreateManualIdeaCard}
           onCreateAiIdeaCard={handleCreateAiIdeaCard}
+        />
+      </Suspense>
+
+      <Suspense fallback={null}>
+        <GenerationLabDialog
+          open={showGenerationLab}
+          onClose={() => setShowGenerationLab(false)}
+          projectId={projectId}
+          projectTitle={projectTitle}
+          projectDescription={projectDescription}
+          chapter={currentChapter}
+          chapters={chapters}
+          content={draftDocument}
+          settings={settings}
+          entities={entities}
+          onApplyGeneratedContent={(nextDocument) => {
+            setDraftDocument(nextDocument);
+            markDirty();
+          }}
+          onCreateSnapshot={handleCreateManualSnapshot}
         />
       </Suspense>
     </div>

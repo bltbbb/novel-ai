@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { BookOpen, LibraryBig, LoaderCircle, Settings2, Share2, Sparkles, Target } from 'lucide-react';
+import { BookOpen, FlaskConical, LibraryBig, LoaderCircle, Settings2, Share2, Sparkles, Target } from 'lucide-react';
 import { useToast } from '@/components/Toast';
 import { seedDemoData } from '@/lib/db';
 import {
@@ -11,10 +11,11 @@ import {
   useSettingsStore,
 } from '@/stores';
 
-type AppView = 'editor' | 'lore' | 'foreshadow' | 'graph';
+type AppView = 'editor' | 'lore' | 'foreshadow' | 'graph' | 'generation';
 
 const navItems = [
   { key: 'editor' as const, label: '编辑器', icon: BookOpen },
+  { key: 'generation' as const, label: '生成控制台', icon: FlaskConical },
   { key: 'lore' as const, label: '设定库', icon: LibraryBig },
   { key: 'foreshadow' as const, label: '伏笔追踪', icon: Target },
   { key: 'graph' as const, label: '关系图谱', icon: Share2 },
@@ -43,6 +44,11 @@ const ForeshadowWorkspace = lazy(async () => {
 const GraphWorkspace = lazy(async () => {
   const module = await import('@/components/GraphWorkspace');
   return { default: module.GraphWorkspace };
+});
+
+const GenerationWorkspace = lazy(async () => {
+  const module = await import('@/components/GenerationWorkspace');
+  return { default: module.GenerationWorkspace };
 });
 
 const SettingsDialog = lazy(async () => {
@@ -300,6 +306,13 @@ export function AppShell() {
                 projectDescription={activeProject.description}
                 onOpenSettings={() => setShowSettings(true)}
                 onOpenForeshadow={() => setActiveView('foreshadow')}
+              />
+            ) : activeView === 'generation' ? (
+              <GenerationWorkspace
+                projectId={activeProject.id}
+                projectTitle={activeProject.title}
+                projectDescription={activeProject.description}
+                onOpenChapter={(chapterId) => openEditor(chapterId)}
               />
             ) : activeView === 'lore' ? (
               <LoreWorkspace projectId={activeProject.id} />

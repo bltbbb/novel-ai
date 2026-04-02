@@ -61,6 +61,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 ```powershell
 cd server
+nvm use 22.22.2
 npm install
 npm run dev
 ```
@@ -78,7 +79,13 @@ PORT=3001
 HOST=0.0.0.0
 CORS_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
 OPENAI_MODEL=gpt-5.4-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 ```
+
+### 运行时说明
+
+- 后端当前要求 `Node.js 22.22+`
+- 原因是服务端已使用 `node:sqlite`，低于 22 的环境会卡在运行态验证
 
 ### 前端默认设置
 
@@ -124,6 +131,7 @@ npm run test:e2e:export
 
 - `app/npm run build`
 - `server/npm run build`
+- `Node.js 22.22.2` 下 `server` 可真实启动，并通过 `GET /api/health`
 - `npm run test:e2e:ai`
 - `npm run test:e2e:export`
 

@@ -33,6 +33,75 @@
 - 原型中的数据仍然是硬编码 mock。
 - 当前最关键的剩余工作不再是 MVP 打通，而是进入 Post-MVP 能力扩展，优先补齐伏笔、快照、导入导出与长记忆等能力。
 
+### 2.4 当前执行补充（与路线图同步）
+
+- 服务端生成链路已从早期的单次 AI 调用推进到 `Plan → Write → Style → Review → Polish → Extract` 六步流水线。
+- 生成控制台已支持暂停/恢复、优先级、批量人工确认、检查点式进度持久化与服务重启后任务恢复。
+- `Review` 已接入 3 个 checker、严重级别、自动打回重写与重写反馈回灌。
+- `Review` 已补 checker 分数门槛，可按一致性/连贯性/追读力最低分触发自动重写。
+- `Polish` 已作为独立阶段承担终稿润色与 Anti-AI 终检。
+- 风格适配层最小版已接入服务端生成链路，可用全局文风 Prompt 在 `Write` 后做一次风格转译。
+- 本地生成实验室也已同步接入 `Style / Review / Polish`，单章实验流现为 `Plan → Write → Style → Review → Polish → Extract`。
+- 生成链路的上下文组装已升级到第一版：会把最近章节尾部、最近摘要、激活伏笔与世界状态快照一起打包传入服务端生成请求。
+- 服务端任务流已补第一版 `Context Assembler`：当前会基于 SQLite 组装最近摘要、最近原文尾部、卷级索引、实体与关系记忆，并保留前端 `contextBundle` 作为补充兜底。
+- 服务端持久层已切到 SQLite 第一版，当前已承接生成任务与运行时门控配置，并兼容旧 JSON 自动迁移。
+- 服务端 SQLite 已补第一批结构化表，当前任务执行时会自动写入章节摘要、状态变更与审查指标。
+- 服务端 SQLite 已补第二批知识表，当前会从 Extract 结果自动沉淀实体、chapter index 与第二版关系数据。
+- 前端设定库的实体快照已开始在入队时同步到服务端 SQLite，实体类型、描述、字段、标签与 pinned 状态不会再长期缺失。
+- 服务端已补只读调试接口，当前可直接按项目查看 SQLite 中的 overview、chapter records、entities 与 relationships。
+- 生成控制台已同步接入只读调试面板，便于直接在前端核对 SQLite 结构化数据写入是否符合预期。
+- 调试面板已支持按章节查看更完整的 SQLite 明细，当前可核对 beats、不可变事实、状态变更与关系抽取结果。
+- 关系调试结果已补命中来源与证据展示，当前能直接区分是来自 `state_change` 还是正文/摘要句子模式。
+- 调试接口与调试面板已支持服务端筛选，当前可按章节、实体、关系关键词快速缩小排查范围。
+- 调试面板已补章节级 Context 预览，当前可直接查看服务端实际组装的分层记忆与最终 `contextBundle`。
+- 本地实验室与直接 `POST /api/ai/*` 端点已统一接入服务端 Context 组装入口，当前服务端任务流与单章实验流不再分叉。
+- 长程检索底座已起步：SQLite 已补 `generation_memory_chunks` 片段表与只读调试入口，当前可以开始承接章节级 parent chunk / 场景级 child chunk 持久化。
+- 服务端 `Extract` 后已自动落 memory chunks，当前调试面板可以直接查看 parent / child chunk 的 token 估算、实体、地点与正文片段。
+- 检索层已抽离为独立 retrieval service，当前先走 SQL 过滤 + 关键词粗排，调试面板可直接查看章节级检索候选与分项得分。
+- embedding 兼容层已落地第一版：SQLite 已补向量缓存表，若配置 `OPENAI_EMBEDDING_MODEL` 则检索会在关键词粗排上叠加余弦相似度；失败时自动退回纯关键词模式。
+- `Context Assembler` 已正式切到 retrieval service，当前服务端上下文层只负责构造 query 与拼装 section，不再内置相关章节启发式判分。
+- 阶段 4.5 已补向量后端抽象与显式回退状态，当前 `json_cache` 与 `sqlite_vec` 两条向量后端路径都已打通最小验证。
+- 阶段 4.5 已补 embedding 资产治理口径，当前可区分 `created / reused / rebuilt / skipped`。
+- 阶段 4.5 已补独立向量候选召回通道，当前允许 `lexical_only / vector_only / hybrid` 三类命中。
+- 阶段 4.5 已补 `metadata filter / hybrid recall / dedupe-rerank / selection` 四段调试解释，现有检索调试结果可直接看到 `vectorSearch / pipeline / rerank` 字段。
+- 阶段 5 校准闭环已补脚本与记录模板，并已完成 `04A / 04B / 04C` 首轮人工执行回填：当前已验证 `embedding` 关闭回退、`reused / rebuilt` 资产口径、`vector-only rescue` 的跨样本稳定性，以及 `sqlite_vec` 相比 `json_cache` 在当前样本口径下未见明显退化；默认未主动执行本地构建或测试。
+- 阶段 4.3b 已补只读二度关系查询 PoC，当前已验证 `graph_2hop / degraded(no_two_hop_relationship) / degraded(high_noise)` 三种结果模式。
+- 阶段 4.3b 已补只读二度关系查询 PoC，当前已验证 `graph_2hop / degraded(no_two_hop_relationship) / degraded(high_noise)` 三种结果模式。
+- 长期记忆已补第一刀持久层：SQLite 已新增 `generation_volume_recaps` 卷级总结表，当前会在章节 `Extract` 成功后自动重建当前卷 recap。
+- `long_term_memory` 已优先读取持久化卷级总结，不再只依赖运行时按章节临时拼接；缺 recap 时才回退旧聚合逻辑。
+- 工作记忆已补服务端化第一刀：SQLite 已新增 `generation_foreshadows`，当前会在实验室直连请求与服务端任务入队时同步前端伏笔快照。
+- `Context Assembler` 已优先读取服务端伏笔快照生成工作记忆中的“激活伏笔”，并保留前端 `contextBundle` 文本解析作为兼容兜底。
+- 伏笔生命周期已补最小派生层：当前会基于服务端伏笔状态与来源章节距离，推导 `激活 / 休眠 / 归档`，工作记忆只注入激活伏笔。
+- 检索层已补休眠伏笔按需召回：当前会基于 query phrases 与 focus entities 对休眠伏笔做轻量匹配，并将命中结果注入 `retrieval_memory`，避免其完全掉出上下文。
+- 检索层已补统一轻量召回排序：当前会将“休眠伏笔召回”和“卷级总结召回”合并后按同一套轻量分数排序，再注入 `retrieval_memory`。
+- 调试面板已补轻量召回明细：当前可直接查看每条轻量召回的来源类型、分数与最终注入文本，不再只能从 `retrieval_memory` 文本块反推排序依据。
+- 调试面板已补轻量召回分项：当前可直接查看每条轻量召回的词命中、实体命中与时序加权分项，便于校对排序依据。
+- 轻量召回阈值已进入运行时配置：当前 `minScore / topK` 已纳入服务端门控配置、设置面板与生成控制台摘要，不再固定写死在 `generation-context.ts`。
+- 已补 `backfill-memory-chunks` 维护入口，当前可以按项目为历史章节批量补齐 memory chunks，缺正文时会退化为仅补 parent chunk。
+- 已补 `backfill-memory-embeddings` 维护入口；若未接真实 embedding 服务，可显式使用 `local-hash` 做离线回填与检索 smoke。
+- 已补 `backfill-volume-recaps` 维护入口与调试面板展示，当前可按项目或当前调试章节所在卷回填并直接核对卷级总结内容。
+- 生成控制台的 SQLite 调试面板已补前端维护入口，当前可直接按项目或按当前调试章节触发 `memory chunks / embeddings` 回填，并查看结果摘要。
+- 前端维护入口已接回填后自刷新，当前执行成功后会同步刷新 SQLite 概览、章节明细、检索候选与 Context 预览。
+- `chapter_index` 已补章节序号、卷名和上一章引用等稳定元数据，便于后续时间线/卷级检索升级。
+- 正向偏离：后端运行时门控配置已提前落地，并已暴露到前端系统设置，可直接调整自动重写阈值与 Polish 放行策略。
+- 正向偏离：生成控制台已可直接查看当前生效的门控配置摘要，便于将任务状态与门控策略联动观察。
+- 正向偏离：项目级门控覆盖已提前落地，可按项目覆盖全局门控，并在任务入队时固化为该任务的执行策略。
+- 生成控制台已支持更细粒度人工回退，可把任务直接回退到 `Review` 或 `Polish` 阶段后重新入队。
+- 生成控制台已支持最小版大纲/节拍编辑器，保存后的本地契约会在加入服务端队列时固化为任务输入。
+- 阶段 4.3a 已起步并完成最小验证：服务端当前可基于 SQLite `entities / relationships / chapter_index` 执行一度结构化关系查询（仅历史章）。
+- 已新增只读调试入口 `/api/runtime/generation-debug/relationship-query`，并验证 `graph_1hop` 与 `degraded` 两种模式均可用。
+- 查询路径已验证：指定实体查询与上一章实体回退均可工作；指定实体在历史边不足时会降级到 `degraded`。
+- 当前建议的后续接入策略：`graph_1hop` 优先，`degraded` 回退（仍处于 4.3a，不扩展到 4.3b）。
+- 阶段 4.3a 最小接入生成链路已验证通过：结构化关系结果已按最小范围接入 Context 的 `relationships` 层，现有 context/debug 输出可直接看到命中模式与注入位置。
+- 相对空的 `relationships` 基线，4.3a 扩样结果显示该层信号增量存在稳定分层（`graph_1hop` / `degraded`），不是个别样本现象。
+- 当前样本分布下，`graph_1hop` 主要覆盖中后期或关系较明确章节，`degraded` 主要出现在早期或关系稀薄章节。
+- 当前样本边界复核：`worldStateRequiredCount = 0`，强关系命中不依赖额外补 `worldState`；阶段口径仍为“可用起步版”，不是“所有章节稳定覆盖”的最终形态。
+- 当前结论仅说明 Context `relationships` 层信号价值增加，不等价于整体生成质量已提升；证据仍不足以直接进入 4.3b。
+- 阶段 4.4 最小冷归档已起步：当前以“进入新卷”作为阶段切换代理，从 `generation_entities.last_seen_volume_title` 派生旧卷实体冷归档集合。
+- 冷归档当前仅作用于 `memory_chunk`：当候选 chunk 的实体引用全部命中冷归档集合，且不命中当前 `focus/query` 时，会在 retrieval 预过滤阶段被排除。
+- 4.4 最小收益验证已通过：旧卷噪音样本 `第10章：雾盐旧账` 会被实际过滤，跨阶段关键线索样本 `第15章：钥印底纹` 会被实际保留。
+- 当前 4.4 结论口径保持克制：最小冷归档已证明“旧卷噪音可压制、关键线索可保留”，但当前仅覆盖 `memory_chunk`，不外推到整条检索主链。
+
 ### 2.3 结论
 
 项目目前处于：
@@ -41,7 +110,7 @@
 
 因此接下来的开发顺序必须是：
 
-> **保留 `P1-P4` 作为长期能力路线图，再按 `I1-I6` 的真实执行顺序逐步推进后续迭代。**
+> **保留 `P1-P4` 作为长期能力路线图；当前真实开发主线已切到 `ROADMAP 4.5`，并进入“向量检索基础设施静态实现完成 → 阶段 5 动态校准/记录回填”的口径。**
 
 ---
 
@@ -76,7 +145,7 @@ novel-ai/
 - 编辑器：`TipTap`
 - 后端：`Node.js + Fastify`
 - AI 优先接入：`OpenAI`
-- 长记忆检索：`pgvector + PostgreSQL`
+- 长记忆检索：当前以 `json_cache -> sqlite-vec` 为主线演进，`pgvector + PostgreSQL` 仅作为备选/远期方案
 
 ### 3.3 架构原则
 
@@ -776,16 +845,16 @@ TipTap 接入后，选择区、Slash Menu、流式插入、自动保存之间容
 
 如果只看“下一阶段该做什么”，优先级如下：
 
-1. `I1` 伏笔系统 MVP（`P1`）
-2. `I2` 快照与灵感卡片（`P1`）
-3. `I3` JSON 项目导入导出（横切能力，服务 `P1-P3`）
-4. `I4` RAG / 长记忆基础闭环（`P2`）
-5. `I5` 设定一致性增强（`P3`）
-6. `I6` 高级产品化能力（`P4`）
+1. 轻量召回参数标定与执行记录补齐
+2. `sqlite-vec` 是否值得进入验证
+3. 4.3a / 4.4 的后续扩样复核
+4. 更完整的一致性增强与时间线能力
+5. 多 Provider / 多模型路由与导出能力完善
+6. 轻量召回参数的后续扩样复核
 
 一句话总结：
 
-> **先补创作管理与数据安全，再逐步升级长记忆、一致性和高级产品化能力。**
+> **先完成 `4.5` 的动态校准、记录回填与口径收敛，再决定是否继续推进索引层升级或其他主线能力。**
 
 ---
 
@@ -795,17 +864,20 @@ TipTap 接入后，选择区、Slash Menu、流式插入、自动保存之间容
 
 ### 建议的第一批落地顺序
 
-1. 先落 `I1`：补 `Foreshadow / ForeshadowStatus`、`foreshadows` 表、对应 Store 与独立工作台入口
-2. 再做 `I2`：补 `Snapshot / IdeaCard`、AI 续写前自动快照与最近快照回退
-3. 接着推进 `I3`：补 `ProjectArchive / schemaVersion`，完成 JSON 项目导入导出
-4. 以上稳定后，再进入 `I4`：补 `POST /api/search` 与最小 RAG 闭环
-5. 最后依次进入 `I5-I6`：做设定一致性增强与更完整的产品化能力
+1. 先补一次本地验证记录，确认统一 retrieval 主链和新增权重配置都已实际生效。
+2. 人工执行阶段 5 脚本，补齐：
+   - `vector-only` 命中
+   - `embedding 关闭回退`
+   - `created / reused / rebuilt / skipped`
+3. 将动态结果回填到 `RETRIEVAL-CALIBRATION-LOG.md`、`HANDOFF.md`、`ROADMAP.md`、`PLAN.md`
+4. 基于动态结果判断是否需要继续验证 `sqlite-vec`
+5. 在 4.5 口径真正收敛前，不回到 `I6` 产品化优先级
 
 执行原则是：
 
 - `P1-P4` 继续保留为长期能力分层，不直接替代真实开发顺序
-- 日常开发与排期统一以 `I1-I6` 为主线
-- 每完成一个 `I*`，先更新“执行记录”，再回填“后续迭代计划”中的状态
+- 日常开发与排期优先跟随最新交接文档中的“当前阶段 / 已知边界 / 建议下一步”
+- 每完成一个近期主线任务，先更新“执行记录”，再同步回填 `ROADMAP / HANDOFF / PLAN`
 
 ---
 
@@ -916,6 +988,70 @@ TipTap 接入后，选择区、Slash Menu、流式插入、自动保存之间容
 - [ ] `I6` 其他产品化能力：DOCX / EPUB 与多 Provider / 多模型路由仍待后续继续推进。
 - [x] `I6` 本地验证：执行 `npm run test:e2e:graph` 通过，模板创建与关系图谱入口可用。
 - [x] 补验证：执行 `app/npm run typecheck`、`app/npm run build`、`server/npm run build` 与 `app/npm run test:e2e` 均通过，当前新增能力已有静态与浏览器级回归覆盖。
+
+### 2026-04-01
+
+- [x] 运行环境收口：已通过 `nvm` 安装并切换到 `Node.js 22.22.2`，当前不再沿用 `20.19.0` 做服务端运行态验证。
+- [x] 服务端运行验证：已确认 `node:sqlite` 在 `Node.js 22.22.2` 下可导入，`server/npm run build` 通过，编译产物可真实启动并通过 `GET /api/health`。
+- [x] 文档收口：`README.md`、`RELEASE.md` 与 `server/package.json` 已补 `Node.js 22+` 运行前提，避免后续继续在不兼容运行时下联调。
+- [x] 历史切片回填：已新增 `POST /api/runtime/generation-maintenance/backfill-memory-chunks`，可按项目为旧章节批量补齐 memory chunks。
+- [x] 历史切片回填验证：已在临时 SQLite 项目上执行 backfill smoke，确认 `processedChapters=1`、`totalChunks=2`，旧章节可补出 parent / child chunk。
+- [x] 历史向量回填：已新增 `POST /api/runtime/generation-maintenance/backfill-memory-embeddings`，可按项目为已有 memory chunks 批量补 embedding。
+- [x] 历史向量回填验证：已使用 `local-hash` 模式在临时 SQLite 项目上执行 backfill smoke，确认 `embeddedChunks=1`、向量缓存表成功落库。
+- [x] 前端维护入口：`GenerationWorkspace` 已补 `backfill-memory-chunks` / `backfill-memory-embeddings` 按钮，支持项目级 / 章节级作用范围、可选 `limit` 与结果摘要展示。
+- [x] 前端联动收口：回填成功后会自动刷新 SQLite 概览、章节明细、检索候选与 Context 预览，避免控制台继续停留旧数据。
+- [x] 前端维护入口自动化验证：已新增 `app/e2e/generation-maintenance.spec.ts`，通过前端拦截后端接口覆盖维护入口渲染、项目级/章节级提交与结果摘要展示。
+- [x] 自动化验证补齐：已执行 `app/npm run build`、`server/npm run build` 与 `app/npm run test:e2e:generation`，当前前端维护入口已有构建级与浏览器级回归覆盖。
+- [x] AI 续写回归去外部依赖：`app/e2e/ai-continuation.spec.ts` 已改为前端拦截 `/api/ai/chat` 与 `/api/search`，避免本地 OpenAI 兼容代理认证失效时拖垮仓库内回归。
+- [x] 全量 e2e 回归：已执行 `app/npm run test:e2e`，当前 7 条 Playwright 用例全部通过。
+- [x] 检索质量收敛：`generation-retrieval.ts` 已补动态 K、低分空返回和同章候选合并，检索层不再无条件堆叠弱相关片段。
+- [x] 检索质量验证：已在临时 SQLite 项目上完成 retrieval smoke，确认强命中保留、同章重复被收敛、弱命中返回空结果。
+- [x] Context 分层补完：服务端上下文已显式拆为 `working_memory / immediate_memory / short_term_memory / long_term_memory / retrieval_memory / physical_engine` 六层。
+- [x] Context 分层验证：已在临时 SQLite 项目上完成 context smoke，确认工作记忆、长期记忆、物理引擎层正常生成，激活伏笔会进入 working memory。
+- [x] 卷级长期记忆落地：已新增 `generation_volume_recaps`、卷级 recap 聚合服务与 `backfill-volume-recaps` 维护入口，历史项目可按项目或按当前章节所属卷回填。
+- [x] 长期记忆接线收口：`Context Assembler` 的 `long_term_memory` 已优先读取持久化卷级总结，生成控制台 SQLite 调试面板已新增卷级总结计数、列表与回填结果展示。
+- [x] 伏笔服务端化第一刀：已新增 `generation_foreshadows` 表，`GenerationLabDialog` 与服务端任务入队请求会同步前端伏笔快照到 SQLite。
+- [x] 工作记忆接线收口：`Context Assembler` 已优先从服务端伏笔快照构建“激活伏笔”，生成控制台 SQLite 调试面板已新增伏笔计数与服务端伏笔列表展示。
+- [x] 伏笔生命周期最小升级：服务端当前会把 `resolved` 归为“归档”，把 `activated / overdue` 归为“激活”，并将久未推进的 `planted` 按来源章节距离派生为“休眠”，工作记忆不再注入这些休眠伏笔。
+- [x] 休眠伏笔召回第一刀：服务端当前会按 query phrases 与 focus entities 对休眠伏笔做轻量匹配，并将命中项注入 `retrieval_memory`；生成控制台 Context 预览已新增休眠伏笔召回计数。
+- [x] 统一轻量召回排序：服务端当前会把休眠伏笔召回与卷级总结召回合并排序后注入 `retrieval_memory`；生成控制台 Context 预览已新增卷总结召回计数。
+- [x] 轻量召回调试明细：生成控制台 Context 预览已新增“轻量召回排序”卡片，可直接查看每条召回项的来源类型、分数和注入文本。
+- [x] 轻量召回分项调试：生成控制台当前会展示每条轻量召回的词命中、实体命中与时序加权分项，并将时序加权纳入总分排序。
+- [x] 轻量召回运行时配置：`GenerationGateConfig` 已新增 `lightweightRecall.minScore / topK`，服务端 Context 已按运行时配置过滤与截断轻量召回，设置面板与生成控制台摘要已同步展示。
+- [x] 轻量召回权重运行时配置：`GenerationGateConfig` 已新增 `lightweightRecall.phraseWeight / entityWeight / recencyWeight`，服务端 Context、设置页、项目级覆盖、任务固化与控制台摘要已同步接通。
+- [x] 轻量召回配置兼容收口：项目归档导入导出、项目门控覆盖归一化与旧任务兜底已补齐，旧配置缺字段时会回退到默认权重。
+- [x] 自动化验证补充：已新增 `app/e2e/settings-gate-config.spec.ts`，并补充 `generation-maintenance.spec.ts` 断言，覆盖运行时配置读取、保存与生成控制台权重摘要展示。
+- [x] 参数标定入口第一版：设置页与项目级覆盖已新增“均衡 / 实体优先 / 近期优先 / 关键词优先”四组轻量召回权重预设，便于后续快速切换基线做调参记录。
+- [x] 参数标定文档起步：新增 `RETRIEVAL-CALIBRATION.md`，记录预设说明、观察指标、样本选择与结论模板，后续真实标定结果统一往该文档回填。
+- [x] 参数标定示范记录：`RETRIEVAL-CALIBRATION.md` 已补首轮示范写法与最小执行清单，后续可直接替换为真实项目样本结论。
+- [x] 参数标定执行文件：新增 `RETRIEVAL-CALIBRATION-LOG.md`，拆出真实执行记录载体，并补“休眠伏笔需跨 20 章以上”这一前置条件说明，避免拿不满足条件的数据做结论。
+- [x] 标定样本准备：前端 `seedDemoData()` 已扩成多章稀疏章序样本，服务端已新增 `npm run seed:calibration`，便于前后端用同一组固定 ID 数据做真实参数标定。
+- [x] 首轮真实标定：已执行 `server/npm run seed:calibration`，并基于 `第13章：旧坊市线索`、`第24章：归炉前夜` 对比 `均衡 / 实体优先` 两组结果；当前仍建议保留 `均衡` 作为默认基线。
+- [x] 检索时间泄漏修复：在首轮标定中发现未来卷总结会误入当前章节结果，已在 `generation-retrieval.ts` 修复未来章节 `recency` 加权与未来卷总结过滤逻辑。
+- [x] 第二轮真实标定：已执行 `server/npm run seed:calibration` 与 `server/npm run calibration:round2`，并基于同一组样本章节对比 `balanced(2/3/1) / entity_first(1/4/1) / entity_aggressive(1/5/1)`。
+- [x] 第二轮暂定结论：在“未来卷总结泄漏已修复”的前提下，当前样本下默认基线继续保持 `均衡`；`entity_first` 与 `entity_aggressive` 仍无足够证据替换默认值。
+- [x] 第二轮风险记录：`entity_aggressive(1/5/1)` 在当前样本中表现出抬高旧 `memory_chunk` 分数的趋势，需作为后续扩样验证风险持续跟踪。
+- [x] 2A+2B 复核执行：在完成 2A 预过滤与 2B 显式 rerank + 去重增强后，已重新执行 `server/npm run build`、`server/npm run seed:calibration`、`server/npm run calibration:round2`。
+- [x] 2B 收益复核（当前样本口径）：当前样本下，显式 rerank + 去重增强尚未带来足够明显的排序变化或默认基线切换证据，默认基线继续保持 `均衡`。
+- [x] 2B 解释性缺口记录：当前调试结果仍缺 `rerankDelta` 可解释性字段，导致 2B 收益判断范围有限；结论仅可定性为“当前样本下的暂定结论”。
+- [x] 标定入口回归验证：已执行 `npx playwright test e2e/settings-gate-config.spec.ts --reporter=line --workers=1`，当前设置页“实体优先”预设切换与保存链路通过。
+- [x] 统一检索主链：休眠伏笔召回与卷级总结召回已正式并入 `generation-retrieval.ts`，`generation-context.ts` 不再单独维护第二套轻量召回排序。
+- [x] 检索调试收口：生成控制台“检索候选”现已展示统一 retrieval 结果，memory chunks、休眠伏笔与卷总结共用同一套服务端输出结构。
+- [x] 统一检索自动化脚本：已新增 `app/e2e/generation-retrieval.spec.ts`，并将 `app/package.json` 中的 `test:e2e:generation` 扩展为覆盖维护入口与统一检索展示。
+- [x] 生成控制台回归验证：已执行 `app/npm run test:e2e:generation`，当前维护入口与统一检索主链展示两条 Playwright 用例均通过。
+- [x] 构建级验证补齐：已执行 `app/npm run build` 与 `server/npm run build`，当前前后端构建均通过；期间修复了 `generation-job-store.ts` 中 `foreshadowSnapshot.status` 的类型归一化问题。
+- [x] 4.3a 一度关系结构化查询起步：已完成最小能力验证，当前可在只读调试接口查询历史一度关系结果。
+- [x] 4.3a 调试入口补齐：已新增 `/api/runtime/generation-debug/relationship-query`，`graph_1hop` 与 `degraded` 两种模式均已验证可用。
+- [x] 4.3a 路径与降级验证：指定实体路径与上一章实体回退路径均可工作；指定实体在历史边不足时会降级，后续接入建议为 `graph_1hop` 优先、`degraded` 回退。
+- [x] 4.3a 最小接入生成链路：结构化关系结果已按最小范围接到 Context `relationships` 层，`graph_1hop` 作为强关系信号，`degraded` 仅作为弱提示回退。
+- [x] 4.3a 扩样收益复核：相对空的 `relationships` 基线，扩样结果显示层内信号增量存在稳定分层（`graph_1hop` / `degraded`），不是个别样本现象。
+- [x] 4.3a 分层分布观察：当前样本下，`graph_1hop` 主要覆盖中后期或关系较明确章节，`degraded` 主要出现在早期或关系稀薄章节。
+- [x] 4.3a 边界复核（当前样本）：`worldStateRequiredCount = 0`，强关系命中不依赖额外补 `worldState`；当前口径仍为“可用起步版”，不宣称全章节稳定覆盖，也不作为进入 4.3b 的充分条件。
+- [x] 4.3a 结论口径收敛：上述验证不等价于整体生成质量已提升，当前仍不足以直接进入 4.3b。
+- [x] 4.4 最小冷归档起步：已新增保守版冷归档判定服务，并在 retrieval 的 memory chunk 预过滤阶段接入。
+- [x] 4.4 噪音样本验证：在正确的 8 章服务端标定样本下，旧卷噪音样本 `第10章：雾盐旧账` 会被实际过滤，跨阶段关键线索样本 `第15章：钥印底纹` 会被实际保留。
+- [x] 4.4 当前结论：最小冷归档已证明“旧卷噪音可压制、关键线索可保留”，但当前仅覆盖 `memory_chunk`，不把该结论外推到整条检索主链。
+- [x] 标定脚本稳定性修复：为避免 `tsx` 缓存导致旧样本残留，`server/package.json` 中的 calibration 脚本已统一禁用缓存。
 
 ---
 

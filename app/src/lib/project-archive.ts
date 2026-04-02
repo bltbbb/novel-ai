@@ -1,4 +1,5 @@
 import { countDocumentCharacters } from '@/lib/editor-content';
+import { DEFAULT_GENERATION_GATE_CONFIG, normalizeLightweightRecallConfig } from '@/lib/generation-gate-defaults';
 import { db } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
 import type {
@@ -8,6 +9,7 @@ import type {
   Id,
   LoreEntity,
   Project,
+  ProjectGenerationGateOverride,
   ProjectArchive,
   Snapshot,
 } from '@/types';
@@ -124,6 +126,24 @@ function remapProject(project: Project, chapters: Chapter[]) {
   const now = createTimestamp();
   const projectId = createId();
   const wordCount = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0);
+  const generationGateOverride =
+    project.generationGateOverride &&
+    typeof project.generationGateOverride.reviewRewriteMinSeverity === 'string' &&
+    typeof project.generationGateOverride.reviewMaxRewriteCount === 'number' &&
+    typeof project.generationGateOverride.reviewScoreThresholds === 'object' &&
+    typeof project.generationGateOverride.polishFailBlockReady === 'boolean'
+      ? ({
+          reviewRewriteMinSeverity: project.generationGateOverride.reviewRewriteMinSeverity,
+          reviewMaxRewriteCount: Math.max(0, Math.trunc(project.generationGateOverride.reviewMaxRewriteCount)),
+          reviewScoreThresholds: {
+            consistency: Math.max(0, Math.min(100, Math.trunc(project.generationGateOverride.reviewScoreThresholds?.consistency ?? DEFAULT_GENERATION_GATE_CONFIG.reviewScoreThresholds.consistency))),
+            continuity: Math.max(0, Math.min(100, Math.trunc(project.generationGateOverride.reviewScoreThresholds?.continuity ?? DEFAULT_GENERATION_GATE_CONFIG.reviewScoreThresholds.continuity))),
+            reader_pull: Math.max(0, Math.min(100, Math.trunc(project.generationGateOverride.reviewScoreThresholds?.reader_pull ?? DEFAULT_GENERATION_GATE_CONFIG.reviewScoreThresholds.reader_pull))),
+          },
+          polishFailBlockReady: project.generationGateOverride.polishFailBlockReady,
+          lightweightRecall: normalizeLightweightRecallConfig(project.generationGateOverride.lightweightRecall),
+        } satisfies ProjectGenerationGateOverride)
+      : null;
 
   const nextProject: Project = {
     ...project,
@@ -131,6 +151,7 @@ function remapProject(project: Project, chapters: Chapter[]) {
     title: project.title.trim() || '未命名项目',
     description: project.description?.trim() || '',
     genre: [...project.genre],
+    generationGateOverride,
     wordCount,
     updatedAt: now,
   };

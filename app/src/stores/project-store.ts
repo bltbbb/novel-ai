@@ -1,9 +1,19 @@
 import { create } from 'zustand';
 import { countDocumentCharacters, createParagraphDocument } from '@/lib/editor-content';
+import { DEFAULT_GENERATION_GATE_CONFIG, normalizeLightweightRecallConfig } from '@/lib/generation-gate-defaults';
 import { db, deleteProjectCascade } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
 import { buildProjectArchive, importProjectArchive as importArchiveToDb } from '@/lib/project-archive';
-import type { Chapter, Id, LoreEntity, LoreEntityFields, LoreEntityType, Project, ProjectArchive } from '@/types';
+import type {
+  Chapter,
+  Id,
+  LoreEntity,
+  LoreEntityFields,
+  LoreEntityType,
+  Project,
+  ProjectArchive,
+  ProjectGenerationGateOverride,
+} from '@/types';
 
 interface CreateProjectInput {
   title?: string;
@@ -27,6 +37,7 @@ interface UpdateProjectInput {
   title?: string;
   description?: string;
   genre?: string[];
+  generationGateOverride?: ProjectGenerationGateOverride | null;
 }
 
 interface ProjectStoreState {
@@ -46,13 +57,40 @@ function sortProjects(projects: Project[]) {
   return [...projects].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+function normalizeProjectGateOverride(
+  value: ProjectGenerationGateOverride | null | undefined,
+): ProjectGenerationGateOverride | null {
+  if (!value) {
+    return null;
+  }
+
+  return {
+    reviewRewriteMinSeverity: value.reviewRewriteMinSeverity,
+    reviewMaxRewriteCount: Math.max(0, Math.trunc(value.reviewMaxRewriteCount)),
+    reviewScoreThresholds: {
+      consistency: Math.max(0, Math.min(100, Math.trunc(value.reviewScoreThresholds?.consistency ?? DEFAULT_GENERATION_GATE_CONFIG.reviewScoreThresholds.consistency))),
+      continuity: Math.max(0, Math.min(100, Math.trunc(value.reviewScoreThresholds?.continuity ?? DEFAULT_GENERATION_GATE_CONFIG.reviewScoreThresholds.continuity))),
+      reader_pull: Math.max(0, Math.min(100, Math.trunc(value.reviewScoreThresholds?.reader_pull ?? DEFAULT_GENERATION_GATE_CONFIG.reviewScoreThresholds.reader_pull))),
+    },
+    polishFailBlockReady: value.polishFailBlockReady,
+    lightweightRecall: normalizeLightweightRecallConfig(value.lightweightRecall),
+  };
+}
+
+function normalizeProject(project: Project): Project {
+  return {
+    ...project,
+    generationGateOverride: normalizeProjectGateOverride(project.generationGateOverride),
+  };
+}
+
 export const useProjectStore = create<ProjectStoreState>((set, get) => ({
   projects: [],
   activeProjectId: null,
   isLoaded: false,
 
   async loadProjects() {
-    const projects = await db.projects.orderBy('updatedAt').reverse().toArray();
+    const projects = (await db.projects.orderBy('updatedAt').reverse().toArray()).map(normalizeProject);
 
     set((state) => ({
       projects,
@@ -96,6 +134,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       title: input?.title?.trim() || '未命名项目',
       description: input?.description?.trim() || '',
       genre: input?.genre ?? [],
+      generationGateOverride: null,
       wordCount: chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0),
       createdAt: now,
       updatedAt: now,
@@ -135,6 +174,11 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       title: input.title?.trim() || current.title,
       description: input.description?.trim() ?? current.description,
       genre: input.genre ?? current.genre,
+      generationGateOverride: normalizeProjectGateOverride(
+        typeof input.generationGateOverride === 'undefined'
+          ? current.generationGateOverride
+          : input.generationGateOverride,
+      ),
       updatedAt: createTimestamp(),
     };
 
@@ -167,7 +211,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
   async importProjectArchive(archive) {
     const project = await importArchiveToDb(archive);
-    const projects = sortProjects(await db.projects.toArray());
+    const projects = sortProjects((await db.projects.toArray()).map(normalizeProject));
 
     set({
       projects,
@@ -175,7 +219,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       isLoaded: true,
     });
 
-    return project;
+    return normalizeProject(project);
   },
 
   setActiveProject(projectId) {

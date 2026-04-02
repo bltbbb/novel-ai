@@ -1,4 +1,5 @@
 import { richTextToPlainText } from '@/lib/editor-content';
+import { buildWritingRulesPrompt } from '@/lib/prompt-rules';
 import { estimateTextTokens } from '@/lib/token-counter';
 import type {
   AIChatMessage,
@@ -19,6 +20,7 @@ export interface ContextAssemblerInput {
   settings: AppSettings;
   entities: LoreEntity[];
   searchResults?: SearchResult[];
+  writingRules?: string;
   maxReferences?: number;
 }
 
@@ -101,6 +103,7 @@ function buildSearchReference(result: SearchResult): AIContextReference {
 
 function buildSystemPrompt(input: ContextAssemblerInput, references: AIContextReference[]) {
   const sections: string[] = [];
+  const writingRules = input.writingRules?.trim() || buildWritingRulesPrompt();
 
   if (input.settings.stylePrompt.trim()) {
     sections.push(input.settings.stylePrompt.trim());
@@ -108,10 +111,14 @@ function buildSystemPrompt(input: ContextAssemblerInput, references: AIContextRe
 
   sections.push(`你正在辅助长篇小说写作。当前章节标题：${input.chapterTitle || '未命名章节'}。`);
 
+  if (writingRules) {
+    sections.push(writingRules);
+  }
+
   if (references.length > 0) {
     sections.push(
       [
-        '以下上下文由系统自动整理，请优先遵守：',
+        '─── 以下为上下文参考 ───',
         ...references.map((reference, index) => {
           return `${index + 1}. ${reference.label}\n${reference.excerpt || ''}`.trim();
         }),
