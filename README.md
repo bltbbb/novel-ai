@@ -2,15 +2,34 @@
 
 AI Novel Studio 是一个面向长篇小说创作的本地优先写作工作台。
 
-当前仓库已经具备以下能力：
+当前仓库已不再是早期 MVP 写作器，主线已经进入“生成引擎 + 分层记忆 + 可调试检索增强”阶段。
+
+当前已经具备以下能力：
 
 - 项目、章节、设定的本地持久化
 - TipTap 富文本编辑
-- 真实 AI 续写链路
+- `Plan → Write → Style → Review → Polish → Extract` 六步生成链路
+- 服务端 SQLite 持久层，已接入生成任务、结构化产物、记忆切片、向量缓存
+- 分层记忆组装：长期记忆、工作记忆、检索记忆
+- 统一检索主链与调试面板
+- 卷级总结、伏笔快照、轻量召回与结构化关系查询的第一版能力
 - 上下文预览与 AI 监控面板
 - Markdown 导出
 - AI 服务离线降级
 - 多条 e2e 回归验证脚本
+
+## 当前主线
+
+当前仓库的文档与执行口径如下：
+
+- 当前状态与交接结论以 `HANDOFF.md` 为准
+- 当前开发主线以 `ROADMAP.md` 为准
+- `PLAN.md` 保留分层规划与历史背景，不再作为唯一执行进度文档
+
+当前建议的下一步不是继续扩 `4.5`，而是：
+
+- 进入 `4.3b` 二度关系查询的主链接入评估
+- 将 `4.5` 向量检索基础设施转入回归监测
 
 ## 仓库结构
 
@@ -19,7 +38,9 @@ novel-ai/
   app/                    # 正式前端
   server/                 # 正式后端
   原型/ai-novel-studio/   # 历史原型，仅供参考
-  PLAN.md                 # 分层计划与执行记录
+  HANDOFF.md              # 当前交接状态、边界与下一步建议
+  ROADMAP.md              # 当前主线路线图
+  PLAN.md                 # 分层规划与历史执行背景
   RETRIEVAL-CALIBRATION.md # 检索参数标定说明
   RETRIEVAL-CALIBRATION-LOG.md # 检索参数标定执行记录
 ```
@@ -167,10 +188,18 @@ npm run test:e2e:retrieval
 - 它不是当前正式运行入口
 - 当前正式实现以根目录下的 `app/` 和 `server/` 为准
 
-## 计划文档
+## 文档导航
 
-执行进度见 `PLAN.md`。
+- `README.md`：快速了解项目定位、运行方式和常用命令
+- `HANDOFF.md`：查看当前主线状态、已知边界、建议下一步与交接说明
+- `ROADMAP.md`：查看当前阶段的正式开发主线
+- `PLAN.md`：查看分层规划、长期形态和历史背景，不作为唯一进度来源
+- `RETRIEVAL-CALIBRATION.md`：查看检索参数标定说明与执行口径
+- `RETRIEVAL-CALIBRATION-LOG.md`：记录真实标定执行结果
 
-检索参数标定说明见 `RETRIEVAL-CALIBRATION.md`。
+如果是新接手当前仓库，建议阅读顺序：
 
-真实标定执行记录建议写入 `RETRIEVAL-CALIBRATION-LOG.md`。
+1. `HANDOFF.md`
+2. `ROADMAP.md`
+3. `README.md`
+4. `PLAN.md`
