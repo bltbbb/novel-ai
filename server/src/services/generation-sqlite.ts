@@ -51,6 +51,7 @@ function initializeSchema(db: DatabaseSync) {
       generated_text TEXT NOT NULL,
       style_json TEXT,
       review_json TEXT,
+      language_qa_json TEXT,
       polish_json TEXT,
       summary_json TEXT,
       state_changes_json TEXT NOT NULL,
@@ -120,6 +121,21 @@ function initializeSchema(db: DatabaseSync) {
 
     CREATE INDEX IF NOT EXISTS idx_generation_review_metrics_project
       ON generation_review_metrics(project_id);
+
+    CREATE TABLE IF NOT EXISTS generation_language_qa_metrics (
+      project_id TEXT NOT NULL,
+      chapter_id TEXT NOT NULL,
+      chapter_title TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      issues_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, chapter_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_generation_language_qa_metrics_project
+      ON generation_language_qa_metrics(project_id);
 
     CREATE TABLE IF NOT EXISTS generation_entities (
       project_id TEXT NOT NULL,
@@ -281,6 +297,7 @@ function initializeSchema(db: DatabaseSync) {
   ensureTableColumn(db, 'generation_relationships', 'source_kind', "TEXT NOT NULL DEFAULT 'unknown'");
   ensureTableColumn(db, 'generation_relationships', 'evidence', "TEXT NOT NULL DEFAULT ''");
   ensureTableColumn(db, 'generation_memory_embeddings', 'backend_kind', "TEXT NOT NULL DEFAULT 'json_cache'");
+  ensureTableColumn(db, 'generation_jobs', 'language_qa_json', 'TEXT');
 }
 
 export function getGenerationDatabase(env: ServerEnv) {

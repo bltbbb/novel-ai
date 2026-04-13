@@ -1,5 +1,6 @@
 import { richTextToPlainText } from '@/lib/editor-content';
 import { buildWritingRulesPrompt } from '@/lib/prompt-rules';
+import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { estimateTextTokens } from '@/lib/token-counter';
 import type {
   AIChatMessage,
@@ -152,8 +153,7 @@ export function assembleChatContext(input: ContextAssemblerInput): ContextAssemb
       projectId: input.projectId,
       chapterId: input.chapterId,
       messages: input.messages,
-      model: input.settings.modelName,
-      temperature: input.settings.temperature,
+      ...buildModelRequestConfig(input.settings),
       systemPrompt,
       references,
     },

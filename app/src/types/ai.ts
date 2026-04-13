@@ -1,4 +1,15 @@
-import type { HookStrength, Id, StrandType } from './domain';
+import type {
+  AIReasoningEffort,
+  BookOutlineFields,
+  ChapterBeatFields,
+  HookStrength,
+  Id,
+  StrandType,
+  TemplateAnalysisMeta,
+  TemplateLibraryDraft,
+  VolumeMilestoneDraft,
+  VolumeOutlineFields,
+} from './domain';
 
 export type AIChatRole = 'system' | 'user' | 'assistant';
 
@@ -23,6 +34,7 @@ export interface AIChatRequest {
   messages: AIChatMessage[];
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
   systemPrompt?: string;
   references?: AIContextReference[];
 }
@@ -88,6 +100,25 @@ export interface StateChangeDraft {
 export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low';
 export type ReviewCheckerType = 'consistency' | 'continuity' | 'reader_pull';
 export type AntiAIForceCheck = 'pass' | 'fail';
+export type AIProviderPreset = 'openai' | 'deepseek' | 'siliconflow' | 'openrouter' | 'dashscope' | 'zhipu' | 'custom';
+
+export interface AIRuntimeConfig {
+  provider: AIProviderPreset;
+  apiKey: string;
+  baseUrl: string;
+  defaultModel: string;
+  embeddingModel?: string;
+}
+
+export interface AIRuntimeModelOption {
+  id: string;
+}
+
+export interface AIRuntimeModelProbeRequest {
+  provider?: AIProviderPreset;
+  apiKey?: string;
+  baseUrl?: string;
+}
 
 export interface ReviewScoreThresholds {
   consistency: number;
@@ -159,6 +190,12 @@ export interface ChapterReviewDraft {
   checkerResults: ReviewCheckerResult[];
 }
 
+export interface ChapterLanguageQaDraft {
+  severity: ReviewSeverity;
+  summary: string;
+  issues: ReviewIssue[];
+}
+
 export interface ChapterStyleDraft {
   summary: string;
   appliedChanges: string[];
@@ -180,7 +217,12 @@ export interface AIPlanRequest {
   previousChapterTitle?: string;
   projectTitle?: string;
   projectDescription?: string;
+  bookOutline?: string;
   volumeOutline?: string;
+  volumeGoal?: string;
+  chapterBeat?: string;
+  nextChapterPreview?: string;
+  forbiddenZone?: string;
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
@@ -188,6 +230,7 @@ export interface AIPlanRequest {
   gateConfigOverride?: GenerationGateConfig | null;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
 }
 
 export interface AIPlanResponse {
@@ -205,6 +248,12 @@ export interface AIWriteRequest {
   previousChapterTitle?: string;
   projectTitle?: string;
   projectDescription?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  volumeGoal?: string;
+  chapterBeat?: string;
+  nextChapterPreview?: string;
+  forbiddenZone?: string;
   outline: ChapterOutlineDraft;
   beatIndex: number;
   currentBeat: string;
@@ -218,6 +267,7 @@ export interface AIWriteRequest {
   gateConfigOverride?: GenerationGateConfig | null;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
 }
 
 export interface AIWriteResponse {
@@ -235,6 +285,10 @@ export interface AIReviewRequest {
   previousChapterTitle?: string;
   projectTitle?: string;
   projectDescription?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  chapterBeat?: string;
+  currentStateTable?: string;
   outline?: ChapterOutlineDraft | null;
   previousSummary?: string;
   worldState?: string;
@@ -244,10 +298,42 @@ export interface AIReviewRequest {
   content: string;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
 }
 
 export interface AIReviewResponse {
   review: ChapterReviewDraft;
+  rawText: string;
+}
+
+export interface AILanguageQaRequest {
+  projectId: Id;
+  chapterId: Id;
+  chapterTitle: string;
+  chapterOrder?: number;
+  volumeTitle?: string;
+  previousChapterId?: Id;
+  previousChapterTitle?: string;
+  projectTitle?: string;
+  projectDescription?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  chapterBeat?: string;
+  currentStateTable?: string;
+  outline?: ChapterOutlineDraft | null;
+  previousSummary?: string;
+  worldState?: string;
+  contextBundle?: string;
+  foreshadowSnapshot?: GenerationForeshadowSnapshot[];
+  gateConfigOverride?: GenerationGateConfig | null;
+  content: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AILanguageQaResponse {
+  languageQa: ChapterLanguageQaDraft;
   rawText: string;
 }
 
@@ -261,6 +347,9 @@ export interface AIStyleRequest {
   previousChapterTitle?: string;
   projectTitle?: string;
   projectDescription?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  chapterBeat?: string;
   outline?: ChapterOutlineDraft | null;
   previousSummary?: string;
   worldState?: string;
@@ -271,6 +360,7 @@ export interface AIStyleRequest {
   content: string;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
 }
 
 export interface AIStyleResponse {
@@ -289,6 +379,8 @@ export interface AIPolishRequest {
   previousChapterTitle?: string;
   projectTitle?: string;
   projectDescription?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
   outline?: ChapterOutlineDraft | null;
   previousSummary?: string;
   worldState?: string;
@@ -296,15 +388,175 @@ export interface AIPolishRequest {
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   review?: ChapterReviewDraft | null;
+  languageQa?: ChapterLanguageQaDraft | null;
   content: string;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
 }
 
 export interface AIPolishResponse {
   content: string;
   polish: ChapterPolishDraft;
   rawText: string;
+}
+
+export type BookAnalysisRange = 'full' | 'opening' | 'middle' | 'ending' | 'custom';
+
+export interface AIBookAnalysisRequest {
+  sourceTitle: string;
+  sourceAuthor?: string;
+  content: string;
+  analysisRange?: BookAnalysisRange;
+  rangeStartIndex?: number;
+  rangeEndIndex?: number;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIBookAnalysisResponse {
+  template: TemplateLibraryDraft;
+  meta: TemplateAnalysisMeta;
+}
+
+export interface AIEpubExtractRequest {
+  fileName: string;
+  contentBase64: string;
+}
+
+export interface AIEpubExtractResponse {
+  title: string;
+  content: string;
+  chapterCount: number;
+}
+
+export type BookAnalysisJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type BookAnalysisJobStage =
+  | 'pending'
+  | 'preprocessing'
+  | 'light_analyzing'
+  | 'sampling'
+  | 'chunk_analyzing'
+  | 'aggregating'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface BookAnalysisJobRecord {
+  id: Id;
+  sourceTitle: string;
+  sourceAuthor: string;
+  analysisRange: BookAnalysisRange;
+  rangeStartIndex: number | null;
+  rangeEndIndex: number | null;
+  status: BookAnalysisJobStatus;
+  progressStage: BookAnalysisJobStage;
+  progressPercent: number;
+  message: string;
+  totalSegments: number;
+  sampledSegments: number;
+  finishedSegments: number;
+  estimatedWordCount: number;
+  errorMessage: string;
+  result: AIBookAnalysisResponse | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AIBookOutlineRequest {
+  projectTitle: string;
+  projectDescription: string;
+  genre: string[];
+  seedOutline?: Partial<BookOutlineFields>;
+  hint?: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIBookOutlineResponse extends BookOutlineFields {}
+
+export interface AIVolumeOutlineRequest {
+  projectTitle: string;
+  projectDescription: string;
+  bookOutline: string;
+  previousVolumeOutline?: string;
+  volumeRecaps?: string;
+  volumeTitle: string;
+  volumeOrder: number;
+  seedOutline?: Partial<VolumeOutlineFields>;
+  hint?: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumeOutlineResponse extends VolumeOutlineFields {}
+
+export interface AIVolumeMilestonesRequest {
+  projectTitle: string;
+  projectDescription: string;
+  bookOutline: string;
+  previousVolumeOutline?: string;
+  volumeRecaps?: string;
+  volumeTitle: string;
+  volumeOrder: number;
+  seedOutline?: Partial<VolumeOutlineFields>;
+  hint?: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumeMilestonesResponse {
+  estimatedChapterCount: number;
+  milestones: VolumeMilestoneDraft[];
+}
+
+export interface VolumeBeatChapterSlot {
+  chapterId?: Id;
+  chapterTitle?: string;
+  chapterNumber: number;
+}
+
+export interface VolumeBeatDraft extends Omit<ChapterBeatFields, 'orderInVolume'> {
+  chapterId?: Id;
+  chapterTitle?: string;
+  chapterNumber: number;
+}
+
+export interface HistoryChapterSummary {
+  chapterNumber: number;
+  chapterTitle: string;
+  summary: string;
+  source: 'extract' | 'beat';
+}
+
+export interface AIVolumeBeatsRequest {
+  projectTitle: string;
+  projectDescription: string;
+  bookOutline: string;
+  volumeOutline: string;
+  volumeTitle: string;
+  volumeOrder: number;
+  overwriteTitles?: boolean;
+  chapterSlots?: VolumeBeatChapterSlot[];
+  chapterCount?: number;
+  milestoneIndex?: number;
+  startChapterNumber?: number;
+  endChapterNumber?: number;
+  estimatedTotalChapters?: number;
+  currentMilestone?: string;
+  historySummaries?: HistoryChapterSummary[];
+  hint?: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumeBeatsResponse {
+  beats: VolumeBeatDraft[];
 }
 
 export type GenerationJobStatus = 'queued' | 'running' | 'paused' | 'ready' | 'approved' | 'discarded' | 'error';
@@ -320,12 +572,19 @@ export interface GenerationJobRequest {
   previousChapterTitle?: string;
   projectTitle?: string;
   projectDescription?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  volumeGoal?: string;
+  chapterBeat?: string;
+  nextChapterPreview?: string;
+  forbiddenZone?: string;
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
   stylePrompt?: string;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
   priority?: number;
   gateConfigOverride?: GenerationGateConfig | null;
   outlineOverride?: ChapterOutlineDraft | null;
@@ -355,6 +614,7 @@ export interface GenerationJobRecord {
   generatedText: string;
   style: ChapterStyleDraft | null;
   review: ChapterReviewDraft | null;
+  languageQa: ChapterLanguageQaDraft | null;
   polish: ChapterPolishDraft | null;
   summary: ChapterSummaryDraft | null;
   stateChanges: StateChangeDraft[];
@@ -401,6 +661,35 @@ export interface GenerationMaintenanceBackfillRequest {
   projectId: Id;
   chapterId?: Id;
   limit?: number;
+}
+
+export interface GenerationProjectArtifactRebuildChapterInput {
+  chapterId: Id;
+  chapterTitle: string;
+  chapterOrder: number;
+  volumeTitle?: string;
+  previousChapterId?: Id;
+  previousChapterTitle?: string;
+  content: string;
+  outline?: ChapterOutlineDraft | null;
+  summary?: ChapterSummaryDraft | null;
+  stateChanges?: StateChangeDraft[];
+  strand?: StrandType | null;
+  review?: ChapterReviewDraft | null;
+  languageQa?: ChapterLanguageQaDraft | null;
+}
+
+export interface GenerationProjectArtifactRebuildRequest {
+  projectId: Id;
+  chapters: GenerationProjectArtifactRebuildChapterInput[];
+  entitySnapshot: GenerationEntitySnapshot[];
+  foreshadowSnapshot: GenerationForeshadowSnapshot[];
+}
+
+export interface GenerationProjectArtifactRebuildResponse {
+  ok: boolean;
+  rebuiltChapterCount: number;
+  rebuiltVolumeCount: number;
 }
 
 export interface GenerationMemoryChunkBackfillResult {
@@ -596,6 +885,39 @@ export interface GenerationDebugLightweightRecallItem {
   block: string;
 }
 
+export type GenerationStructuredRelationshipQueryMode = 'graph_1hop' | 'graph_2hop' | 'degraded';
+export type GenerationStructuredRelationshipQueryReason =
+  | 'ok'
+  | 'missing_chapter_context'
+  | 'no_focus_entity'
+  | 'no_historical_relationship'
+  | 'no_two_hop_relationship'
+  | 'high_noise';
+
+export interface GenerationDebugStructuredRelationshipSecondaryEvaluation {
+  label: 'supplement' | 'fallback';
+  reason: GenerationStructuredRelationshipQueryReason | 'unknown';
+  raw: string;
+}
+
+export type GenerationDebugStructuredRelationshipNonTriggerCategory =
+  | 'onehop_sufficient'
+  | 'twohop_redundant'
+  | 'sparse_history'
+  | 'onehop_noise_without_twohop'
+  | 'unknown';
+
+export interface GenerationDebugStructuredRelationshipSummary {
+  mode: GenerationStructuredRelationshipQueryMode | 'unknown';
+  reason: GenerationStructuredRelationshipQueryReason | 'unknown';
+  focusEntityNames: string[];
+  policy: string;
+  secondaryEvaluation: GenerationDebugStructuredRelationshipSecondaryEvaluation | null;
+  evaluatedTwoHop: boolean;
+  hasTwoHopPathBlock: boolean;
+  nonTriggerCategory: GenerationDebugStructuredRelationshipNonTriggerCategory | null;
+}
+
 export interface GenerationDebugContext {
   chapterId: Id;
   chapterTitle: string;
@@ -613,6 +935,7 @@ export interface GenerationDebugContext {
   focusEntityNames: string[];
   queryPhrases: string[];
   lightweightRecallItems: GenerationDebugLightweightRecallItem[];
+  structuredRelationshipDebug: GenerationDebugStructuredRelationshipSummary;
   sections: GenerationDebugContextSection[];
 }
 
@@ -743,10 +1066,14 @@ export interface AIExtractRequest {
   projectId: Id;
   chapterId: Id;
   chapterTitle: string;
+  chapterOrder?: number;
+  chapterBeat?: string;
+  currentStateTable?: string;
   content: string;
   loreSummary?: string;
   model: string;
   temperature: number;
+  reasoningEffort?: AIReasoningEffort;
 }
 
 export interface AIExtractResponse {
@@ -754,4 +1081,25 @@ export interface AIExtractResponse {
   stateChanges: StateChangeDraft[];
   strand: StrandType;
   rawText: string;
+}
+
+export interface GenerationArtifactSyncRequest {
+  projectId: Id;
+  chapterId: Id;
+  chapterTitle: string;
+  chapterOrder?: number;
+  volumeTitle?: string;
+  previousChapterId?: Id;
+  previousChapterTitle?: string;
+  outline?: ChapterOutlineDraft | null;
+  summary: ChapterSummaryDraft;
+  stateChanges: StateChangeDraft[];
+  strand: StrandType;
+  content: string;
+  review?: ChapterReviewDraft | null;
+  languageQa?: ChapterLanguageQaDraft | null;
+}
+
+export interface GenerationArtifactSyncResponse {
+  ok: boolean;
 }

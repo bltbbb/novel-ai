@@ -1,12 +1,16 @@
 import { db } from '@/lib/db';
+import { richTextToPlainText } from '@/lib/editor-content';
 import { createId, createTimestamp } from '@/lib/identity';
 import type {
+  Chapter,
   ChapterOutline,
   ChapterOutlineDraft,
   ChapterSummary,
   ChapterSummaryDraft,
   GenerationQueueItem,
   GenerationQueueOutline,
+  GenerationQueueProgressStage,
+  GenerationQueueReview,
   GenerationQueueStateChange,
   GenerationQueueStatus,
   GenerationQueueSummary,
@@ -16,6 +20,53 @@ import type {
   StrandTracker,
   StrandType,
 } from '@/types';
+
+function shouldUseQueueDraft(item?: GenerationQueueItem | null) {
+  if (!item) {
+    return false;
+  }
+
+  return item.status === 'ready' || item.status === 'approved';
+}
+
+export function getEffectiveChapterText(chapter: Chapter, queueItem?: GenerationQueueItem | null) {
+  const queueText = queueItem?.generatedText?.trim() ?? '';
+
+  if (queueText && shouldUseQueueDraft(queueItem) && (queueItem?.updatedAt ?? '') > chapter.updatedAt) {
+    return queueText;
+  }
+
+  return richTextToPlainText(chapter.content).trim();
+}
+
+export function getEffectiveChapterSummary(
+  summary: ChapterSummary | null | undefined,
+  queueItem?: GenerationQueueItem | null,
+) {
+  const queueSummary = queueItem?.summary ?? null;
+
+  if (
+    queueSummary &&
+    shouldUseQueueDraft(queueItem) &&
+    (queueItem?.updatedAt ?? '') > (summary?.updatedAt ?? '')
+  ) {
+    return queueSummary;
+  }
+
+  if (!summary) {
+    return null;
+  }
+
+  return {
+    summary: summary.summary,
+    hook: summary.hook,
+    foreshadowings: summary.foreshadowings,
+  };
+}
+
+export function loadGenerationQueueMap(projectId: Id) {
+  return db.generationQueue.where('projectId').equals(projectId).toArray();
+}
 
 export async function saveChapterOutline(projectId: Id, chapterId: Id, draft: ChapterOutlineDraft) {
   const now = createTimestamp();
@@ -143,8 +194,14 @@ interface SaveGenerationQueueInput {
   chapterId: Id;
   chapterTitle: string;
   status: GenerationQueueStatus;
+  progressStage?: GenerationQueueProgressStage | null;
+  progressLabel?: string;
+  progressBeatIndex?: number | null;
+  progressBeatCount?: number | null;
   generatedText?: string;
   outline?: GenerationQueueOutline | null;
+  review?: GenerationQueueReview | null;
+  languageQa?: GenerationQueueItem['languageQa'];
   summary?: GenerationQueueSummary | null;
   stateChanges?: GenerationQueueStateChange[];
   strand?: StrandType | null;
@@ -161,9 +218,38 @@ export async function saveGenerationQueueItem(input: SaveGenerationQueueInput) {
     chapterId: input.chapterId,
     chapterTitle: input.chapterTitle,
     status: input.status,
+    progressStage:
+      input.status === 'running'
+        ? (typeof input.progressStage === 'undefined'
+            ? existing?.progressStage ?? null
+            : input.progressStage)
+        : null,
+    progressLabel:
+      input.status === 'running'
+        ? (typeof input.progressLabel === 'undefined'
+            ? existing?.progressLabel ?? ''
+            : input.progressLabel)
+        : '',
+    progressBeatIndex:
+      input.status === 'running'
+        ? (typeof input.progressBeatIndex === 'undefined'
+            ? existing?.progressBeatIndex ?? null
+            : input.progressBeatIndex)
+        : null,
+    progressBeatCount:
+      input.status === 'running'
+        ? (typeof input.progressBeatCount === 'undefined'
+            ? existing?.progressBeatCount ?? null
+            : input.progressBeatCount)
+        : null,
     generatedText: input.generatedText ?? existing?.generatedText ?? '',
-    outline: input.outline ?? existing?.outline ?? null,
-    summary: input.summary ?? existing?.summary ?? null,
+    outline: typeof input.outline === 'undefined' ? existing?.outline ?? null : input.outline,
+    review: typeof input.review === 'undefined' ? existing?.review ?? null : input.review,
+    languageQa:
+      typeof input.languageQa === 'undefined'
+        ? existing?.languageQa ?? null
+        : input.languageQa,
+    summary: typeof input.summary === 'undefined' ? existing?.summary ?? null : input.summary,
     stateChanges: input.stateChanges ?? existing?.stateChanges ?? [],
     strand: typeof input.strand === 'undefined' ? existing?.strand ?? null : input.strand,
     errorMessage: input.errorMessage ?? existing?.errorMessage ?? '',

@@ -26,9 +26,14 @@ AI Novel Studio 是一个面向长篇小说创作的本地优先写作工作台�
 - 当前开发主线以 `ROADMAP.md` 为准
 - `PLAN.md` 保留分层规划与历史背景，不再作为唯一执行进度文档
 
-当前建议的下一步不是继续扩 `4.5`，而是：
+当前主线已经从“`4.3b` 主链接入评估”推进到“`4.3b` 最小正式接入已落地”。
 
-- 进入 `4.3b` 二度关系查询的主链接入评估
+当前建议的下一步是：
+
+- 对 `4.3b` 继续做接入后定向校准与边界复核
+- 继续分析哪些章节类型不会触发 `graph_2hop`
+- 观察 `onehop_sufficient / twohop_redundant / sparse_history / onehop_noise_without_twohop` 这 4 类非触发场景在后续样本里的占比
+- 可直接使用 `server/npm run calibration:round43b-distribution` 查看当前 synthetic / demo 分布
 - 将 `4.5` 向量检索基础设施转入回归监测
 
 ## 仓库结构
@@ -150,7 +155,15 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 开发模式首次进入时，前端会自动写入一组多章稀疏章序的 demo 项目，便于做检索参数标定观察。
 
-前端默认访问 `http://localhost:3001`，也可以在工作台“设置”里调整。
+前端默认访问 `http://localhost:3001`。
+
+如需修改前端访问的后端地址，可在 `app/.env` 中配置：
+
+```env
+VITE_SERVER_URL=http://localhost:3001
+```
+
+全局 AI Provider / 模型设置现在统一放在项目列表页入口，项目内仅保留项目文风设置。
 
 ## e2e 验证
 

@@ -9,6 +9,15 @@ test.use({
   },
 });
 
+async function openProjectList(page: import('@playwright/test').Page) {
+  const backButton = page.getByRole('button', { name: '返回项目列表' });
+
+  if (await backButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await backButton.click();
+    await expect(page.getByRole('heading', { name: '项目列表' })).toBeVisible();
+  }
+}
+
 test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', async ({ page }) => {
   const chapterId = 'demo-chapter';
   const chapterTitle = '第12章：黑铁片异动';
@@ -77,7 +86,9 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
             reviewMetrics: 0,
             entities: 1,
             relationships: 1,
+            foreshadows: 1,
             chapterIndex: 1,
+            volumeRecaps: 1,
             memoryChunks: 2,
             memoryEmbeddings: 1,
           },
@@ -248,6 +259,16 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
               block: '- 卷级总结召回：第一卷',
             },
           ],
+          structuredRelationshipDebug: {
+            mode: 'graph_1hop',
+            reason: 'ok',
+            focusEntityNames: ['林冲'],
+            policy: 'mock',
+            secondaryEvaluation: null,
+            evaluatedTwoHop: false,
+            hasTwoHopPathBlock: false,
+            nonTriggerCategory: null,
+          },
           sections: [
             {
               key: 'retrieval_memory',
@@ -302,6 +323,55 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
           chapterTitle,
           queryPhrases: ['黑铁片'],
           focusEntityNames: ['林冲'],
+          vectorBackend: {
+            configuredBackend: 'json_cache',
+            activeBackend: 'json_cache',
+            embeddingModel: null,
+            isVectorEnabled: false,
+            supportsIndexedSearch: false,
+            fallbackReason: null,
+          },
+          vectorSearch: {
+            status: 'disabled',
+            source: 'none',
+            candidatePoolSize: 0,
+            matchedCandidateCount: 0,
+            topK: 0,
+            minScore: 0,
+            minSimilarity: 0,
+            fallbackReason: null,
+          },
+          pipeline: {
+            metadataFilter: {
+              inputCandidates: 3,
+              outputCandidates: 3,
+              filteredOutCandidates: 0,
+            },
+            hybridRecall: {
+              candidateCount: 3,
+              lexicalOnlyCount: 3,
+              vectorOnlyCount: 0,
+              hybridCount: 0,
+            },
+            dedupeRerank: {
+              inputCandidates: 3,
+              dedupedCandidates: 3,
+              mergedAwayCandidates: 0,
+            },
+            selection: {
+              inputCandidates: 3,
+              selectedCandidates: 3,
+              thresholdSelectedCandidates: 3,
+              rescuedVectorOnlyCandidates: 0,
+              droppedBelowThresholdCandidates: 0,
+              droppedByLimitCandidates: 0,
+              limit: 8,
+              topScore: 14,
+              dynamicThreshold: 0,
+              rescuedVectorOnlyChunkIds: [],
+              droppedVectorOnlyChunkIds: [],
+            },
+          },
           items: [
             {
               id: 'chunk-1',
@@ -325,6 +395,13 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
               contentExcerpt: '林冲在废墟边缘第一次听见黑铁片低鸣。',
               updatedAt,
               block: '- 第8章：黑铁片异响 / child #2\n命中词：黑铁片',
+              retrievalHitOrigin: 'lexical_only',
+              retrievalSignals: ['lexical'],
+              vectorSimilarity: null,
+              preRerankScore: 14,
+              rerankDelta: 0,
+              rerankReasons: ['同卷命中'],
+              mergedCandidateCount: 1,
               scoreBreakdown: {
                 sameVolume: 3,
                 phrase: 6,
@@ -357,6 +434,13 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
               contentExcerpt: '回收指向：第15章：真相揭露',
               updatedAt,
               block: '- 休眠伏笔召回：黑铁片首次发光\n回收指向：第15章：真相揭露',
+              retrievalHitOrigin: 'lexical_only',
+              retrievalSignals: ['lexical'],
+              vectorSimilarity: null,
+              preRerankScore: 8,
+              rerankDelta: 0,
+              rerankReasons: ['伏笔召回'],
+              mergedCandidateCount: 1,
               scoreBreakdown: {
                 sameVolume: 0,
                 phrase: 2,
@@ -389,6 +473,13 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
               contentExcerpt: '范围：第1-10章\n高亮：黑铁片来历未明',
               updatedAt,
               block: '- 卷级总结召回：第一卷\n范围：第1-10章',
+              retrievalHitOrigin: 'lexical_only',
+              retrievalSignals: ['lexical'],
+              vectorSimilarity: null,
+              preRerankScore: 6,
+              rerankDelta: 0,
+              rerankReasons: ['卷级总结召回'],
+              mergedCandidateCount: 1,
               scoreBreakdown: {
                 sameVolume: 0,
                 phrase: 4,
@@ -408,15 +499,19 @@ test('验证统一检索主链展示 memory chunk、休眠伏笔与卷总结', a
     await route.abort();
   });
 
-  await page.goto('http://127.0.0.1:5173', { waitUntil: 'networkidle' });
+  await page.goto('http://127.0.0.1:5173', { waitUntil: 'domcontentloaded' });
+  await openProjectList(page);
 
-  const projectCard = page.getByText('最后一个修仙者').first();
+  const projectCard = page
+    .locator('article')
+    .filter({ has: page.getByRole('heading', { name: '最后一个修仙者' }) })
+    .first();
 
-  if (await projectCard.isVisible()) {
-    await projectCard.click();
-  }
+  await projectCard.click();
 
-  await page.getByRole('button', { name: '生成控制台' }).click();
+  await page.getByRole('button', { name: '生成', exact: true }).click();
+  await page.getByRole('button', { name: /高级选项/ }).click();
+  await page.getByRole('button', { name: '打开兼容控制台' }).click();
 
   const retrievalPanel = page.locator('div').filter({ has: page.getByText('检索候选') }).first();
 

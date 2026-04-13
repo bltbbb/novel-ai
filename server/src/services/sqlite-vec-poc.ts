@@ -89,7 +89,23 @@ export async function runSqliteVecPoc(env: ServerEnv): Promise<SqliteVecPocResul
       FROM ${SQLITE_VEC_POC_TABLE_NAME}
       ORDER BY distance
       LIMIT 2
-    `).all(toVectorBuffer([0.11, 0.19, 0.31, 0.41])) as SqliteVecNearestNeighborRow[];
+    `)
+      .all(toVectorBuffer([0.11, 0.19, 0.31, 0.41]))
+      .map((row) => {
+        const record = row as Record<string, unknown>;
+        const rawRowId = record.rowid;
+        const rawDistance = record.distance;
+
+        return {
+          rowid:
+            typeof rawRowId === 'bigint'
+              ? Number(rawRowId)
+              : typeof rawRowId === 'number'
+                ? rawRowId
+                : 0,
+          distance: typeof rawDistance === 'number' ? rawDistance : Number.NaN,
+        };
+      });
 
     return {
       extensionPath,

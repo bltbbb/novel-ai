@@ -1,11 +1,14 @@
 import { useRef, useState, type ChangeEvent } from 'react';
-import { BookOpen, Clock3, Download, Plus, Sparkles, Trash2, Upload } from 'lucide-react';
+import { BookOpen, Clock3, Download, Lightbulb, Plus, Settings2, Sparkles, Trash2, Upload } from 'lucide-react';
 import { EmptyState } from '@/components/EmptyState';
+import { InspirationDialog } from '@/components/InspirationDialog';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { ProjectTemplateDialog } from '@/components/ProjectTemplateDialog';
+import { TemplateLibraryDialog } from '@/components/TemplateLibraryDialog';
 import { useProjectStore } from '@/stores';
 import { useToast } from '@/components/Toast';
 import { downloadProjectArchive, parseProjectArchive } from '@/lib/project-archive';
+import type { ProjectTemplateSnapshot } from '@/types';
 
 function formatWordCount(wordCount: number) {
   if (wordCount >= 10000) {
@@ -24,17 +27,34 @@ function formatUpdatedAt(updatedAt: string) {
   });
 }
 
-export function ProjectList() {
+interface ProjectListProps {
+  onOpenTemplateLibraryPage?: () => void;
+  onOpenGlobalSettings?: () => void;
+}
+
+export function ProjectList({ onOpenTemplateLibraryPage, onOpenGlobalSettings }: ProjectListProps = {}) {
   const { projects, createProject, deleteProject, exportProjectArchive, importProjectArchive, setActiveProject } =
     useProjectStore();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showTemplateDialog, setShowTemplateDialog] = useState(false);
+  const [showInspirationDialog, setShowInspirationDialog] = useState(false);
+  const [showTemplateLibrary, setShowTemplateLibrary] = useState(false);
+
+  function handleOpenTemplateLibrary() {
+    if (onOpenTemplateLibraryPage) {
+      onOpenTemplateLibraryPage();
+      return;
+    }
+
+    setShowTemplateLibrary(true);
+  }
 
   async function handleCreateProject(input: {
     title: string;
     description: string;
     genre: string[];
+    templateSnapshot: ProjectTemplateSnapshot | null;
     seedChapters: Array<{
       title: string;
       content?: string;
@@ -54,6 +74,7 @@ export function ProjectList() {
         title: input.title,
         description: input.description,
         genre: input.genre,
+        templateSnapshot: input.templateSnapshot,
         seedChapters: input.seedChapters,
         seedEntities: input.seedEntities,
       });
@@ -114,7 +135,7 @@ export function ProjectList() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-10 lg:px-10">
+      <div className="mx-auto flex min-h-screen w-full max-w-[1680px] flex-col px-6 py-10 lg:px-10 xl:px-12">
         <input
           ref={fileInputRef}
           type="file"
@@ -131,6 +152,32 @@ export function ProjectList() {
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
+            {onOpenGlobalSettings ? (
+              <button
+                type="button"
+                onClick={onOpenGlobalSettings}
+                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm font-medium text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+              >
+                <Settings2 size={16} />
+                AI 设置
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setShowInspirationDialog(true)}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm font-medium text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+            >
+              <Lightbulb size={16} />
+              灵感入口
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenTemplateLibrary}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm font-medium text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+            >
+              <Sparkles size={16} />
+              模板库
+            </button>
             <button
               type="button"
               onClick={handleOpenImport}
@@ -159,6 +206,22 @@ export function ProjectList() {
               <>
                 <button
                   type="button"
+                  onClick={() => setShowInspirationDialog(true)}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-neutral-800 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+                >
+                  <Lightbulb size={16} />
+                  先聊灵感
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenTemplateLibrary}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-neutral-800 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+                >
+                  <Sparkles size={16} />
+                  打开模板库
+                </button>
+                <button
+                  type="button"
                   onClick={handleOpenImport}
                   className="inline-flex items-center gap-2 rounded-2xl border border-neutral-800 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
                 >
@@ -183,15 +246,17 @@ export function ProjectList() {
               <OnboardingChecklist
                 title="推荐起步顺序"
                 items={[
+                  '如果只是一个模糊点子，先点“灵感入口”和 AI 多轮讨论。',
                   '先创建一个项目，填好标题和一句项目简介。',
+                  '先在项目列表右上角确认全局 AI 设置和模型。',
                   '进入工作台后建立第一章，再开始正文写作。',
-                  '如果要使用 AI，先在设置里确认后端地址和模型配置。',
+                  '项目内的文风 Prompt 现在单独放在项目设置里维护。',
                 ]}
               />
             }
           />
         ) : (
-          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {projects.map((project) => (
               <article
                 key={project.id}
@@ -239,6 +304,11 @@ export function ProjectList() {
                   <span className="rounded-full bg-neutral-800 px-2.5 py-1 text-neutral-300">
                     {project.genre.length > 0 ? project.genre.join(' / ') : '未分类'}
                   </span>
+                  {project.templateSnapshot ? (
+                    <span className="rounded-full bg-indigo-500/15 px-2.5 py-1 text-indigo-200">
+                      模板：{project.templateSnapshot.templateName}
+                    </span>
+                  ) : null}
                   <span>{formatWordCount(project.wordCount)} 字</span>
                   <span className="inline-flex items-center gap-1">
                     <Clock3 size={12} />
@@ -255,6 +325,14 @@ export function ProjectList() {
         open={showTemplateDialog}
         onClose={() => setShowTemplateDialog(false)}
         onCreate={handleCreateProject}
+      />
+      <InspirationDialog
+        open={showInspirationDialog}
+        onClose={() => setShowInspirationDialog(false)}
+      />
+      <TemplateLibraryDialog
+        open={showTemplateLibrary}
+        onClose={() => setShowTemplateLibrary(false)}
       />
     </div>
   );

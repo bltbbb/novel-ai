@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { FlaskConical, Layers3, Play, Save, Sparkles, WandSparkles, X } from 'lucide-react';
 import { buildGenerationContextBundle } from '@/lib/generation-context';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
+import { buildChapterPromptPayload } from '@/lib/generation-repetition';
+import { getProjectStylePrompt } from '@/lib/project-style';
+import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
+import { buildModelRequestConfig } from '@/lib/runtime-config';
 import {
   createChapterPlan,
   extractChapterState,
@@ -10,8 +14,11 @@ import {
   styleChapterDraft,
   writeChapterBeat,
 } from '@/lib/generation-client';
+import { runGenerationPipeline } from '@/lib/generation-pipeline';
 import {
   appendStrandHistory,
+  getEffectiveChapterSummary,
+  loadGenerationQueueMap,
   loadChapterStateChanges,
   loadChapterOutline,
   loadChapterSummary,
@@ -23,7 +30,7 @@ import {
 import { createParagraphDocument, richTextToPlainText } from '@/lib/editor-content';
 import { buildWorldStateSummary, findPreviousChapter, getStrandLabel } from '@/lib/generation-utils';
 import { useToast } from '@/components/Toast';
-import { useForeshadowStore } from '@/stores';
+import { useForeshadowStore, useProjectStore } from '@/stores';
 import type {
   AppSettings,
   Chapter,
@@ -64,6 +71,10 @@ function formatRelativeTime(timestamp: string) {
   });
 }
 
+/**
+ * @deprecated 旧版实验窗口兼容入口。
+ * 主生成链路已迁到 GenerationView 页面内状态机，这里仅供兼容控制台与过渡调试使用。
+ */
 export function GenerationLabDialog({
   open,
   projectId,
@@ -82,6 +93,7 @@ export function GenerationLabDialog({
   const foreshadows = useForeshadowStore((state) => state.foreshadows);
   const foreshadowLoadedProjectId = useForeshadowStore((state) => state.loadedProjectId);
   const isForeshadowLoaded = useForeshadowStore((state) => state.isLoaded);
+  const currentProject = useProjectStore((state) => state.projects.find((project) => project.id === projectId) ?? null);
   const [outline, setOutline] = useState<ChapterOutline | null>(null);
   const [summary, setSummary] = useState<ChapterSummary | null>(null);
   const [stateChanges, setStateChanges] = useState<StateChange[]>([]);
@@ -99,6 +111,24 @@ export function GenerationLabDialog({
 
   const previousChapter = useMemo(() => findPreviousChapter(chapters, chapter?.id), [chapter?.id, chapters]);
   const worldState = useMemo(() => buildWorldStateSummary(entities), [entities]);
+  const effectiveSettings = useMemo(
+    () => ({
+      ...settings,
+      stylePrompt: mergePromptSections(
+        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
+        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
+        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
+        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
+      ),
+    }),
+    [
+      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
+      currentProject?.templateSnapshot?.promptBundle.stylePrompt,
+      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
+      currentProject?.stylePrompt,
+      settings,
+    ],
+  );
 
   useEffect(() => {
     if (!open || !chapter) {
@@ -156,8 +186,13 @@ export function GenerationLabDialog({
       return '';
     }
 
-    const previousSummary = await loadChapterSummary(projectId, previousChapter.id);
-    return previousSummary?.summary ?? '';
+    const [previousSummary, queueItems] = await Promise.all([
+      loadChapterSummary(projectId, previousChapter.id),
+      loadGenerationQueueMap(projectId),
+    ]);
+    const queueMap = new Map(queueItems.map((item) => [item.chapterId, item] as const));
+
+    return getEffectiveChapterSummary(previousSummary ?? null, queueMap.get(previousChapter.id))?.summary ?? '';
   }
 
   async function getContextBundle() {
@@ -167,6 +202,10 @@ export function GenerationLabDialog({
       chapters,
       entities,
     });
+  }
+
+  async function getOutlinePromptPayload(targetChapter: Chapter) {
+    return buildChapterPromptPayload(projectId, targetChapter, chapters);
   }
 
   const foreshadowSnapshot =
@@ -181,6 +220,13 @@ export function GenerationLabDialog({
     setIsPlanning(true);
 
     try {
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
+
+      if (!outlinePromptPayload.chapterBeat) {
+        toast('当前章节缺少章节拍，请先到大纲页补齐后再生成', 'warning');
+        return null;
+      }
+
       const response = await createChapterPlan(settings.serverUrl, {
         projectId,
         chapterId: activeChapter.id,
@@ -191,12 +237,25 @@ export function GenerationLabDialog({
         previousChapterTitle: previousChapter?.title,
         projectTitle,
         projectDescription,
+        bookOutline: outlinePromptPayload.bookOutline,
+        volumeOutline: outlinePromptPayload.volumeOutline,
+        volumeGoal: outlinePromptPayload.volumeGoal,
+        chapterBeat: outlinePromptPayload.chapterBeat,
+        nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+        forbiddenZone: outlinePromptPayload.forbiddenZone,
         previousSummary: await getPreviousSummaryText(),
         worldState,
-        contextBundle: (await getContextBundle()).bundle,
+        contextBundle: mergePromptSections(
+          formatPromptSection(
+            '创作模板章节写法约束',
+            currentProject?.templateSnapshot?.promptBundle.beatPrompt ||
+              currentProject?.templateSnapshot?.promptBundle.writingPrompt,
+          ),
+          formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
+          (await getContextBundle()).bundle,
+        ),
         foreshadowSnapshot,
-        model: settings.modelName,
-        temperature: settings.temperature,
+        ...buildModelRequestConfig(settings),
       });
 
       const savedOutline = await saveChapterOutline(projectId, activeChapter.id, response.outline);
@@ -242,6 +301,12 @@ export function GenerationLabDialog({
       let accumulatedText = '';
       const previousSummary = await getPreviousSummaryText();
       const contextBundle = await getContextBundle();
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
+
+      if (!outlinePromptPayload.chapterBeat) {
+        toast('当前章节缺少章节拍，请先到大纲页补齐后再生成', 'warning');
+        return '';
+      }
 
       for (let index = 0; index < activeOutline.beats.length; index += 1) {
         const beat = activeOutline.beats[index];
@@ -255,6 +320,12 @@ export function GenerationLabDialog({
           previousChapterTitle: previousChapter?.title,
           projectTitle,
           projectDescription,
+          bookOutline: outlinePromptPayload.bookOutline,
+          volumeOutline: outlinePromptPayload.volumeOutline,
+          volumeGoal: outlinePromptPayload.volumeGoal,
+          chapterBeat: outlinePromptPayload.chapterBeat,
+          nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+          forbiddenZone: outlinePromptPayload.forbiddenZone,
           outline: {
             goal: activeOutline.goal,
             obstacle: activeOutline.obstacle,
@@ -273,10 +344,17 @@ export function GenerationLabDialog({
           previousText: accumulatedText,
           previousSummary,
           worldState,
-          contextBundle: contextBundle.bundle,
+          contextBundle: mergePromptSections(
+            formatPromptSection(
+              '创作模板章节写法约束',
+              currentProject?.templateSnapshot?.promptBundle.beatPrompt ||
+                currentProject?.templateSnapshot?.promptBundle.writingPrompt,
+            ),
+            formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
+            contextBundle.bundle,
+          ),
           foreshadowSnapshot,
-          model: settings.modelName,
-          temperature: settings.temperature,
+          ...buildModelRequestConfig(settings),
         });
 
         accumulatedText = [accumulatedText, response.content.trim()].filter(Boolean).join('\n\n');
@@ -301,8 +379,8 @@ export function GenerationLabDialog({
   async function handleStyleDraft(contentOverride?: string) {
     const sourceText = (contentOverride ?? latestGeneratedText ?? richTextToPlainText(content)).trim();
 
-    if (!settings.stylePrompt.trim()) {
-      toast('当前还没有设置全局文风 Prompt，无法执行风格转译', 'warning');
+    if (!effectiveSettings.stylePrompt.trim()) {
+      toast('当前还没有设置项目文风 Prompt，无法执行风格转译', 'warning');
       return '';
     }
 
@@ -314,6 +392,7 @@ export function GenerationLabDialog({
     setIsStyling(true);
 
     try {
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
       const response = await styleChapterDraft(settings.serverUrl, {
         projectId,
         chapterId: activeChapter.id,
@@ -324,6 +403,9 @@ export function GenerationLabDialog({
         previousChapterTitle: previousChapter?.title,
         projectTitle,
         projectDescription,
+        bookOutline: outlinePromptPayload.bookOutline,
+        volumeOutline: outlinePromptPayload.volumeOutline,
+        chapterBeat: outlinePromptPayload.chapterBeat,
         outline: outline
           ? {
               goal: outline.goal,
@@ -343,10 +425,9 @@ export function GenerationLabDialog({
         worldState,
         contextBundle: (await getContextBundle()).bundle,
         foreshadowSnapshot,
-        stylePrompt: settings.stylePrompt,
+        stylePrompt: effectiveSettings.stylePrompt,
         content: sourceText,
-        model: settings.modelName,
-        temperature: settings.temperature,
+        ...buildModelRequestConfig(settings),
       });
 
       setLatestGeneratedText(response.content);
@@ -376,6 +457,7 @@ export function GenerationLabDialog({
     setIsReviewing(true);
 
     try {
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
       const response = await reviewChapterDraft(settings.serverUrl, {
         projectId,
         chapterId: activeChapter.id,
@@ -386,6 +468,8 @@ export function GenerationLabDialog({
         previousChapterTitle: previousChapter?.title,
         projectTitle,
         projectDescription,
+        bookOutline: outlinePromptPayload.bookOutline,
+        volumeOutline: outlinePromptPayload.volumeOutline,
         outline: outline
           ? {
               goal: outline.goal,
@@ -406,8 +490,7 @@ export function GenerationLabDialog({
         contextBundle: (await getContextBundle()).bundle,
         foreshadowSnapshot,
         content: sourceText,
-        model: settings.modelName,
-        temperature: settings.temperature,
+        ...buildModelRequestConfig(settings),
       });
 
       setReviewResult(response.review);
@@ -434,6 +517,7 @@ export function GenerationLabDialog({
     setIsPolishing(true);
 
     try {
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
       const response = await polishChapterDraft(settings.serverUrl, {
         projectId,
         chapterId: activeChapter.id,
@@ -444,6 +528,8 @@ export function GenerationLabDialog({
         previousChapterTitle: previousChapter?.title,
         projectTitle,
         projectDescription,
+        bookOutline: outlinePromptPayload.bookOutline,
+        volumeOutline: outlinePromptPayload.volumeOutline,
         outline: outline
           ? {
               goal: outline.goal,
@@ -465,8 +551,7 @@ export function GenerationLabDialog({
         foreshadowSnapshot,
         review: reviewOverride ?? reviewResult,
         content: sourceText,
-        model: settings.modelName,
-        temperature: settings.temperature,
+        ...buildModelRequestConfig(settings),
       });
 
       setLatestGeneratedText(response.content);
@@ -494,14 +579,16 @@ export function GenerationLabDialog({
     setIsExtracting(true);
 
     try {
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
       const response = await extractChapterState(settings.serverUrl, {
         projectId,
         chapterId: activeChapter.id,
         chapterTitle: activeChapter.title,
+        chapterOrder: activeChapter.order,
+        chapterBeat: outlinePromptPayload.chapterBeat,
         content: plainText,
         loreSummary: worldState,
-        model: settings.modelName,
-        temperature: settings.temperature,
+        ...buildModelRequestConfig(settings),
       });
 
       const savedSummary = await saveChapterSummary(projectId, activeChapter.id, response.summary);
@@ -531,42 +618,87 @@ export function GenerationLabDialog({
   }
 
   async function handleRunPipeline() {
-    const activeOutline = await handleGeneratePlan();
+    try {
+      const outlinePromptPayload = await getOutlinePromptPayload(activeChapter);
 
-    if (!activeOutline) {
-      return;
+      if (!outlinePromptPayload.chapterBeat) {
+        toast('当前章节缺少章节拍，请先到大纲页补齐后再生成', 'warning');
+        return;
+      }
+
+      const result = await runGenerationPipeline({
+        projectId,
+        chapter: activeChapter,
+        chapters,
+        entities,
+        projectTitle,
+        projectDescription,
+        settings: effectiveSettings,
+        worldState,
+        bookOutline: outlinePromptPayload.bookOutline,
+        volumeOutline: outlinePromptPayload.volumeOutline,
+        volumeGoal: outlinePromptPayload.volumeGoal,
+        chapterBeat: outlinePromptPayload.chapterBeat,
+        nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+        forbiddenZone: outlinePromptPayload.forbiddenZone,
+        foreshadowSnapshot,
+        outlineOverride: null,
+        onStageChange: ({ stage }) => {
+          setIsPlanning(stage === 'plan');
+          setIsWriting(stage === 'write');
+          setIsStyling(stage === 'style');
+          setIsReviewing(stage === 'review');
+          setIsPolishing(stage === 'polish');
+          setIsExtracting(stage === 'extract');
+        },
+      });
+
+      const savedOutline = await saveChapterOutline(projectId, activeChapter.id, result.outline);
+      setOutline(savedOutline);
+      setLatestGeneratedText(result.generatedText);
+      setStyleResult(result.style);
+      setReviewResult(result.review);
+      setPolishResult(result.polish);
+      onApplyGeneratedContent(createParagraphDocument(result.generatedText));
+
+      if (result.summary) {
+        const savedSummary = await saveChapterSummary(projectId, activeChapter.id, result.summary);
+        const entityIdMap = new Map(
+          entities.map((entity) => [entity.name.trim().toLowerCase(), entity.id] as const),
+        );
+
+        await replaceChapterStateChanges(
+          projectId,
+          activeChapter.id,
+          result.stateChanges,
+          new Map(
+            Array.from(entityIdMap.entries()).map(([key, value]) => [key, value] as const),
+          ),
+        );
+
+        if (result.strand) {
+          await appendStrandHistory(projectId, activeChapter.id, activeChapter.title, result.strand);
+        }
+
+        setSummary(savedSummary);
+        await refreshArtifacts(activeChapter.id);
+        toast('一键生成流程已完成并提取摘要', 'success');
+      } else if (result.review.needsRewrite || result.review.overallSeverity === 'critical') {
+        toast('审查结果建议先重写，本次一键流程停在 Review', 'warning');
+      } else {
+        toast('一键生成流程已完成', 'success');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`执行一键生成流程失败：${message}`, 'error');
+    } finally {
+      setIsPlanning(false);
+      setIsWriting(false);
+      setIsStyling(false);
+      setIsReviewing(false);
+      setIsPolishing(false);
+      setIsExtracting(false);
     }
-
-    const generatedText = await handleWriteDraft(activeOutline);
-
-    if (!generatedText) {
-      return;
-    }
-
-    const styledText = settings.stylePrompt.trim() ? await handleStyleDraft(generatedText) : generatedText;
-
-    if (!styledText) {
-      return;
-    }
-
-    const review = await handleReviewDraft(styledText);
-
-    if (!review) {
-      return;
-    }
-
-    if (review.needsRewrite || review.overallSeverity === 'critical') {
-      toast('审查结果建议先重写，本次一键流程停在 Review', 'warning');
-      return;
-    }
-
-    const polishedText = await handlePolishDraft(styledText, review);
-
-    if (!polishedText) {
-      return;
-    }
-
-    await handleExtractArtifacts(polishedText);
   }
 
   const stepCards = [
@@ -586,11 +718,11 @@ export function GenerationLabDialog({
       key: 'style',
       label: 'Style',
       status: isStyling ? 'running' : styleResult ? 'done' : 'idle',
-      description: settings.stylePrompt.trim()
+      description: effectiveSettings.stylePrompt.trim()
         ? styleResult
           ? `${styleResult.appliedChanges.length} 条风格调整`
           : '尚未执行风格转译'
-        : '未启用全局文风 Prompt',
+        : '未启用项目文风 Prompt',
     },
     {
       key: 'review',
@@ -625,8 +757,8 @@ export function GenerationLabDialog({
               <FlaskConical size={18} />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-neutral-100">生成实验室</h2>
-              <p className="text-sm text-neutral-500">最小验证阶段 1 的 Plan → Write → Style → Review → Polish → Extract 流水线。</p>
+              <h2 className="text-lg font-semibold text-neutral-100">兼容实验室</h2>
+              <p className="text-sm text-neutral-500">旧版单章实验窗口，当前主要用于兼容控制台与过渡调试。</p>
             </div>
           </div>
           <button
@@ -636,6 +768,10 @@ export function GenerationLabDialog({
           >
             <X size={18} />
           </button>
+        </div>
+
+        <div className="border-b border-neutral-800 bg-yellow-500/10 px-6 py-3 text-xs leading-6 text-yellow-100">
+          主生成入口已迁到“创作工作台”的 GenerationView 页面内审核流；这里保留为兼容实验窗，便于继续做单章对照和调试。
         </div>
 
         <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto px-6 py-6 lg:grid-cols-[0.95fr_1.05fr]">
@@ -810,7 +946,7 @@ export function GenerationLabDialog({
               <div className="mb-3 text-sm font-medium text-neutral-200">风格转译结果</div>
               {!styleResult ? (
                 <p className="text-sm text-neutral-500">
-                  {settings.stylePrompt.trim() ? '当前还没有执行风格转译。' : '当前未启用全局文风 Prompt。'}
+                  {effectiveSettings.stylePrompt.trim() ? '当前还没有执行风格转译。' : '当前未启用项目文风 Prompt。'}
                 </p>
               ) : (
                 <div className="space-y-3 text-sm text-neutral-400">

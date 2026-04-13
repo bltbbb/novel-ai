@@ -16,7 +16,7 @@ export const DEFAULT_PROMPT_CONFIG: Required<PromptConfig> = {
   enableCoreConstraints: true,
   enableAntiAI: true,
   enableStrandWeave: true,
-  enableCoolPoints: false,
+  enableCoolPoints: true,
   enableNoPoison: true,
 };
 

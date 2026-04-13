@@ -343,6 +343,63 @@ function parseVectorJson(rawText: string | null | undefined) {
   }
 }
 
+export async function clearGenerationSqliteVecProjectIndex(
+  env: ServerEnv,
+  projectId: string,
+) {
+  if (env.generationVectorBackend !== 'sqlite_vec') {
+    return;
+  }
+
+  try {
+    const extensionPath = await resolveSqliteVecExtensionPath(env);
+    const { db } = createSqliteVecIndexDatabase(env);
+
+    try {
+      loadSqliteVecExtension(db, extensionPath);
+      ensureSqliteVecMetadataTable(db);
+
+      const rows = db.prepare(`
+        SELECT vec_table, vec_rowid
+        FROM ${SQLITE_VEC_INDEX_METADATA_TABLE}
+        WHERE project_id = ?
+      `).all(projectId) as Array<{
+        vec_table?: string;
+        vec_rowid?: number | bigint;
+      }>;
+
+      db.exec('BEGIN');
+
+      try {
+        for (const row of rows) {
+          const vecTable = typeof row.vec_table === 'string' ? row.vec_table : '';
+          const vecRowid = Number(row.vec_rowid ?? 0);
+
+          if (!vecTable || vecRowid <= 0) {
+            continue;
+          }
+
+          db.prepare(`DELETE FROM ${vecTable} WHERE rowid = ?`).run(BigInt(vecRowid));
+        }
+
+        db.prepare(`
+          DELETE FROM ${SQLITE_VEC_INDEX_METADATA_TABLE}
+          WHERE project_id = ?
+        `).run(projectId);
+
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    // sqlite-vec 不可用时，项目级清理退回为仅清理主表 generation_memory_embeddings。
+  }
+}
+
 export async function queryGenerationSqliteVecIndex(
   env: ServerEnv,
   input: {

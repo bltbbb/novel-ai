@@ -38,6 +38,7 @@ import {
 } from '@/lib/generation-gate-defaults';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
 import { buildGenerationContextBundle } from '@/lib/generation-context';
+import { buildChapterPromptPayload } from '@/lib/generation-repetition';
 import {
   approveGenerationJob,
   batchUpdateGenerationJobs,
@@ -62,6 +63,10 @@ import {
   saveChapterSummary,
 } from '@/lib/generation-storage';
 import { createParagraphDocument } from '@/lib/editor-content';
+import { rebuildProjectArtifactsFromLocalState } from '@/lib/generation-project-artifact-client';
+import { getProjectStylePrompt } from '@/lib/project-style';
+import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
+import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { buildWorldStateSummary, findPreviousChapter, getStrandLabel } from '@/lib/generation-utils';
 import { useEditorStore, useForeshadowStore, useLoreStore, useProjectStore, useSettingsStore, useSnapshotStore } from '@/stores';
 import type {
@@ -95,12 +100,13 @@ interface GenerationWorkspaceProps {
   projectTitle: string;
   projectDescription?: string;
   onOpenChapter: (chapterId: Id) => void;
+  onReturnToWorkspace?: () => void;
 }
 
 type GenerationMaintenanceScope = 'project' | 'chapter';
 
 interface GenerationMaintenanceRunSnapshot {
-  kind: 'chunks' | 'volume-recaps' | 'embeddings';
+  kind: 'chunks' | 'volume-recaps' | 'embeddings' | 'rebuild';
   scope: GenerationMaintenanceScope;
   chapterTitle: string;
   limit?: number;
@@ -353,6 +359,67 @@ function formatLightweightRecallBreakdown(item: GenerationDebugContext['lightwei
   return `词 ${item.scoreBreakdown.phrase} / 实体 ${item.scoreBreakdown.entity} / 时序 ${item.scoreBreakdown.recency}`;
 }
 
+function formatStructuredRelationshipModeLabel(
+  mode: GenerationDebugContext['structuredRelationshipDebug']['mode'],
+) {
+  switch (mode) {
+    case 'graph_1hop':
+      return 'graph_1hop（一度优先）';
+    case 'graph_2hop':
+      return 'graph_2hop（二度补位）';
+    case 'degraded':
+      return 'degraded（弱提示回退）';
+    default:
+      return 'unknown（未解析）';
+  }
+}
+
+function formatStructuredRelationshipReasonLabel(
+  reason: GenerationDebugContext['structuredRelationshipDebug']['reason'],
+) {
+  switch (reason) {
+    case 'ok':
+      return 'ok（命中稳定信号）';
+    case 'missing_chapter_context':
+      return 'missing_chapter_context（章节上下文不足）';
+    case 'no_focus_entity':
+      return 'no_focus_entity（缺少焦点实体）';
+    case 'no_historical_relationship':
+      return 'no_historical_relationship（历史一度关系不足）';
+    case 'no_two_hop_relationship':
+      return 'no_two_hop_relationship（历史二度关系不足）';
+    case 'high_noise':
+      return 'high_noise（关系候选噪音偏高）';
+    default:
+      return 'unknown（未解析）';
+  }
+}
+
+function formatStructuredRelationshipSecondaryLabel(
+  label: NonNullable<GenerationDebugContext['structuredRelationshipDebug']['secondaryEvaluation']>['label'],
+) {
+  return label === 'supplement' ? '补充评估' : '补位评估';
+}
+
+function formatStructuredRelationshipNonTriggerCategoryLabel(
+  category: GenerationDebugContext['structuredRelationshipDebug']['nonTriggerCategory'],
+) {
+  switch (category) {
+    case 'onehop_sufficient':
+      return 'onehop_sufficient（一度强信号已足够）';
+    case 'twohop_redundant':
+      return 'twohop_redundant（二跳路径冗余未补充）';
+    case 'sparse_history':
+      return 'sparse_history（历史关系稀薄）';
+    case 'onehop_noise_without_twohop':
+      return 'onehop_noise_without_twohop（一度噪音高且二度不足）';
+    case 'unknown':
+      return 'unknown（未归类）';
+    default:
+      return '不适用';
+  }
+}
+
 function formatRetrievalSourceLabel(sourceType: GenerationDebugRetrieval['items'][number]['sourceType']) {
   switch (sourceType) {
     case 'memory_chunk':
@@ -389,11 +456,16 @@ function formatRetrievalItemTitle(item: GenerationDebugRetrieval['items'][number
   }
 }
 
+/**
+ * @deprecated 旧版生成控制台兼容入口。
+ * 主创作链路已迁到 WorkspaceLayout / GenerationView，这里保留队列、调试与维护能力。
+ */
 export function GenerationWorkspace({
   projectId,
   projectTitle,
   projectDescription = '',
   onOpenChapter,
+  onReturnToWorkspace,
 }: GenerationWorkspaceProps) {
   const chapters = useEditorStore((state) => state.chapters);
   const saveChapterContent = useEditorStore((state) => state.saveChapterContent);
@@ -404,6 +476,22 @@ export function GenerationWorkspace({
   const currentProject = useProjectStore((state) => state.projects.find((project) => project.id === projectId) ?? null);
   const updateProject = useProjectStore((state) => state.updateProject);
   const settings = useSettingsStore((state) => state.settings);
+  const effectiveStylePrompt = useMemo(
+    () =>
+      mergePromptSections(
+        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
+        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
+        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
+        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
+      ),
+    [
+      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
+      currentProject?.templateSnapshot?.promptBundle.stylePrompt,
+      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
+      currentProject?.stylePrompt,
+      settings.stylePrompt,
+    ],
+  );
   const createSnapshot = useSnapshotStore((state) => state.createSnapshot);
   const { toast } = useToast();
   const [selectedChapterId, setSelectedChapterId] = useState<Id | null>(null);
@@ -434,6 +522,7 @@ export function GenerationWorkspace({
   const [isChunkBackfilling, setIsChunkBackfilling] = useState(false);
   const [isVolumeRecapBackfilling, setIsVolumeRecapBackfilling] = useState(false);
   const [isEmbeddingBackfilling, setIsEmbeddingBackfilling] = useState(false);
+  const [isProjectArtifactRebuilding, setIsProjectArtifactRebuilding] = useState(false);
   const [activeMaintenanceRun, setActiveMaintenanceRun] = useState<GenerationMaintenanceRunSnapshot | null>(null);
   const [lastChunkBackfill, setLastChunkBackfill] =
     useState<GenerationMaintenanceResultSnapshot<GenerationMemoryChunkBackfillResult> | null>(null);
@@ -453,6 +542,18 @@ export function GenerationWorkspace({
   const [isOutlineSaving, setIsOutlineSaving] = useState(false);
   const [isProjectGateSaving, setIsProjectGateSaving] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  function buildTemplateContextBundle(baseBundle: string) {
+    return mergePromptSections(
+      formatPromptSection(
+        '创作模板章节写法约束',
+        currentProject?.templateSnapshot?.promptBundle.beatPrompt ||
+          currentProject?.templateSnapshot?.promptBundle.writingPrompt,
+      ),
+      formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
+      baseBundle,
+    );
+  }
 
   const selectedChapter = useMemo(
     () => chapters.find((chapter) => chapter.id === selectedChapterId) ?? chapters[0] ?? null,
@@ -487,6 +588,24 @@ export function GenerationWorkspace({
     [entities],
   );
   const worldState = useMemo(() => buildWorldStateSummary(entities), [entities]);
+
+  async function getOutlinePromptPayload(chapterId: Id) {
+    const chapter = chapters.find((item) => item.id === chapterId);
+
+    if (!chapter) {
+      return {
+        bookOutline: undefined,
+        volumeOutline: undefined,
+        volumeGoal: undefined,
+        chapterBeat: undefined,
+        nextChapterPreview: undefined,
+        forbiddenZone: undefined,
+      };
+    }
+
+    return buildChapterPromptPayload(projectId, chapter, chapters);
+  }
+
   const selectedServerJobs = useMemo(
     () =>
       selectedChapterIds
@@ -530,7 +649,8 @@ export function GenerationWorkspace({
     () => findMatchingLightweightRecallPreset(projectGateOverrideDraft.lightweightRecall),
     [projectGateOverrideDraft.lightweightRecall],
   );
-  const isMaintenanceRunning = isChunkBackfilling || isVolumeRecapBackfilling || isEmbeddingBackfilling;
+  const isMaintenanceRunning =
+    isChunkBackfilling || isVolumeRecapBackfilling || isEmbeddingBackfilling || isProjectArtifactRebuilding;
   const isMaintenanceActionDisabled =
     isMaintenanceRunning || (maintenanceScope === 'chapter' && !selectedDebugChapterId);
   const maintenanceScopeLabel = formatMaintenanceScopeLabel(maintenanceScope, selectedDebugChapter?.chapterTitle);
@@ -884,6 +1004,32 @@ export function GenerationWorkspace({
     }
   }
 
+  async function handleRebuildProjectArtifacts() {
+    setIsProjectArtifactRebuilding(true);
+    setActiveMaintenanceRun({
+      kind: 'rebuild',
+      scope: 'project',
+      chapterTitle: '',
+      limit: undefined,
+    });
+
+    try {
+      const result = await rebuildProjectArtifactsFromLocalState(settings.serverUrl, projectId);
+      await refreshOverview(false);
+      setDebugSelectionRefreshKey((current) => current + 1);
+      toast(
+        `服务端生成态已重建：重放 ${result.rebuiltChapterCount} 章，重建 ${result.rebuiltVolumeCount} 个卷级总结`,
+        'success',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`重建服务端生成态失败：${message}`, 'error');
+    } finally {
+      setIsProjectArtifactRebuilding(false);
+      setActiveMaintenanceRun(null);
+    }
+  }
+
   async function handleSaveProjectGateOverride() {
     if (!currentProject) {
       return;
@@ -991,6 +1137,12 @@ export function GenerationWorkspace({
           chapters,
           entities,
         });
+        const outlinePromptPayload = await getOutlinePromptPayload(chapter.id);
+
+        if (!outlinePromptPayload.chapterBeat) {
+          throw new Error(`《${chapter.title}》缺少章节拍，请先到大纲页补齐后再批量生成`);
+        }
+
         const response = await createChapterPlan(settings.serverUrl, {
           projectId,
           chapterId: chapter.id,
@@ -1001,12 +1153,17 @@ export function GenerationWorkspace({
           previousChapterTitle: previousChapter?.title,
           projectTitle,
           projectDescription,
+          bookOutline: outlinePromptPayload.bookOutline,
+          volumeOutline: outlinePromptPayload.volumeOutline,
+          volumeGoal: outlinePromptPayload.volumeGoal,
+          chapterBeat: outlinePromptPayload.chapterBeat,
+          nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+          forbiddenZone: outlinePromptPayload.forbiddenZone,
           previousSummary: previousSummary?.summary ?? '',
           worldState,
-          contextBundle: contextBundle.bundle,
+          contextBundle: buildTemplateContextBundle(contextBundle.bundle),
           foreshadowSnapshot: currentForeshadowSnapshot,
-          model: settings.modelName,
-          temperature: settings.temperature,
+          ...buildModelRequestConfig(settings),
         });
 
         await saveChapterOutline(projectId, chapter.id, response.outline);
@@ -1046,6 +1203,11 @@ export function GenerationWorkspace({
             chapters,
             entities,
           });
+          const outlinePromptPayload = await getOutlinePromptPayload(chapter.id);
+
+          if (!outlinePromptPayload.chapterBeat) {
+            throw new Error(`《${chapter.title}》缺少章节拍，请先到大纲页补齐后再加入队列`);
+          }
 
           return {
             projectId,
@@ -1057,12 +1219,17 @@ export function GenerationWorkspace({
             previousChapterTitle: previousChapter?.title,
             projectTitle,
             projectDescription,
+            bookOutline: outlinePromptPayload.bookOutline,
+            volumeOutline: outlinePromptPayload.volumeOutline,
+            volumeGoal: outlinePromptPayload.volumeGoal,
+            chapterBeat: outlinePromptPayload.chapterBeat,
+            nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+            forbiddenZone: outlinePromptPayload.forbiddenZone,
             previousSummary: previousSummary?.summary ?? '',
             worldState,
-            contextBundle: contextBundle.bundle,
-            stylePrompt: settings.stylePrompt.trim() || undefined,
-            model: settings.modelName,
-            temperature: settings.temperature,
+            contextBundle: buildTemplateContextBundle(contextBundle.bundle),
+            stylePrompt: effectiveStylePrompt.trim() || undefined,
+            ...buildModelRequestConfig(settings),
             priority: orderedChapters.length - index,
             gateConfigOverride: currentProject?.generationGateOverride ?? null,
             outlineOverride: savedOutline ? createOutlineDraft(savedOutline) : null,
@@ -1428,18 +1595,32 @@ export function GenerationWorkspace({
         <div className="border-b border-neutral-800 px-5 py-4">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">生成控制台</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">兼容控制台</p>
               <p className="mt-1 text-sm text-neutral-300">当前共 {chapters.length} 个章节</p>
             </div>
-            <button
-              type="button"
-              onClick={() => void handleRefreshConsole()}
-              disabled={isRefreshing}
-              className="rounded-2xl p-2 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
-              title="刷新服务端状态"
-            >
-              <RefreshCcw size={16} className={isRefreshing ? 'animate-spin' : ''} />
-            </button>
+            <div className="flex items-center gap-2">
+              {onReturnToWorkspace ? (
+                <button
+                  type="button"
+                  onClick={onReturnToWorkspace}
+                  className="rounded-2xl border border-neutral-700 px-3 py-2 text-xs text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                >
+                  返回工作台
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void handleRefreshConsole()}
+                disabled={isRefreshing}
+                className="rounded-2xl p-2 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
+                title="刷新服务端状态"
+              >
+                <RefreshCcw size={16} className={isRefreshing ? 'animate-spin' : ''} />
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 rounded-2xl border border-yellow-500/20 bg-yellow-500/10 px-3 py-3 text-xs leading-6 text-yellow-100">
+            当前页属于旧版兼容控制台。主生成/审核流程已迁到“创作工作台”的“生成”页，这里主要保留服务端队列、调试明细和维护入口。
           </div>
           <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
             <div className="rounded-2xl bg-neutral-900 px-3 py-3 text-center">
@@ -1598,6 +1779,21 @@ export function GenerationWorkspace({
                             }`}
                           >
                             审查{formatReviewSeverity(serverJob.review.overallSeverity)}
+                          </span>
+                        )}
+                        {serverJob?.languageQa && (
+                          <span
+                            className={`rounded-full px-2 py-1 ${
+                              serverJob.languageQa.severity === 'critical'
+                                ? 'bg-red-500/15 text-red-300'
+                                : serverJob.languageQa.severity === 'high'
+                                  ? 'bg-orange-500/15 text-orange-300'
+                                  : serverJob.languageQa.severity === 'medium'
+                                    ? 'bg-yellow-500/15 text-yellow-300'
+                                    : 'bg-emerald-500/15 text-emerald-300'
+                            }`}
+                          >
+                            语校{formatReviewSeverity(serverJob.languageQa.severity)}
                           </span>
                         )}
                         {serverJob?.style && (
@@ -2528,6 +2724,49 @@ export function GenerationWorkspace({
                     </div>
                   )}
 
+                  {selectedServerJob.languageQa && (
+                    <div className="rounded-2xl border border-neutral-800 bg-neutral-900/70 p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm text-neutral-200">服务端语言校对</p>
+                        <span
+                          className={`rounded-full px-2 py-1 text-[11px] ${
+                            selectedServerJob.languageQa.severity === 'critical'
+                              ? 'bg-red-500/15 text-red-300'
+                              : selectedServerJob.languageQa.severity === 'high'
+                                ? 'bg-orange-500/15 text-orange-300'
+                                : selectedServerJob.languageQa.severity === 'medium'
+                                  ? 'bg-yellow-500/15 text-yellow-300'
+                                  : 'bg-emerald-500/15 text-emerald-300'
+                          }`}
+                        >
+                          级别：{formatReviewSeverity(selectedServerJob.languageQa.severity)}
+                        </span>
+                        <span className="rounded-full bg-neutral-800 px-2 py-1 text-[11px] text-neutral-400">
+                          问题 {selectedServerJob.languageQa.issues.length}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-xs leading-6 text-neutral-400">{selectedServerJob.languageQa.summary}</p>
+                      {selectedServerJob.languageQa.issues.length > 0 && (
+                        <div className="mt-4 space-y-2">
+                          {selectedServerJob.languageQa.issues.map((issue, index) => (
+                            <div key={`language-qa-${index}`} className="rounded-xl border border-neutral-800 px-3 py-2 text-xs text-neutral-400">
+                              <p className="text-neutral-200">
+                                {index + 1}. {issue.title} · {formatReviewSeverity(issue.severity)}
+                              </p>
+                              <p className="mt-1 leading-6">{issue.description}</p>
+                              {issue.suggestion && (
+                                <p className="mt-1 text-neutral-500">建议：{issue.suggestion}</p>
+                              )}
+                              {issue.evidence && (
+                                <p className="mt-1 text-neutral-500">证据：{issue.evidence}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {selectedServerJob.style && (
                     <div className="rounded-2xl border border-neutral-800 bg-neutral-900/70 p-4">
                       <p className="mb-2 text-sm text-neutral-200">服务端风格转译</p>
@@ -2590,7 +2829,7 @@ export function GenerationWorkspace({
                 <p>Beat 进度：{selectedServerJob ? formatJobProgress(selectedServerJob) : '暂无'}</p>
                 <p>自动重写：{selectedServerJob ? `${selectedServerJob.reviewRewriteCount} 次` : '暂无'}</p>
                 <p>审查级别：{selectedServerJob?.review ? formatReviewSeverity(selectedServerJob.review.overallSeverity) : '暂无'}</p>
-                <p>风格层：{selectedServerJob?.style ? '已执行' : (settings.stylePrompt.trim() ? '待执行/未入队' : '未启用')}</p>
+                <p>风格层：{selectedServerJob?.style ? '已执行' : (effectiveStylePrompt.trim() ? '待执行/未入队' : '未启用')}</p>
                 <p>润色终检：{selectedServerJob?.polish ? (selectedServerJob.polish.antiAiForceCheck === 'fail' ? '未通过' : '通过') : '暂无'}</p>
                 <p>门控原因：{selectedServerJob?.reviewGateReason || '暂无'}</p>
                 <p>重写提示：{selectedServerJob?.rewriteGuidance ? '已生成' : '暂无'}</p>
@@ -2674,7 +2913,9 @@ export function GenerationWorkspace({
                             ? '记忆切片'
                             : activeMaintenanceRun.kind === 'volume-recaps'
                               ? '卷级总结'
-                              : '向量缓存'}
+                              : activeMaintenanceRun.kind === 'embeddings'
+                                ? '向量缓存'
+                                : '生成态重建'}
                           {' / '}
                           {formatMaintenanceScopeLabel(activeMaintenanceRun.scope, activeMaintenanceRun.chapterTitle)}
                           {' / '}
@@ -2683,7 +2924,7 @@ export function GenerationWorkspace({
                       )}
                     </div>
 
-                    <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto_auto_auto]">
+                    <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto_auto_auto_auto]">
                       <div className="space-y-2">
                         <p className="text-xs font-medium text-neutral-300">作用范围</p>
                         <div className="flex flex-wrap gap-2">
@@ -2726,6 +2967,15 @@ export function GenerationWorkspace({
                           className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-xs text-neutral-100 outline-none transition-colors focus:border-indigo-500"
                         />
                       </label>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleRebuildProjectArtifacts()}
+                        disabled={isMaintenanceRunning}
+                        className="inline-flex items-center justify-center rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-xs font-medium text-emerald-200 transition-colors hover:border-emerald-500/50 hover:bg-emerald-500/15 disabled:cursor-not-allowed disabled:border-neutral-800 disabled:bg-neutral-950/70 disabled:text-neutral-600"
+                      >
+                        {isProjectArtifactRebuilding ? '重建中...' : '重建服务端生成态'}
+                      </button>
 
                       <button
                         type="button"
@@ -3195,7 +3445,7 @@ export function GenerationWorkspace({
                                 {item.vectorSimilarity !== null ? `；向量相似度 ${item.vectorSimilarity.toFixed(3)}` : ''}
                               </p>
                               <p className="mt-1">
-                                去重/重排：合并 {item.mergedCandidateCount} 条；初始 {item.preRerankScore} -> 最终 {item.score}
+                                去重/重排：合并 {item.mergedCandidateCount} 条；初始 {item.preRerankScore}{' -> '}最终 {item.score}
                                 {item.rerankDelta === 0 ? '（未调整）' : `（${item.rerankDelta > 0 ? '+' : ''}${item.rerankDelta}）`}
                               </p>
                               <p className="mt-1 text-neutral-500">
@@ -3258,6 +3508,47 @@ export function GenerationWorkspace({
                           聚焦实体：{debugContext.focusEntityNames.join('、') || '暂无'}；检索短语：
                           {debugContext.queryPhrases.join(' / ') || '暂无'}
                         </p>
+
+                        <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-3">
+                          <p className="text-sm text-neutral-200">4.3b 关系摘要</p>
+                          <div className="mt-2 space-y-1 text-xs text-neutral-500">
+                            <p>
+                              命中模式：{formatStructuredRelationshipModeLabel(debugContext.structuredRelationshipDebug.mode)}
+                            </p>
+                            <p>
+                              命中原因：{formatStructuredRelationshipReasonLabel(debugContext.structuredRelationshipDebug.reason)}
+                            </p>
+                            <p>
+                              二度评估：{debugContext.structuredRelationshipDebug.evaluatedTwoHop ? '已评估' : '未评估'}；二跳路径块：
+                              {debugContext.structuredRelationshipDebug.hasTwoHopPathBlock ? '有' : '无'}
+                            </p>
+                            <p>
+                              焦点实体：{debugContext.structuredRelationshipDebug.focusEntityNames.join('、') || '无'}
+                            </p>
+                            <p>
+                              接入策略：{debugContext.structuredRelationshipDebug.policy || '暂无'}
+                            </p>
+                            <p>
+                              未触发类别：
+                              {formatStructuredRelationshipNonTriggerCategoryLabel(
+                                debugContext.structuredRelationshipDebug.nonTriggerCategory,
+                              )}
+                            </p>
+                            {debugContext.structuredRelationshipDebug.secondaryEvaluation && (
+                              <p>
+                                {formatStructuredRelationshipSecondaryLabel(
+                                  debugContext.structuredRelationshipDebug.secondaryEvaluation.label,
+                                )}
+                                ：
+                                {formatStructuredRelationshipReasonLabel(
+                                  debugContext.structuredRelationshipDebug.secondaryEvaluation.reason,
+                                )}
+                                {' / '}
+                                {debugContext.structuredRelationshipDebug.secondaryEvaluation.raw || '暂无'}
+                              </p>
+                            )}
+                          </div>
+                        </div>
 
                         {debugContext.lightweightRecallItems.length > 0 && (
                           <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-3">

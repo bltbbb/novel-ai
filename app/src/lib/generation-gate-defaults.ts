@@ -15,7 +15,7 @@ export const DEFAULT_GENERATION_GATE_CONFIG: GenerationGateConfig = {
   reviewScoreThresholds: {
     consistency: 60,
     continuity: 60,
-    reader_pull: 55,
+    reader_pull: 60,
   },
   polishFailBlockReady: true,
   lightweightRecall: {

@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Layers3, Plus, WandSparkles, X } from 'lucide-react';
+import { buildProjectTemplateSnapshot } from '@/lib/project-template';
 import { PROJECT_TEMPLATES, getProjectTemplate } from '@/lib/project-templates';
+import { useTemplateLibraryStore } from '@/stores';
+import type { ProjectTemplateSnapshot } from '@/types';
 
 interface CreateProjectPayload {
   title: string;
   description: string;
   genre: string[];
+  templateSnapshot: ProjectTemplateSnapshot | null;
   seedChapters: Array<{
     title: string;
     content?: string;
@@ -28,13 +32,20 @@ interface ProjectTemplateDialogProps {
 }
 
 export function ProjectTemplateDialog({ open, onClose, onCreate }: ProjectTemplateDialogProps) {
+  const templates = useTemplateLibraryStore((state) => state.templates);
+  const loadTemplates = useTemplateLibraryStore((state) => state.loadTemplates);
   const [selectedTemplateKey, setSelectedTemplateKey] = useState('blank');
+  const [selectedLibraryTemplateId, setSelectedLibraryTemplateId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [hasEditedDescription, setHasEditedDescription] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
 
   const selectedTemplate = useMemo(() => getProjectTemplate(selectedTemplateKey), [selectedTemplateKey]);
+  const selectedLibraryTemplate = useMemo(
+    () => templates.find((template) => template.id === selectedLibraryTemplateId) ?? null,
+    [selectedLibraryTemplateId, templates],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -42,11 +53,13 @@ export function ProjectTemplateDialog({ open, onClose, onCreate }: ProjectTempla
     }
 
     setSelectedTemplateKey('blank');
+    setSelectedLibraryTemplateId(null);
     setTitle('');
     setDescription('');
     setHasEditedDescription(false);
     setIsCreating(false);
-  }, [open]);
+    void loadTemplates();
+  }, [loadTemplates, open]);
 
   useEffect(() => {
     if (!open) {
@@ -77,6 +90,9 @@ export function ProjectTemplateDialog({ open, onClose, onCreate }: ProjectTempla
         title: title.trim() || selectedTemplate.suggestedTitle,
         description: description.trim(),
         genre: [...selectedTemplate.genres],
+        templateSnapshot: selectedLibraryTemplate
+          ? buildProjectTemplateSnapshot(selectedLibraryTemplate)
+          : null,
         seedChapters: selectedTemplate.chapters.map((chapter) => ({
           title: chapter.title,
           content: chapter.content,
@@ -201,6 +217,63 @@ export function ProjectTemplateDialog({ open, onClose, onCreate }: ProjectTempla
             </div>
 
             <div className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-neutral-200">
+                <BookOpen size={15} className="text-indigo-400" />
+                创作模板
+              </div>
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  onClick={() => setSelectedLibraryTemplateId(null)}
+                  className={`w-full rounded-2xl border p-4 text-left transition-colors ${
+                    selectedLibraryTemplateId === null
+                      ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-100'
+                      : 'border-neutral-800 bg-neutral-950/60 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-950/80'
+                  }`}
+                >
+                  <p className="text-sm font-medium">不使用创作模板</p>
+                  <p className="mt-2 text-xs leading-6 text-neutral-500">
+                    项目仍可正常使用现有的大纲、卷纲、里程碑和正文生成流程。
+                  </p>
+                </button>
+
+                {templates.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-neutral-800 px-4 py-4 text-xs leading-6 text-neutral-500">
+                    当前模板库还是空的。可以先返回项目列表，进入“模板库”做拆书并保存模板。
+                  </div>
+                ) : (
+                  <div className="max-h-[250px] space-y-3 overflow-y-auto pr-1">
+                    {templates.map((template) => {
+                      const isActive = selectedLibraryTemplateId === template.id;
+
+                      return (
+                        <button
+                          key={template.id}
+                          type="button"
+                          onClick={() => setSelectedLibraryTemplateId(template.id)}
+                          className={`w-full rounded-2xl border p-4 text-left transition-colors ${
+                            isActive
+                              ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-100'
+                              : 'border-neutral-800 bg-neutral-950/60 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-950/80'
+                          }`}
+                        >
+                          <p className="text-sm font-medium">{template.name}</p>
+                          <p className="mt-1 text-xs text-neutral-500">
+                            {template.sourceTitle}
+                            {template.sourceAuthor ? ` / ${template.sourceAuthor}` : ''}
+                          </p>
+                          <p className="mt-2 line-clamp-3 text-xs leading-6 text-neutral-400">
+                            {template.summary || '暂无模板摘要'}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
               <div className="mb-3 text-sm font-medium text-neutral-200">模板预览</div>
               <div className="space-y-3 text-sm text-neutral-400">
                 <div>
@@ -229,6 +302,15 @@ export function ProjectTemplateDialog({ open, onClose, onCreate }: ProjectTempla
                     <p className="mt-2 text-neutral-300">{selectedTemplate.chapters[0].title}</p>
                     <p className="mt-2 line-clamp-5 whitespace-pre-wrap text-sm leading-6 text-neutral-500">
                       {selectedTemplate.chapters[0].content}
+                    </p>
+                  </div>
+                )}
+                {selectedLibraryTemplate && (
+                  <div>
+                    <p className="text-neutral-500">已选创作模板</p>
+                    <p className="mt-2 text-neutral-300">{selectedLibraryTemplate.name}</p>
+                    <p className="mt-2 line-clamp-5 whitespace-pre-wrap text-sm leading-6 text-neutral-500">
+                      {selectedLibraryTemplate.summary}
                     </p>
                   </div>
                 )}

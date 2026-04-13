@@ -4,6 +4,8 @@ import { loadServerEnv } from './config/env.js';
 import { registerGenerationDebugRoutes } from './routes/generation-debug.js';
 import { registerGenerationMaintenanceRoutes } from './routes/generation-maintenance.js';
 import { registerRuntimeConfigRoutes } from './routes/runtime-config.js';
+import { hydrateAIRuntimeConfig } from './services/ai-runtime-config-store.js';
+import { recoverInterruptedBookAnalysisJobs } from './services/book-analysis-job-runner.js';
 import { startGenerationJobWorker } from './services/generation-job-runner.js';
 import { hydrateGenerationGateConfig } from './services/generation-gate-config-store.js';
 import { registerAIRoutes } from './routes/ai.js';
@@ -14,9 +16,12 @@ import { registerSearchRoutes } from './routes/search.js';
 
 async function bootstrap() {
   const env = loadServerEnv();
+  await hydrateAIRuntimeConfig(env);
   await hydrateGenerationGateConfig(env);
+  await recoverInterruptedBookAnalysisJobs(env);
   const app = Fastify({
     logger: true,
+    bodyLimit: 50 * 1024 * 1024,
   });
 
   await app.register(cors, {

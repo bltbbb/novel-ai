@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ServerEnv } from '../config/env.js';
 import type {
+  ChapterLanguageQaDraft,
   ChapterReviewDraft,
   ChapterSummaryDraft,
   StateChangeDraft,
@@ -150,6 +151,47 @@ export function upsertGenerationReviewMetrics(
     input.review.needsRewrite ? 1 : 0,
     input.review.antiAiForceCheck,
     JSON.stringify(input.review.checkerResults),
+    currentTime,
+    currentTime,
+  );
+}
+
+export function upsertGenerationLanguageQaMetrics(
+  env: ServerEnv,
+  input: {
+    projectId: string;
+    chapterId: string;
+    chapterTitle: string;
+    languageQa: ChapterLanguageQaDraft;
+  },
+) {
+  const db = getGenerationDatabase(env);
+  const currentTime = nowIsoString();
+
+  db.prepare(`
+    INSERT INTO generation_language_qa_metrics (
+      project_id,
+      chapter_id,
+      chapter_title,
+      severity,
+      summary,
+      issues_json,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(project_id, chapter_id) DO UPDATE SET
+      chapter_title = excluded.chapter_title,
+      severity = excluded.severity,
+      summary = excluded.summary,
+      issues_json = excluded.issues_json,
+      updated_at = excluded.updated_at
+  `).run(
+    input.projectId,
+    input.chapterId,
+    input.chapterTitle,
+    input.languageQa.severity,
+    input.languageQa.summary,
+    JSON.stringify(input.languageQa.issues),
     currentTime,
     currentTime,
   );

@@ -12,6 +12,8 @@ import type {
   GenerationDebugRelationshipRecord,
   GenerationMemoryChunkBackfillResult,
   GenerationMemoryEmbeddingBackfillResult,
+  GenerationProjectArtifactRebuildRequest,
+  GenerationProjectArtifactRebuildResponse,
   GenerationVolumeRecapBackfillResult,
 } from '@/types';
 
@@ -212,6 +214,17 @@ export function backfillGenerationMemoryEmbeddings(
   return postJson<GenerationMaintenanceBackfillRequest, GenerationMemoryEmbeddingBackfillResult>(
     serverUrl,
     '/api/runtime/generation-maintenance/backfill-memory-embeddings',
+    request,
+  );
+}
+
+export function rebuildProjectGenerationArtifacts(
+  serverUrl: string,
+  request: GenerationProjectArtifactRebuildRequest,
+) {
+  return postJson<GenerationProjectArtifactRebuildRequest, GenerationProjectArtifactRebuildResponse>(
+    serverUrl,
+    '/api/runtime/generation-maintenance/rebuild-project-artifacts',
     request,
   );
 }

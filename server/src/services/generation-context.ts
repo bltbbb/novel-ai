@@ -15,6 +15,10 @@ import {
   type GenerationForeshadowLifecycle,
 } from './generation-foreshadow-store.js';
 import { getGenerationDatabase } from './generation-sqlite.js';
+import {
+  buildResourceContinuityBlocks,
+  loadResourceStateRows,
+} from './generation-resource-continuity.js';
 import { listGenerationVolumeRecaps, type GenerationVolumeRecapRecord } from './generation-volume-recap-store.js';
 
 interface GenerationContextBuildInput {
@@ -134,10 +138,29 @@ interface StructuredRelationshipEdgeCandidate {
   confidenceLevel: StructuredRelationshipConfidenceLevel;
 }
 
+interface StructuredRelationshipPathCandidate {
+  focusEntityName: string;
+  viaEntityName: string;
+  targetEntityName: string;
+  edgeA: StructuredRelationshipEdgeCandidate;
+  edgeB: StructuredRelationshipEdgeCandidate;
+  confidence: number;
+  confidenceLevel: StructuredRelationshipConfidenceLevel;
+}
+
+interface StructuredRelationshipSignalResult {
+  mode: GenerationStructuredRelationshipQueryMode;
+  reason: GenerationStructuredRelationshipQueryReason;
+  detailBlocks: string[];
+  acceptedEdges: StructuredRelationshipEdgeCandidate[];
+  acceptedPaths: StructuredRelationshipPathCandidate[];
+}
+
 interface StructuredRelationshipContextResult {
   mode: GenerationStructuredRelationshipQueryMode;
   reason: GenerationStructuredRelationshipQueryReason;
-  edgeCount: number;
+  signalCount: number;
+  detailBlocks: string[];
   blocks: string[];
 }
 
@@ -290,6 +313,31 @@ function tailText(value: string, maxLength: number) {
   return `...${trimmed.slice(-maxLength)}`;
 }
 
+function countTextOccurrences(source: string | null | undefined, pattern: string) {
+  const normalizedSource = normalizeText(source);
+  const normalizedPattern = normalizeText(pattern);
+
+  if (!normalizedSource || !normalizedPattern) {
+    return 0;
+  }
+
+  let count = 0;
+  let startIndex = 0;
+
+  while (true) {
+    const nextIndex = normalizedSource.indexOf(normalizedPattern, startIndex);
+
+    if (nextIndex < 0) {
+      break;
+    }
+
+    count += 1;
+    startIndex = nextIndex + normalizedPattern.length;
+  }
+
+  return count;
+}
+
 function buildSection(title: string, blocks: string[]) {
   if (blocks.length === 0) {
     return '';
@@ -358,7 +406,18 @@ function compareChapterRows(left: Pick<ChapterMemoryRow, 'chapterOrder' | 'updat
 }
 
 function buildChapterLabel(chapterOrder: number, chapterTitle: string) {
-  return chapterOrder > 0 ? `第${chapterOrder}章 ${chapterTitle}` : chapterTitle;
+  if (chapterOrder <= 0) {
+    return chapterTitle;
+  }
+
+  const trimmedTitle = chapterTitle.trim();
+  const prefix = `第${chapterOrder}章`;
+
+  if (trimmedTitle.startsWith(prefix)) {
+    return trimmedTitle;
+  }
+
+  return `${prefix} ${trimmedTitle}`;
 }
 
 function createUniqueList(values: string[]) {
@@ -371,22 +430,65 @@ function createUniqueList(values: string[]) {
   );
 }
 
-function buildQueryText(input: GenerationContextBuildInput) {
-  return [
-    input.chapterTitle,
-    input.volumeTitle,
-    input.previousChapterTitle,
-    input.previousSummary,
-    input.worldState,
-    input.outline?.goal,
-    input.outline?.obstacle,
-    input.outline?.cost,
-    ...(input.outline?.beats ?? []),
-    ...(input.outline?.immutableFacts ?? []),
-    input.fallbackContextBundle,
-  ]
-    .filter(Boolean)
-    .join('\n');
+function buildFocusSignalTexts(input: GenerationContextBuildInput) {
+  return {
+    hard: [
+      input.chapterTitle,
+      input.outline?.goal,
+      input.outline?.obstacle,
+      input.outline?.cost,
+      ...(input.outline?.beats ?? []),
+      ...(input.outline?.immutableFacts ?? []),
+    ].filter(Boolean) as string[],
+    soft: [
+      input.previousChapterTitle,
+      input.previousSummary,
+      input.worldState,
+    ].filter(Boolean) as string[],
+  };
+}
+
+function findChapterRowById(chapterRows: ChapterMemoryRow[], chapterId?: string) {
+  if (!chapterId) {
+    return null;
+  }
+
+  return chapterRows.find((row) => row.chapterId === chapterId) ?? null;
+}
+
+function buildEntityLatestSeenOrderMap(chapterRows: ChapterMemoryRow[], currentChapterOrder: number | null) {
+  const latestSeenOrderMap = new Map<string, number>();
+
+  for (const row of chapterRows) {
+    if (row.chapterOrder <= 0) {
+      continue;
+    }
+
+    if (currentChapterOrder !== null && row.chapterOrder >= currentChapterOrder) {
+      continue;
+    }
+
+    for (const entityName of row.entitiesAppeared) {
+      const key = normalizeText(entityName);
+      const currentMax = latestSeenOrderMap.get(key) ?? 0;
+
+      if (row.chapterOrder > currentMax) {
+        latestSeenOrderMap.set(key, row.chapterOrder);
+      }
+    }
+  }
+
+  return latestSeenOrderMap;
+}
+
+function resolveEntityPositionScore(entityNames: string[], entityName: string, scoreByIndex: number[]) {
+  const index = entityNames.findIndex((item) => normalizeText(item) === normalizeText(entityName));
+
+  if (index < 0) {
+    return 0;
+  }
+
+  return scoreByIndex[index] ?? 1;
 }
 
 function buildQueryPhrases(input: GenerationContextBuildInput) {
@@ -626,30 +728,141 @@ function selectFocusEntityNames(
   chapterRows: ChapterMemoryRow[],
   entityRows: GenerationEntityRow[],
 ) {
-  const queryText = buildQueryText(input);
-  const matchedByQuery = entityRows
-    .filter((row) => includesQuery([queryText], row.entityName))
-    .map((row) => row.entityName);
+  const currentChapterOrder = resolveCurrentChapterOrder(input, chapterRows);
+  const currentRow = findChapterRowById(chapterRows, input.chapterId);
+  const previousRow = findChapterRowById(chapterRows, input.previousChapterId);
+  const { hard, soft } = buildFocusSignalTexts(input);
+  const latestSeenOrderMap = buildEntityLatestSeenOrderMap(chapterRows, currentChapterOrder);
+  const scoredCandidates = entityRows
+    .map((row) => {
+      const hardHitCount = hard.reduce((total, text) => total + countTextOccurrences(text, row.entityName), 0);
+      const softHitCount = soft.reduce((total, text) => total + countTextOccurrences(text, row.entityName), 0);
+      const currentChapterScore = currentRow
+        ? resolveEntityPositionScore(currentRow.entitiesAppeared, row.entityName, [8, 5, 3, 1])
+        : 0;
+      const previousChapterScore = previousRow
+        ? resolveEntityPositionScore(previousRow.entitiesAppeared, row.entityName, [5, 3, 2, 1])
+        : 0;
+      const latestSeenOrder = latestSeenOrderMap.get(normalizeText(row.entityName)) ?? 0;
+      const recencyScore =
+        currentChapterOrder !== null && latestSeenOrder > 0
+          ? Math.max(0, 2 - Math.floor(Math.max(0, currentChapterOrder - latestSeenOrder - 1) / 10))
+          : 0;
+      const score =
+        hardHitCount * 10
+        + softHitCount * 4
+        + currentChapterScore
+        + previousChapterScore
+        + recencyScore
+        + (row.pinned ? 1 : 0);
 
-  if (matchedByQuery.length > 0) {
-    return createUniqueList(matchedByQuery).slice(0, 6);
+      return {
+        entityName: row.entityName,
+        hardHitCount,
+        softHitCount,
+        currentChapterScore,
+        previousChapterScore,
+        latestSeenOrder,
+        pinned: row.pinned,
+        score,
+      };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      if (right.hardHitCount !== left.hardHitCount) {
+        return right.hardHitCount - left.hardHitCount;
+      }
+
+      if (right.currentChapterScore !== left.currentChapterScore) {
+        return right.currentChapterScore - left.currentChapterScore;
+      }
+
+      if (right.previousChapterScore !== left.previousChapterScore) {
+        return right.previousChapterScore - left.previousChapterScore;
+      }
+
+      if (right.latestSeenOrder !== left.latestSeenOrder) {
+        return right.latestSeenOrder - left.latestSeenOrder;
+      }
+
+      if (right.pinned !== left.pinned) {
+        return Number(right.pinned) - Number(left.pinned);
+      }
+
+      return left.entityName.localeCompare(right.entityName, 'zh-CN');
+    });
+
+  if (scoredCandidates.length > 0) {
+    const limit = scoredCandidates.some((item) => item.hardHitCount > 0) ? 4 : 3;
+    return scoredCandidates.slice(0, limit).map((item) => item.entityName);
   }
 
-  if (input.previousChapterId) {
-    const previousRow = chapterRows.find((row) => row.chapterId === input.previousChapterId);
+  if (currentRow && currentRow.entitiesAppeared.length > 0) {
+    return createUniqueList(currentRow.entitiesAppeared).slice(0, 2);
+  }
 
-    if (previousRow && previousRow.entitiesAppeared.length > 0) {
-      return previousRow.entitiesAppeared.slice(0, 6);
-    }
+  if (previousRow && previousRow.entitiesAppeared.length > 0) {
+    return createUniqueList(previousRow.entitiesAppeared).slice(0, 2);
   }
 
   const pinnedNames = entityRows.filter((row) => row.pinned).map((row) => row.entityName);
 
   if (pinnedNames.length > 0) {
-    return pinnedNames.slice(0, 4);
+    return pinnedNames.slice(0, 3);
   }
 
-  return entityRows.slice(0, 4).map((row) => row.entityName);
+  return entityRows.slice(0, 3).map((row) => row.entityName);
+}
+
+function selectStructuredRelationshipFocusEntityNames(
+  input: GenerationContextBuildInput,
+  chapterRows: ChapterMemoryRow[],
+  focusEntityNames: string[],
+) {
+  const uniqueFocusEntityNames = createUniqueList(focusEntityNames);
+
+  if (uniqueFocusEntityNames.length <= 1) {
+    return uniqueFocusEntityNames;
+  }
+
+  const currentRow = findChapterRowById(chapterRows, input.chapterId);
+
+  if (currentRow) {
+    const primaryCurrentEntity = currentRow.entitiesAppeared.find((entityName) =>
+      uniqueFocusEntityNames.some((focusEntityName) => normalizeText(focusEntityName) === normalizeText(entityName)),
+    );
+
+    if (primaryCurrentEntity) {
+      return [primaryCurrentEntity];
+    }
+  }
+
+  const { hard } = buildFocusSignalTexts(input);
+  const explicitHits = uniqueFocusEntityNames.filter((entityName) =>
+    hard.some((text) => countTextOccurrences(text, entityName) > 0),
+  );
+
+  if (explicitHits.length > 0) {
+    return explicitHits.slice(0, 1);
+  }
+
+  const previousRow = findChapterRowById(chapterRows, input.previousChapterId);
+
+  if (previousRow) {
+    const primaryPreviousEntity = previousRow.entitiesAppeared.find((entityName) =>
+      uniqueFocusEntityNames.some((focusEntityName) => normalizeText(focusEntityName) === normalizeText(entityName)),
+    );
+
+    if (primaryPreviousEntity) {
+      return [primaryPreviousEntity];
+    }
+  }
+
+  return uniqueFocusEntityNames.slice(0, 1);
 }
 
 function buildRecentSummaryBlocks(rows: ChapterMemoryRow[]) {
@@ -926,7 +1139,7 @@ function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: 
     });
 }
 
-function describeStructuredRelationshipReason(reason: GenerationStructuredRelationshipQueryReason) {
+function describeStructuredRelationshipOneHopReason(reason: GenerationStructuredRelationshipQueryReason) {
   if (reason === 'ok') {
     return '命中历史一度关系边';
   }
@@ -944,6 +1157,26 @@ function describeStructuredRelationshipReason(reason: GenerationStructuredRelati
   }
 
   return '历史关系不足';
+}
+
+function describeStructuredRelationshipTwoHopReason(reason: GenerationStructuredRelationshipQueryReason) {
+  if (reason === 'ok') {
+    return '命中稳定二度关系路径';
+  }
+
+  if (reason === 'missing_chapter_context') {
+    return '缺少有效章节上下文';
+  }
+
+  if (reason === 'no_focus_entity') {
+    return '未识别可用焦点实体';
+  }
+
+  if (reason === 'high_noise') {
+    return '候选二度路径噪音偏高';
+  }
+
+  return '历史二度关系不足';
 }
 
 function buildStructuredRelationshipFallbackHintBlocks(
@@ -990,46 +1223,48 @@ function buildStructuredRelationshipFallbackHintBlocks(
   return hintBlocks;
 }
 
-function buildStructuredRelationshipContextResult(input: {
+function buildStructuredRelationshipNoisyEdgeHintBlocks(edges: StructuredRelationshipEdgeCandidate[]) {
+  return edges
+    .slice(0, 1)
+    .map((edge) =>
+      [
+        `- 弱结构提示：${edge.sourceEntityName} -> ${edge.targetEntityName}（${edge.relationshipType}）`,
+        `来源：${edge.chapterTitle || '未知章节'}`,
+        `证据：${truncateText(edge.evidence || edge.description, 80)}`,
+        `置信：${edge.confidenceLevel} (${edge.confidence.toFixed(2)})`,
+      ].join('\n'),
+    );
+}
+
+function buildStructuredRelationshipOneHopSignalResult(input: {
   relationshipRows: RelationshipRow[];
   chapterRows: ChapterMemoryRow[];
   focusEntityNames: string[];
   currentChapterOrder: number | null;
   currentChapterId?: string;
-}): StructuredRelationshipContextResult {
+}): StructuredRelationshipSignalResult {
   const uniqueFocusEntityNames = createUniqueList(input.focusEntityNames);
-  const focusLabel = uniqueFocusEntityNames.join('、') || '无';
-
   const makeResult = (
     reason: GenerationStructuredRelationshipQueryReason,
-    edgeCount: number,
     detailBlocks: string[],
-  ): StructuredRelationshipContextResult => {
-    const mode: GenerationStructuredRelationshipQueryMode = reason === 'ok' ? 'graph_1hop' : 'degraded';
-    const modeLabel = mode === 'graph_1hop' ? 'graph_1hop（结构化强信号）' : 'degraded（仅弱提示）';
-    const headerBlock = [
-      `- 命中模式：${modeLabel}`,
-      '注入层：relationships',
-      `原因：${reason}（${describeStructuredRelationshipReason(reason)}）`,
-      `焦点实体：${focusLabel}`,
-    ].join('\n');
-
+  ): StructuredRelationshipSignalResult => {
     return {
-      mode,
+      mode: reason === 'ok' ? 'graph_1hop' : 'degraded',
       reason,
-      edgeCount,
-      blocks: [headerBlock, ...detailBlocks],
+      detailBlocks,
+      acceptedEdges: [],
+      acceptedPaths: [],
     };
   };
 
   if (input.currentChapterOrder === null || input.currentChapterOrder <= 0) {
-    return makeResult('missing_chapter_context', 0, [
+    return makeResult('missing_chapter_context', [
       '- 弱提示：无法锁定当前章节顺序，暂不注入结构化关系事实。',
     ]);
   }
 
   if (uniqueFocusEntityNames.length === 0) {
-    return makeResult('no_focus_entity', 0, [
+    return makeResult('no_focus_entity', [
       '- 弱提示：未识别焦点实体，暂不注入结构化关系事实。',
     ]);
   }
@@ -1116,7 +1351,6 @@ function buildStructuredRelationshipContextResult(input: {
 
     return makeResult(
       'no_historical_relationship',
-      0,
       hintBlocks.length > 0
         ? hintBlocks
         : ['- 弱提示：未命中稳定历史关系边，请结合短期记忆与外部检索综合判断。'],
@@ -1131,13 +1365,16 @@ function buildStructuredRelationshipContextResult(input: {
       input.currentChapterOrder,
       uniqueFocusEntityNames,
     );
+    const noisyEdgeHintBlocks = buildStructuredRelationshipNoisyEdgeHintBlocks(acceptedEdges);
 
     return makeResult(
       'high_noise',
-      0,
-      hintBlocks.length > 0
-        ? hintBlocks
-        : ['- 弱提示：历史关系候选噪音偏高，当前不注入强关系事实。'],
+      [
+        ...(noisyEdgeHintBlocks.length > 0 ? noisyEdgeHintBlocks : []),
+        ...(hintBlocks.length > 0
+          ? hintBlocks
+          : ['- 弱提示：历史关系候选噪音偏高，当前不注入强关系事实。']),
+      ],
     );
   }
 
@@ -1150,7 +1387,314 @@ function buildStructuredRelationshipContextResult(input: {
     ].join('\n'),
   );
 
-  return makeResult('ok', acceptedEdges.length, edgeBlocks);
+  return {
+    mode: 'graph_1hop',
+    reason: 'ok',
+    detailBlocks: edgeBlocks,
+    acceptedEdges,
+    acceptedPaths: [],
+  };
+}
+
+function buildStructuredRelationshipTwoHopSignalResult(input: {
+  relationshipRows: RelationshipRow[];
+  focusEntityNames: string[];
+  currentChapterOrder: number | null;
+  currentChapterId?: string;
+}): StructuredRelationshipSignalResult {
+  const uniqueFocusEntityNames = createUniqueList(input.focusEntityNames);
+  const makeResult = (
+    reason: GenerationStructuredRelationshipQueryReason,
+    detailBlocks: string[] = [],
+  ): StructuredRelationshipSignalResult => ({
+    mode: reason === 'ok' ? 'graph_2hop' : 'degraded',
+    reason,
+    detailBlocks,
+    acceptedEdges: [],
+    acceptedPaths: [],
+  });
+
+  if (input.currentChapterOrder === null || input.currentChapterOrder <= 0) {
+    return makeResult('missing_chapter_context');
+  }
+
+  if (uniqueFocusEntityNames.length === 0) {
+    return makeResult('no_focus_entity');
+  }
+
+  const normalizedFocusSet = new Set(uniqueFocusEntityNames.map((item) => normalizeText(item)));
+  const candidateEdges: StructuredRelationshipEdgeCandidate[] = [];
+
+  for (const row of input.relationshipRows) {
+    if (row.chapterOrder <= 0 || row.chapterOrder >= input.currentChapterOrder) {
+      continue;
+    }
+
+    if (input.currentChapterId && row.chapterId === input.currentChapterId) {
+      continue;
+    }
+
+    const confidence = scoreStructuredRelationshipCandidate({
+      sourceKind: row.sourceKind,
+      relationshipType: row.relationshipType,
+      hasTarget: Boolean(row.targetEntityName),
+      evidence: row.evidence || row.description,
+    });
+    const confidenceLevel = resolveStructuredRelationshipConfidenceLevel(confidence);
+
+    if (confidenceLevel === 'low') {
+      continue;
+    }
+
+    candidateEdges.push({
+      sourceEntityName: row.sourceEntityName || '未知实体',
+      targetEntityName: row.targetEntityName || '未知目标',
+      relationshipType: row.relationshipType || '关系',
+      sourceKind: row.sourceKind || 'unknown',
+      evidence: row.evidence,
+      description: row.description,
+      chapterId: row.chapterId,
+      chapterTitle: row.chapterTitle,
+      chapterOrder: row.chapterOrder,
+      confidence,
+      confidenceLevel,
+    });
+  }
+
+  const adjacency = new Map<string, StructuredRelationshipEdgeCandidate[]>();
+
+  for (const edge of candidateEdges) {
+    const sourceKey = normalizeText(edge.sourceEntityName);
+    const targetKey = normalizeText(edge.targetEntityName);
+    const sourceBucket = adjacency.get(sourceKey) ?? [];
+    sourceBucket.push(edge);
+    adjacency.set(sourceKey, sourceBucket);
+
+    const targetBucket = adjacency.get(targetKey) ?? [];
+    targetBucket.push(edge);
+    adjacency.set(targetKey, targetBucket);
+  }
+
+  const dedupedPaths = new Map<string, StructuredRelationshipPathCandidate>();
+  let candidatePaths = 0;
+
+  for (const focusEntityName of uniqueFocusEntityNames) {
+    const firstHopEdges = adjacency.get(normalizeText(focusEntityName)) ?? [];
+
+    for (const firstHopEdge of firstHopEdges) {
+      const viaEntityName = normalizeText(firstHopEdge.sourceEntityName) === normalizeText(focusEntityName)
+        ? firstHopEdge.targetEntityName
+        : firstHopEdge.sourceEntityName;
+      const secondHopEdges = adjacency.get(normalizeText(viaEntityName)) ?? [];
+
+      for (const secondHopEdge of secondHopEdges) {
+        const targetEntityName = normalizeText(secondHopEdge.sourceEntityName) === normalizeText(viaEntityName)
+          ? secondHopEdge.targetEntityName
+          : secondHopEdge.sourceEntityName;
+
+        if (!targetEntityName) {
+          continue;
+        }
+
+        if (normalizeText(targetEntityName) === normalizeText(focusEntityName)) {
+          continue;
+        }
+
+        if (normalizedFocusSet.has(normalizeText(targetEntityName))) {
+          continue;
+        }
+
+        if (
+          firstHopEdge.chapterId === secondHopEdge.chapterId
+          && normalizeText(firstHopEdge.sourceEntityName) === normalizeText(secondHopEdge.sourceEntityName)
+          && normalizeText(firstHopEdge.targetEntityName) === normalizeText(secondHopEdge.targetEntityName)
+          && normalizeText(firstHopEdge.relationshipType) === normalizeText(secondHopEdge.relationshipType)
+        ) {
+          continue;
+        }
+
+        candidatePaths += 1;
+        const confidence = Number(((firstHopEdge.confidence + secondHopEdge.confidence) / 2).toFixed(3));
+        const confidenceLevel = resolveStructuredRelationshipConfidenceLevel(confidence);
+        const pathCandidate: StructuredRelationshipPathCandidate = {
+          focusEntityName,
+          viaEntityName,
+          targetEntityName,
+          edgeA: firstHopEdge,
+          edgeB: secondHopEdge,
+          confidence,
+          confidenceLevel,
+        };
+        const dedupeKey = [
+          normalizeText(focusEntityName),
+          normalizeText(viaEntityName),
+          normalizeText(targetEntityName),
+        ].join('->');
+        const existing = dedupedPaths.get(dedupeKey);
+
+        if (
+          !existing ||
+          pathCandidate.confidence > existing.confidence ||
+          (
+            pathCandidate.confidence === existing.confidence
+            && Math.max(pathCandidate.edgeA.chapterOrder, pathCandidate.edgeB.chapterOrder)
+              > Math.max(existing.edgeA.chapterOrder, existing.edgeB.chapterOrder)
+          )
+        ) {
+          dedupedPaths.set(dedupeKey, pathCandidate);
+        }
+      }
+    }
+  }
+
+  const acceptedPaths = Array.from(dedupedPaths.values())
+    .filter((item) => item.confidenceLevel !== 'low')
+    .sort((left, right) => {
+      if (right.confidence !== left.confidence) {
+        return right.confidence - left.confidence;
+      }
+
+      return Math.max(right.edgeA.chapterOrder, right.edgeB.chapterOrder)
+        - Math.max(left.edgeA.chapterOrder, left.edgeB.chapterOrder);
+    })
+    .slice(0, 4);
+
+  if (acceptedPaths.length === 0) {
+    return makeResult('no_two_hop_relationship');
+  }
+
+  const acceptedRatio = candidatePaths > 0 ? acceptedPaths.length / candidatePaths : 0;
+
+  if (candidatePaths >= 6 && acceptedRatio < 0.34) {
+    return makeResult('high_noise');
+  }
+
+  const pathBlocks = acceptedPaths.map((path) =>
+    [
+      `- 二跳路径：${path.focusEntityName} -> ${path.viaEntityName} -> ${path.targetEntityName}`,
+      `关系链：${path.focusEntityName} 与 ${path.viaEntityName}（${path.edgeA.relationshipType}）；${path.viaEntityName} 与 ${path.targetEntityName}（${path.edgeB.relationshipType}）`,
+      `来源：${path.edgeA.chapterTitle || '未知章节'} -> ${path.edgeB.chapterTitle || '未知章节'}`,
+      `置信：${path.confidenceLevel} (${path.confidence.toFixed(2)})`,
+    ].join('\n'),
+  );
+
+  return {
+    mode: 'graph_2hop',
+    reason: 'ok',
+    detailBlocks: pathBlocks,
+    acceptedEdges: [],
+    acceptedPaths,
+  };
+}
+
+function buildStructuredRelationshipContextResult(input: {
+  relationshipRows: RelationshipRow[];
+  chapterRows: ChapterMemoryRow[];
+  focusEntityNames: string[];
+  currentChapterOrder: number | null;
+  currentChapterId?: string;
+}): StructuredRelationshipContextResult {
+  const uniqueFocusEntityNames = createUniqueList(input.focusEntityNames);
+  const focusLabel = uniqueFocusEntityNames.join('、') || '无';
+  const oneHopResult = buildStructuredRelationshipOneHopSignalResult(input);
+  const shouldEvaluateTwoHop = oneHopResult.mode !== 'graph_1hop' || oneHopResult.detailBlocks.length <= 2;
+  const twoHopResult = shouldEvaluateTwoHop
+    ? buildStructuredRelationshipTwoHopSignalResult(input)
+    : null;
+
+  if (oneHopResult.mode === 'graph_1hop') {
+    const oneHopEntityNames = new Set(
+      oneHopResult.acceptedEdges.flatMap((edge) => [
+        normalizeText(edge.sourceEntityName),
+        normalizeText(edge.targetEntityName),
+      ]),
+    );
+    const twoHopEvaluationLine =
+      twoHopResult
+        ? twoHopResult.mode === 'graph_2hop'
+          ? '补充评估：ok（命中二度路径，但未形成新增实体链）'
+          : `补充评估：${twoHopResult.reason}（${describeStructuredRelationshipTwoHopReason(twoHopResult.reason)}）`
+        : null;
+    const twoHopSupplementBlocks =
+      twoHopResult?.mode === 'graph_2hop'
+        ? twoHopResult.acceptedPaths
+            .filter((path) =>
+              !(
+                oneHopEntityNames.has(normalizeText(path.focusEntityName)) &&
+                oneHopEntityNames.has(normalizeText(path.viaEntityName)) &&
+                oneHopEntityNames.has(normalizeText(path.targetEntityName))
+              ),
+            )
+            .slice(0, Math.min(2, Math.max(0, 3 - oneHopResult.detailBlocks.length)))
+            .map((path) =>
+              [
+                `- 二跳路径：${path.focusEntityName} -> ${path.viaEntityName} -> ${path.targetEntityName}`,
+                `关系链：${path.focusEntityName} 与 ${path.viaEntityName}（${path.edgeA.relationshipType}）；${path.viaEntityName} 与 ${path.targetEntityName}（${path.edgeB.relationshipType}）`,
+                `来源：${path.edgeA.chapterTitle || '未知章节'} -> ${path.edgeB.chapterTitle || '未知章节'}`,
+                `置信：${path.confidenceLevel} (${path.confidence.toFixed(2)})`,
+              ].join('\n'),
+            )
+        : [];
+    const headerBlock = [
+      `- 命中模式：${twoHopSupplementBlocks.length > 0 ? 'graph_1hop（主信号，补充二度路径）' : 'graph_1hop（结构化强信号）'}`,
+      '注入层：relationships',
+      `原因：${oneHopResult.reason}（${describeStructuredRelationshipOneHopReason(oneHopResult.reason)}）`,
+      `焦点实体：${focusLabel}`,
+      `接入策略：${twoHopSupplementBlocks.length > 0 ? '一度关系优先，补充少量二度路径。' : '一度关系优先。'}`,
+      ...(twoHopSupplementBlocks.length > 0 && twoHopResult
+        ? [`补充评估：${twoHopResult.reason}（${describeStructuredRelationshipTwoHopReason(twoHopResult.reason)}）`]
+        : twoHopEvaluationLine
+          ? [twoHopEvaluationLine]
+          : []),
+    ].join('\n');
+    const detailBlocks = [...oneHopResult.detailBlocks, ...twoHopSupplementBlocks];
+
+    return {
+      mode: 'graph_1hop',
+      reason: oneHopResult.reason,
+      signalCount: detailBlocks.length,
+      detailBlocks,
+      blocks: [headerBlock, ...detailBlocks],
+    };
+  }
+
+  if (twoHopResult?.mode === 'graph_2hop') {
+    const headerBlock = [
+      '- 命中模式：graph_2hop（补位强信号）',
+      '注入层：relationships',
+      `原因：${twoHopResult.reason}（${describeStructuredRelationshipTwoHopReason(twoHopResult.reason)}）`,
+      `焦点实体：${focusLabel}`,
+      '接入策略：一度关系不足时，改用二度路径补位。',
+      `补位评估：一度 ${oneHopResult.reason}（${describeStructuredRelationshipOneHopReason(oneHopResult.reason)}）`,
+    ].join('\n');
+
+    return {
+      mode: 'graph_2hop',
+      reason: twoHopResult.reason,
+      signalCount: twoHopResult.detailBlocks.length,
+      detailBlocks: twoHopResult.detailBlocks,
+      blocks: [headerBlock, ...twoHopResult.detailBlocks],
+    };
+  }
+
+  const headerBlock = [
+    '- 命中模式：degraded（仅弱提示）',
+    '注入层：relationships',
+    `原因：${oneHopResult.reason}（${describeStructuredRelationshipOneHopReason(oneHopResult.reason)}）`,
+    `焦点实体：${focusLabel}`,
+    '接入策略：一度与二度都未形成稳定强信号。',
+    ...(twoHopResult
+      ? [`补位评估：${twoHopResult.reason}（${describeStructuredRelationshipTwoHopReason(twoHopResult.reason)}）`]
+      : []),
+  ].join('\n');
+
+  return {
+    mode: 'degraded',
+    reason: oneHopResult.reason,
+    signalCount: 0,
+    detailBlocks: oneHopResult.detailBlocks,
+    blocks: [headerBlock, ...oneHopResult.detailBlocks],
+  };
 }
 
 export async function buildGenerationContextBundle(
@@ -1186,6 +1730,7 @@ export async function buildGenerationContextBundle(
     .slice(0, 5);
   const entityRows = loadEntityRows(env, input.projectId);
   const relationshipRows = loadRelationshipRows(env, input.projectId);
+  const resourceStateRows = loadResourceStateRows(env, input.projectId);
   const storedVolumeRecaps = listGenerationVolumeRecaps(env, input.projectId);
   const storedForeshadowRows = listGenerationForeshadows(env, input.projectId).map(
     (row): ForeshadowRow => ({
@@ -1222,10 +1767,15 @@ export async function buildGenerationContextBundle(
   const relatedChapterBlocks = buildRelatedChapterBlocks(retrievalItems);
   const lightweightRecallBlocks = buildLightweightRecallItems(retrievalItems);
   const entityBlocks = buildEntityBlocks(entityRows, focusEntityNames);
+  const relationshipFocusEntityNames = selectStructuredRelationshipFocusEntityNames(
+    input,
+    chapterRows,
+    focusEntityNames,
+  );
   const structuredRelationshipResult = buildStructuredRelationshipContextResult({
     relationshipRows,
     chapterRows,
-    focusEntityNames,
+    focusEntityNames: relationshipFocusEntityNames,
     currentChapterOrder,
     currentChapterId: input.chapterId,
   });
@@ -1238,6 +1788,10 @@ export async function buildGenerationContextBundle(
     currentVolumeSnapshotBlocks,
     activeForeshadowBlocks,
   );
+  const resourceContinuityBlocks = buildResourceContinuityBlocks(
+    resourceStateRows,
+    currentChapterOrder,
+  );
   const sections = [
     createSection('working_memory', '工作记忆', workingMemoryBlocks),
     createSection('immediate_memory', '即时记忆', buildRecentTextBlocks(recentTextRows)),
@@ -1245,6 +1799,7 @@ export async function buildGenerationContextBundle(
     createSection('long_term_memory', '长期记忆', volumeRecapBlocks),
     createSection('retrieval_memory', '外部检索', relatedChapterBlocks),
     input.worldState?.trim() ? createSection('physical_engine', '物理引擎', [input.worldState.trim()]) : null,
+    createSection('resource_continuity', '资源连续性', resourceContinuityBlocks),
     createSection('focus_entities', '当前关注实体', entityBlocks),
     createSection('relationships', '相关关系', relationshipBlocks),
     fallbackContext.residualBundle
@@ -1261,7 +1816,7 @@ export async function buildGenerationContextBundle(
     dormantForeshadowRecallCount: retrievalItems.filter((item) => item.sourceType === 'dormant_foreshadow').length,
     volumeRecapRecallCount: retrievalItems.filter((item) => item.sourceType === 'volume_recap').length,
     entityCount: entityBlocks.length,
-    relationshipCount: structuredRelationshipResult.edgeCount,
+    relationshipCount: structuredRelationshipResult.signalCount,
     hasFallbackContext: Boolean(input.fallbackContextBundle?.trim()),
     focusEntityNames,
     queryPhrases,

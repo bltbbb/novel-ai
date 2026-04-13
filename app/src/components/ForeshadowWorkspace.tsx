@@ -15,8 +15,9 @@ import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { useToast } from '@/components/Toast';
 import { richTextToPlainText } from '@/lib/editor-content';
-import { useEditorStore, useForeshadowStore } from '@/stores';
-import type { ForeshadowStatus, Id } from '@/types';
+import { fetchGenerationDebugForeshadows } from '@/lib/generation-debug-client';
+import { useEditorStore, useForeshadowStore, useSettingsStore } from '@/stores';
+import type { ForeshadowStatus, GenerationDebugForeshadowRecord, Id } from '@/types';
 
 interface ForeshadowWorkspaceProps {
   projectId: Id;
@@ -79,6 +80,7 @@ function resolveChapterLabel(chapterTitleMap: Map<Id, string>, chapterId: Id | n
 export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: ForeshadowWorkspaceProps) {
   const chapters = useEditorStore((state) => state.chapters);
   const activeChapterId = useEditorStore((state) => state.activeChapterId);
+  const settings = useSettingsStore((state) => state.settings);
   const {
     foreshadows,
     activeForeshadowId,
@@ -94,6 +96,8 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
   const [draftTitle, setDraftTitle] = useState('');
   const [draftExcerpt, setDraftExcerpt] = useState('');
   const [draftNotes, setDraftNotes] = useState('');
+  const [runtimeForeshadows, setRuntimeForeshadows] = useState<GenerationDebugForeshadowRecord[]>([]);
+  const [runtimeError, setRuntimeError] = useState('');
 
   const chapterTitleMap = useMemo(() => {
     return new Map(chapters.map((chapter) => [chapter.id, chapter.title] as const));
@@ -124,6 +128,18 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
     [foreshadows],
   );
 
+  const filteredRuntimeForeshadows = useMemo(() => {
+    const localTitleSet = new Set(foreshadows.map((item) => item.title.trim().toLowerCase()));
+
+    return runtimeForeshadows.filter((item) => {
+      if (activeFilter !== 'all' && item.status !== activeFilter) {
+        return false;
+      }
+
+      return !localTitleSet.has(item.title.trim().toLowerCase());
+    });
+  }, [activeFilter, foreshadows, runtimeForeshadows]);
+
   useEffect(() => {
     if (loadedProjectId === projectId) {
       return;
@@ -133,6 +149,28 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
       toast('加载伏笔失败', 'error');
     });
   }, [loadForeshadows, loadedProjectId, projectId, toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetchGenerationDebugForeshadows(settings.serverUrl, projectId)
+      .then((items) => {
+        if (!cancelled) {
+          setRuntimeForeshadows(items);
+          setRuntimeError('');
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRuntimeForeshadows([]);
+          setRuntimeError(error instanceof Error ? error.message : '未知错误');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, settings.serverUrl]);
 
   useEffect(() => {
     if (filteredForeshadows.length === 0) {
@@ -331,7 +369,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
         </div>
 
         <div className="flex-1 overflow-y-auto p-3">
-          {filteredForeshadows.length === 0 ? (
+          {filteredForeshadows.length === 0 && filteredRuntimeForeshadows.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-neutral-800 p-4 text-sm leading-6 text-neutral-500">
               {foreshadows.length === 0
                 ? '还没有伏笔，先从当前章节创建第一条。'
@@ -370,6 +408,31 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
                   </button>
                 );
               })}
+              {filteredRuntimeForeshadows.map((foreshadow) => {
+                const meta = statusMeta[foreshadow.status];
+                const StatusIcon = meta.icon;
+
+                return (
+                  <article
+                    key={`runtime-${foreshadow.id}`}
+                    className="rounded-2xl border border-yellow-500/20 bg-yellow-500/5 px-3 py-3 text-left text-neutral-300"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-sm font-medium">{foreshadow.title}</p>
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs ${meta.badgeClass}`}>
+                        <StatusIcon size={12} />
+                        运行态
+                      </span>
+                    </div>
+                    <p className="mt-2 line-clamp-2 text-xs leading-5 text-neutral-500">
+                      {foreshadow.excerpt || foreshadow.notes || '暂无运行态摘录'}
+                    </p>
+                    <p className="mt-2 text-xs text-neutral-500">
+                      来源：{foreshadow.sourceChapterTitle || '未关联章节'}
+                    </p>
+                  </article>
+                );
+              })}
             </div>
           )}
         </div>
@@ -378,63 +441,113 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
       <section className="flex min-w-0 flex-1 flex-col">
         {!currentForeshadow ? (
           <div className="flex flex-1 p-8">
-            <EmptyState
-              icon={<Target size={22} />}
-              title={
-                foreshadows.length > 0
-                  ? '当前筛选条件下没有匹配的伏笔'
-                  : chapters.length === 0
-                    ? '先准备章节，再记录伏笔'
-                    : '从当前章节开始记录第一条伏笔'
-              }
-              description={
-                foreshadows.length > 0
-                  ? '可以切回“全部”查看已有伏笔，或者继续调整筛选条件。'
-                  : chapters.length === 0
-                  ? '当前项目还没有章节，建议先回到编辑器创建正文，再把关键悬念和线索收录到伏笔系统。'
-                  : '从章节创建伏笔，在这里统一维护状态和备注。'
-              }
-              actions={
-                <button
-                  type="button"
-                  onClick={
-                    foreshadows.length > 0
-                      ? () => setActiveFilter('all')
-                      : chapters.length === 0
-                        ? onOpenEditor
-                        : () => void handleCreateForeshadow()
-                  }
-                  className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
-                >
-                  {foreshadows.length > 0 ? <Target size={16} /> : chapters.length === 0 ? <BookOpen size={16} /> : <Plus size={16} />}
-                  {foreshadows.length > 0 ? '查看全部伏笔' : chapters.length === 0 ? '前往编辑器' : '创建第一条伏笔'}
-                </button>
-              }
-              details={
-                <OnboardingChecklist
-                  title="推荐起步顺序"
-                  items={
-                    foreshadows.length > 0
-                      ? [
-                          '先切回“全部”确认已有伏笔的整体情况。',
-                          '如果需要专门查看某一类状态，再重新应用筛选。',
-                          '筛选只影响当前视图，不会修改伏笔本身的数据。',
-                        ]
-                      : chapters.length === 0
-                      ? [
-                          '先在编辑器里创建至少一个章节。',
-                          '写下关键情节或悬念后，再回到伏笔页整理。',
-                          '后续可以在这里持续跟踪激活、回收和超期状态。',
-                        ]
-                      : [
-                          '先从当前活动章节创建一条伏笔。',
-                          '补充摘录和备注，明确这条线索未来要如何回收。',
-                          '在剧情推进过程中及时更新状态和回收章节。',
-                        ]
-                  }
-                />
-              }
-            />
+            {filteredRuntimeForeshadows.length > 0 ? (
+              <div className="w-full space-y-6">
+                <div className="rounded-2xl border border-yellow-500/20 bg-yellow-500/5 px-4 py-4 text-sm text-yellow-100">
+                  当前还没有手工伏笔，但生成系统内部已经识别出 {filteredRuntimeForeshadows.length} 条运行态伏笔。这里先提供只读查看。
+                  {runtimeError ? ` 读取异常：${runtimeError}` : ''}
+                </div>
+                <div className="grid gap-4 xl:grid-cols-2">
+                  {filteredRuntimeForeshadows.map((foreshadow) => {
+                    const meta = statusMeta[foreshadow.status];
+                    const StatusIcon = meta.icon;
+
+                    return (
+                      <article
+                        key={`runtime-detail-${foreshadow.id}`}
+                        className="rounded-3xl border border-yellow-500/20 bg-yellow-500/5 p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <h2 className="text-lg font-medium text-neutral-100">{foreshadow.title}</h2>
+                            <p className="mt-1 text-xs text-neutral-500">生命周期：{foreshadow.lifecycle}</p>
+                          </div>
+                          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs ${meta.badgeClass}`}>
+                            <StatusIcon size={12} />
+                            运行态
+                          </span>
+                        </div>
+                        <p className="mt-4 text-sm leading-6 text-neutral-300">
+                          {foreshadow.excerpt || foreshadow.notes || '暂无更多运行态说明。'}
+                        </p>
+                        <div className="mt-4 space-y-2 text-xs text-neutral-500">
+                          <p>来源：{foreshadow.sourceChapterTitle || '未关联章节'}</p>
+                          <p>回收：{foreshadow.resolvedChapterTitle || '尚未回收'}</p>
+                        </div>
+                        {foreshadow.sourceChapterId && chapterTitleMap.has(foreshadow.sourceChapterId) ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenChapter(foreshadow.sourceChapterId as Id)}
+                            className="mt-4 inline-flex items-center gap-2 text-sm text-indigo-300 transition-colors hover:text-indigo-200"
+                          >
+                            <ArrowRightCircle size={15} />
+                            打开来源章节
+                          </button>
+                        ) : null}
+                      </article>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <EmptyState
+                icon={<Target size={22} />}
+                title={
+                  foreshadows.length > 0
+                    ? '当前筛选条件下没有匹配的伏笔'
+                    : chapters.length === 0
+                      ? '先准备章节，再记录伏笔'
+                      : '从当前章节开始记录第一条伏笔'
+                }
+                description={
+                  foreshadows.length > 0
+                    ? '可以切回“全部”查看已有伏笔，或者继续调整筛选条件。'
+                    : chapters.length === 0
+                    ? '当前项目还没有章节，建议先回到编辑器创建正文，再把关键悬念和线索收录到伏笔系统。'
+                    : '从章节创建伏笔，在这里统一维护状态和备注。'
+                }
+                actions={
+                  <button
+                    type="button"
+                    onClick={
+                      foreshadows.length > 0
+                        ? () => setActiveFilter('all')
+                        : chapters.length === 0
+                          ? onOpenEditor
+                          : () => void handleCreateForeshadow()
+                    }
+                    className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
+                  >
+                    {foreshadows.length > 0 ? <Target size={16} /> : chapters.length === 0 ? <BookOpen size={16} /> : <Plus size={16} />}
+                    {foreshadows.length > 0 ? '查看全部伏笔' : chapters.length === 0 ? '前往编辑器' : '创建第一条伏笔'}
+                  </button>
+                }
+                details={
+                  <OnboardingChecklist
+                    title="推荐起步顺序"
+                    items={
+                      foreshadows.length > 0
+                        ? [
+                            '先切回“全部”确认已有伏笔的整体情况。',
+                            '如果需要专门查看某一类状态，再重新应用筛选。',
+                            '筛选只影响当前视图，不会修改伏笔本身的数据。',
+                          ]
+                        : chapters.length === 0
+                        ? [
+                            '先在编辑器里创建至少一个章节。',
+                            '写下关键情节或悬念后，再回到伏笔页整理。',
+                            '后续可以在这里持续跟踪激活、回收和超期状态。',
+                          ]
+                        : [
+                            '先从当前活动章节创建一条伏笔。',
+                            '补充摘录和备注，明确这条线索未来要如何回收。',
+                            '在剧情推进过程中及时更新状态和回收章节。',
+                          ]
+                    }
+                  />
+                }
+              />
+            )}
           </div>
         ) : (
           <div className="flex flex-1 flex-col gap-4 px-5 py-5">

@@ -2,19 +2,42 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ServerEnv } from '../config/env.js';
 import {
   extractChapterArtifacts,
+  checkChapterLanguageQa,
+  generateBookOutline,
   generateBeatDraft,
   generateChapterOutline,
+  generateVolumeBeats,
+  generateVolumeMilestones,
+  generateVolumeOutline,
   polishChapterDraft,
   reviewChapterDraft,
   styleChapterDraft,
 } from '../services/generation.js';
+import { analyzeBookTemplate } from '../services/template-analysis.js';
+import { extractEpubText } from '../services/epub-extract.js';
+import {
+  enqueueBookAnalysisJob,
+  getRunningBookAnalysisJob,
+  listRunningBookAnalysisJobs,
+  requestCancelBookAnalysisJob,
+  retryBookAnalysisJob,
+} from '../services/book-analysis-job-runner.js';
+import { syncGenerationArtifacts } from '../services/generation-artifact-sync.js';
 import type {
+  AIBookAnalysisRequest,
+  AIEpubExtractRequest,
+  AIBookOutlineRequest,
   AIExtractRequest,
+  AILanguageQaRequest,
   AIPolishRequest,
   AIPlanRequest,
   AIReviewRequest,
   AIStyleRequest,
+  AIVolumeBeatsRequest,
+  AIVolumeMilestonesRequest,
+  AIVolumeOutlineRequest,
   AIWriteRequest,
+  GenerationArtifactSyncRequest,
 } from '../types/ai.js';
 
 function isAIPlanRequest(body: unknown): body is AIPlanRequest {
@@ -27,6 +50,160 @@ function isAIPlanRequest(body: unknown): body is AIPlanRequest {
   return (
     typeof candidate.projectId === 'string' &&
     typeof candidate.chapterTitle === 'string' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIBookOutlineRequest(body: unknown): body is AIBookOutlineRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIBookOutlineRequest>;
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    typeof candidate.projectDescription === 'string' &&
+    Array.isArray(candidate.genre) &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIBookAnalysisRequest(body: unknown): body is AIBookAnalysisRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIBookAnalysisRequest>;
+
+  return (
+    typeof candidate.sourceTitle === 'string' &&
+    typeof candidate.content === 'string' &&
+    (
+      typeof candidate.analysisRange === 'undefined' ||
+      candidate.analysisRange === 'full' ||
+      candidate.analysisRange === 'opening' ||
+      candidate.analysisRange === 'middle' ||
+      candidate.analysisRange === 'ending' ||
+      candidate.analysisRange === 'custom'
+    ) &&
+    (typeof candidate.rangeStartIndex === 'undefined' || typeof candidate.rangeStartIndex === 'number') &&
+    (typeof candidate.rangeEndIndex === 'undefined' || typeof candidate.rangeEndIndex === 'number') &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIEpubExtractRequest(body: unknown): body is AIEpubExtractRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIEpubExtractRequest>;
+
+  return (
+    typeof candidate.fileName === 'string' &&
+    typeof candidate.contentBase64 === 'string'
+  );
+}
+
+function isAIVolumeOutlineRequest(body: unknown): body is AIVolumeOutlineRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIVolumeOutlineRequest>;
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    typeof candidate.projectDescription === 'string' &&
+    typeof candidate.bookOutline === 'string' &&
+    typeof candidate.volumeTitle === 'string' &&
+    typeof candidate.volumeOrder === 'number' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIVolumeMilestonesRequest(body: unknown): body is AIVolumeMilestonesRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIVolumeMilestonesRequest>;
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    typeof candidate.projectDescription === 'string' &&
+    typeof candidate.bookOutline === 'string' &&
+    typeof candidate.volumeTitle === 'string' &&
+    typeof candidate.volumeOrder === 'number' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIVolumeBeatsRequest(body: unknown): body is AIVolumeBeatsRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIVolumeBeatsRequest>;
+  const hasValidChapterSlots =
+    Array.isArray(candidate.chapterSlots) &&
+    candidate.chapterSlots.every(
+      (slot) =>
+        slot &&
+        typeof slot === 'object' &&
+        typeof slot.chapterNumber === 'number' &&
+        (typeof slot.chapterId === 'undefined' || typeof slot.chapterId === 'string') &&
+        (typeof slot.chapterTitle === 'undefined' || typeof slot.chapterTitle === 'string'),
+    );
+  const hasValidChapterCount =
+    typeof candidate.chapterCount === 'number' &&
+    Number.isFinite(candidate.chapterCount) &&
+    candidate.chapterCount > 0;
+  const hasValidHistorySummaries =
+    typeof candidate.historySummaries === 'undefined' ||
+    (Array.isArray(candidate.historySummaries) &&
+      candidate.historySummaries.every(
+        (item) =>
+          item &&
+          typeof item === 'object' &&
+          typeof item.chapterNumber === 'number' &&
+          typeof item.chapterTitle === 'string' &&
+          typeof item.summary === 'string' &&
+          (item.source === 'extract' || item.source === 'beat'),
+      ));
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    typeof candidate.projectDescription === 'string' &&
+    typeof candidate.bookOutline === 'string' &&
+    typeof candidate.volumeOutline === 'string' &&
+    typeof candidate.volumeTitle === 'string' &&
+    typeof candidate.volumeOrder === 'number' &&
+    (hasValidChapterSlots || hasValidChapterCount) &&
+    (typeof candidate.milestoneIndex === 'undefined' ||
+      (typeof candidate.milestoneIndex === 'number' &&
+        Number.isFinite(candidate.milestoneIndex) &&
+        candidate.milestoneIndex >= 0)) &&
+    (typeof candidate.startChapterNumber === 'undefined' ||
+      (typeof candidate.startChapterNumber === 'number' &&
+        Number.isFinite(candidate.startChapterNumber) &&
+        candidate.startChapterNumber > 0)) &&
+    (typeof candidate.endChapterNumber === 'undefined' ||
+      (typeof candidate.endChapterNumber === 'number' &&
+        Number.isFinite(candidate.endChapterNumber) &&
+        candidate.endChapterNumber > 0)) &&
+    (typeof candidate.estimatedTotalChapters === 'undefined' ||
+      (typeof candidate.estimatedTotalChapters === 'number' &&
+        Number.isFinite(candidate.estimatedTotalChapters) &&
+        candidate.estimatedTotalChapters > 0)) &&
+    (typeof candidate.currentMilestone === 'undefined' || typeof candidate.currentMilestone === 'string') &&
+    hasValidHistorySummaries &&
     typeof candidate.model === 'string' &&
     typeof candidate.temperature === 'number'
   );
@@ -85,6 +262,23 @@ function isAIReviewRequest(body: unknown): body is AIReviewRequest {
   );
 }
 
+function isAILanguageQaRequest(body: unknown): body is AILanguageQaRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AILanguageQaRequest>;
+
+  return (
+    typeof candidate.projectId === 'string' &&
+    typeof candidate.chapterId === 'string' &&
+    typeof candidate.chapterTitle === 'string' &&
+    typeof candidate.content === 'string' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
 function isAIPolishRequest(body: unknown): body is AIPolishRequest {
   if (!body || typeof body !== 'object') {
     return false;
@@ -120,7 +314,206 @@ function isAIStyleRequest(body: unknown): body is AIStyleRequest {
   );
 }
 
+function isGenerationArtifactSyncRequest(body: unknown): body is GenerationArtifactSyncRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<GenerationArtifactSyncRequest>;
+
+  return (
+    typeof candidate.projectId === 'string' &&
+    typeof candidate.chapterId === 'string' &&
+    typeof candidate.chapterTitle === 'string' &&
+    typeof candidate.content === 'string' &&
+    typeof candidate.summary === 'object' &&
+    candidate.summary !== null &&
+    typeof candidate.summary.summary === 'string' &&
+    typeof candidate.summary.hook === 'string' &&
+    Array.isArray(candidate.summary.foreshadowings) &&
+    Array.isArray(candidate.stateChanges) &&
+    (candidate.strand === 'quest' || candidate.strand === 'fire' || candidate.strand === 'constellation')
+  );
+}
+
 export async function registerGenerationRoutes(app: FastifyInstance, env: ServerEnv) {
+  app.post('/api/ai/book-analysis-extract-epub', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIEpubExtractRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIEpubExtractRequest 结构',
+      });
+    }
+
+    try {
+      return extractEpubText(request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.get('/api/ai/book-analysis-jobs', async () => {
+    return listRunningBookAnalysisJobs(env);
+  });
+
+  app.get(
+    '/api/ai/book-analysis-jobs/:id',
+    async (
+      request: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      const job = await getRunningBookAnalysisJob(env, request.params.id);
+
+      if (!job) {
+        return reply.status(404).send({
+          message: '目标拆书任务不存在',
+        });
+      }
+
+      return job;
+    },
+  );
+
+  app.post('/api/ai/book-analysis-jobs', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIBookAnalysisRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIBookAnalysisRequest 结构',
+      });
+    }
+
+    try {
+      return await enqueueBookAnalysisJob(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post(
+    '/api/ai/book-analysis-jobs/:id/cancel',
+    async (
+      request: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      const job = await requestCancelBookAnalysisJob(env, request.params.id);
+
+      if (!job) {
+        return reply.status(404).send({
+          message: '目标拆书任务不存在',
+        });
+      }
+
+      return job;
+    },
+  );
+
+  app.post(
+    '/api/ai/book-analysis-jobs/:id/retry',
+    async (
+      request: FastifyRequest<{ Params: { id: string } }>,
+      reply: FastifyReply,
+    ) => {
+      const job = await retryBookAnalysisJob(env, request.params.id);
+
+      if (!job) {
+        return reply.status(404).send({
+          message: '目标拆书任务不存在',
+        });
+      }
+
+      return job;
+    },
+  );
+
+  app.post('/api/ai/book-analysis-template', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIBookAnalysisRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIBookAnalysisRequest 结构',
+      });
+    }
+
+    try {
+      return await analyzeBookTemplate(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/book-outline', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIBookOutlineRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIBookOutlineRequest 结构',
+      });
+    }
+
+    try {
+      return await generateBookOutline(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/volume-outline', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIVolumeOutlineRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIVolumeOutlineRequest 结构',
+      });
+    }
+
+    try {
+      return await generateVolumeOutline(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/volume-milestones', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIVolumeMilestonesRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIVolumeMilestonesRequest 结构',
+      });
+    }
+
+    try {
+      return await generateVolumeMilestones(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/volume-beats', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIVolumeBeatsRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIVolumeBeatsRequest 结构',
+      });
+    }
+
+    try {
+      return await generateVolumeBeats(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
   app.post('/api/ai/plan', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAIPlanRequest(request.body)) {
       return reply.status(400).send({
@@ -155,6 +548,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
     }
   });
 
+  app.post('/api/generation/artifacts/sync', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isGenerationArtifactSyncRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 GenerationArtifactSyncRequest 结构',
+      });
+    }
+
+    try {
+      return await syncGenerationArtifacts(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
   app.post('/api/ai/write', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAIWriteRequest(request.body)) {
       return reply.status(400).send({
@@ -181,6 +591,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
 
     try {
       return await reviewChapterDraft(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/language-qa', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAILanguageQaRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AILanguageQaRequest 结构',
+      });
+    }
+
+    try {
+      return await checkChapterLanguageQa(env, request.body);
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       return reply.status(500).send({

@@ -1,6 +1,15 @@
 import type {
+  AIBookAnalysisRequest,
+  AIBookAnalysisResponse,
+  AIEpubExtractRequest,
+  AIEpubExtractResponse,
+  AIBookOutlineRequest,
+  AIBookOutlineResponse,
+  BookAnalysisJobRecord,
   AIExtractRequest,
   AIExtractResponse,
+  AILanguageQaRequest,
+  AILanguageQaResponse,
   AIPolishRequest,
   AIPolishResponse,
   AIPlanRequest,
@@ -9,6 +18,14 @@ import type {
   AIReviewResponse,
   AIStyleRequest,
   AIStyleResponse,
+  AIVolumeBeatsRequest,
+  AIVolumeBeatsResponse,
+  AIVolumeMilestonesRequest,
+  AIVolumeMilestonesResponse,
+  AIVolumeOutlineRequest,
+  AIVolumeOutlineResponse,
+  GenerationArtifactSyncRequest,
+  GenerationArtifactSyncResponse,
   GenerationJobBatchActionRequest,
   GenerationJobBatchActionResponse,
   GenerationJobBatchRequest,
@@ -20,6 +37,15 @@ import type {
   AIWriteRequest,
   AIWriteResponse,
 } from '@/types';
+
+interface JsonRequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  timeoutMessage?: string;
+}
+
+const LONG_AI_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
+const EXTRA_LONG_AI_REQUEST_TIMEOUT_MS = 45 * 60 * 1000;
 
 function createApiUrl(serverUrl: string, path: string) {
   return `${serverUrl.replace(/\/+$/, '')}${path}`;
@@ -34,15 +60,73 @@ function extractErrorMessage(rawText: string) {
   }
 }
 
-async function postJson<TRequest, TResponse>(serverUrl: string, path: string, request: TRequest) {
-  const response = await fetch(createApiUrl(serverUrl, path), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(request),
-  });
+async function postJson<TRequest, TResponse>(
+  serverUrl: string,
+  path: string,
+  request: TRequest,
+  options: JsonRequestOptions = {},
+) {
+  const controller = new AbortController();
+  let timedOut = false;
+  let abortedByCaller = false;
+  let timeoutId: number | null = null;
+  const cleanupListeners: Array<() => void> = [];
+
+  if (options.signal) {
+    if (options.signal.aborted) {
+      abortedByCaller = true;
+      controller.abort();
+    } else {
+      const handleAbort = () => {
+        abortedByCaller = true;
+        controller.abort();
+      };
+
+      options.signal.addEventListener('abort', handleAbort, { once: true });
+      cleanupListeners.push(() => options.signal?.removeEventListener('abort', handleAbort));
+    }
+  }
+
+  if (typeof options.timeoutMs === 'number' && options.timeoutMs > 0) {
+    timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, options.timeoutMs);
+  }
+
+  let response: Response;
+
+  try {
+    response = await fetch(createApiUrl(serverUrl, path), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+    cleanupListeners.forEach((cleanup) => cleanup());
+
+    if (timedOut) {
+      throw new Error(options.timeoutMessage || '请求超时，请稍后重试');
+    }
+
+    if (abortedByCaller) {
+      throw new Error('请求已取消');
+    }
+
+    throw error;
+  }
+
+  if (timeoutId !== null) {
+    window.clearTimeout(timeoutId);
+  }
+  cleanupListeners.forEach((cleanup) => cleanup());
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -52,28 +136,196 @@ async function postJson<TRequest, TResponse>(serverUrl: string, path: string, re
   return (await response.json()) as TResponse;
 }
 
-export function createChapterPlan(serverUrl: string, request: AIPlanRequest) {
-  return postJson<AIPlanRequest, AIPlanResponse>(serverUrl, '/api/ai/plan', request);
+export function createChapterPlan(serverUrl: string, request: AIPlanRequest, options?: JsonRequestOptions) {
+  return postJson<AIPlanRequest, AIPlanResponse>(serverUrl, '/api/ai/plan', request, {
+    timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Plan 请求超时，请重试',
+    ...options,
+  });
 }
 
-export function writeChapterBeat(serverUrl: string, request: AIWriteRequest) {
-  return postJson<AIWriteRequest, AIWriteResponse>(serverUrl, '/api/ai/write', request);
+export function createBookOutline(serverUrl: string, request: AIBookOutlineRequest) {
+  return postJson<AIBookOutlineRequest, AIBookOutlineResponse>(
+    serverUrl,
+    '/api/ai/book-outline',
+    request,
+  );
 }
 
-export function styleChapterDraft(serverUrl: string, request: AIStyleRequest) {
-  return postJson<AIStyleRequest, AIStyleResponse>(serverUrl, '/api/ai/style', request);
+export function analyzeBookTemplate(serverUrl: string, request: AIBookAnalysisRequest, options?: JsonRequestOptions) {
+  return postJson<AIBookAnalysisRequest, AIBookAnalysisResponse>(
+    serverUrl,
+    '/api/ai/book-analysis-template',
+    request,
+    {
+      timeoutMs: EXTRA_LONG_AI_REQUEST_TIMEOUT_MS,
+      timeoutMessage: '拆书分析请求超时，请稍后重试',
+      ...options,
+    },
+  );
 }
 
-export function reviewChapterDraft(serverUrl: string, request: AIReviewRequest) {
-  return postJson<AIReviewRequest, AIReviewResponse>(serverUrl, '/api/ai/review', request);
+export function createBookAnalysisJob(serverUrl: string, request: AIBookAnalysisRequest, options?: JsonRequestOptions) {
+  return postJson<AIBookAnalysisRequest, BookAnalysisJobRecord>(
+    serverUrl,
+    '/api/ai/book-analysis-jobs',
+    request,
+    {
+      timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+      timeoutMessage: '创建拆书任务超时，请稍后重试',
+      ...options,
+    },
+  );
 }
 
-export function polishChapterDraft(serverUrl: string, request: AIPolishRequest) {
-  return postJson<AIPolishRequest, AIPolishResponse>(serverUrl, '/api/ai/polish', request);
+export function extractEpubForBookAnalysis(serverUrl: string, request: AIEpubExtractRequest, options?: JsonRequestOptions) {
+  return postJson<AIEpubExtractRequest, AIEpubExtractResponse>(
+    serverUrl,
+    '/api/ai/book-analysis-extract-epub',
+    request,
+    {
+      timeoutMs: EXTRA_LONG_AI_REQUEST_TIMEOUT_MS,
+      timeoutMessage: 'EPUB 提取超时，请稍后重试',
+      ...options,
+    },
+  );
 }
 
-export function extractChapterState(serverUrl: string, request: AIExtractRequest) {
-  return postJson<AIExtractRequest, AIExtractResponse>(serverUrl, '/api/ai/extract', request);
+export async function listBookAnalysisJobs(serverUrl: string) {
+  const response = await fetch(createApiUrl(serverUrl, '/api/ai/book-analysis-jobs'), {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(extractErrorMessage(errorText) || `请求失败：${response.status}`);
+  }
+
+  return (await response.json()) as BookAnalysisJobRecord[];
+}
+
+export async function getBookAnalysisJob(serverUrl: string, jobId: string) {
+  const response = await fetch(createApiUrl(serverUrl, `/api/ai/book-analysis-jobs/${jobId}`), {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(extractErrorMessage(errorText) || `请求失败：${response.status}`);
+  }
+
+  return (await response.json()) as BookAnalysisJobRecord;
+}
+
+export async function cancelBookAnalysisJob(serverUrl: string, jobId: string) {
+  return postJson<Record<string, never>, BookAnalysisJobRecord>(
+    serverUrl,
+    `/api/ai/book-analysis-jobs/${jobId}/cancel`,
+    {},
+  );
+}
+
+export async function retryBookAnalysisJob(serverUrl: string, jobId: string) {
+  return postJson<Record<string, never>, BookAnalysisJobRecord>(
+    serverUrl,
+    `/api/ai/book-analysis-jobs/${jobId}/retry`,
+    {},
+  );
+}
+
+export function createVolumeOutline(serverUrl: string, request: AIVolumeOutlineRequest) {
+  return postJson<AIVolumeOutlineRequest, AIVolumeOutlineResponse>(
+    serverUrl,
+    '/api/ai/volume-outline',
+    request,
+  );
+}
+
+export function createVolumeMilestones(serverUrl: string, request: AIVolumeMilestonesRequest) {
+  return postJson<AIVolumeMilestonesRequest, AIVolumeMilestonesResponse>(
+    serverUrl,
+    '/api/ai/volume-milestones',
+    request,
+  );
+}
+
+export function createVolumeBeats(serverUrl: string, request: AIVolumeBeatsRequest) {
+  return postJson<AIVolumeBeatsRequest, AIVolumeBeatsResponse>(
+    serverUrl,
+    '/api/ai/volume-beats',
+    request,
+  );
+}
+
+export function writeChapterBeat(serverUrl: string, request: AIWriteRequest, options?: JsonRequestOptions) {
+  return postJson<AIWriteRequest, AIWriteResponse>(serverUrl, '/api/ai/write', request, {
+    timeoutMs: EXTRA_LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Write 请求超时，请重试',
+    ...options,
+  });
+}
+
+export function styleChapterDraft(serverUrl: string, request: AIStyleRequest, options?: JsonRequestOptions) {
+  return postJson<AIStyleRequest, AIStyleResponse>(serverUrl, '/api/ai/style', request, {
+    timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Style 请求超时，请重试',
+    ...options,
+  });
+}
+
+export function reviewChapterDraft(serverUrl: string, request: AIReviewRequest, options?: JsonRequestOptions) {
+  return postJson<AIReviewRequest, AIReviewResponse>(serverUrl, '/api/ai/review', request, {
+    timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Review 请求超时，请重试',
+    ...options,
+  });
+}
+
+export function checkChapterLanguageQa(
+  serverUrl: string,
+  request: AILanguageQaRequest,
+  options?: JsonRequestOptions,
+) {
+  return postJson<AILanguageQaRequest, AILanguageQaResponse>(
+    serverUrl,
+    '/api/ai/language-qa',
+    request,
+    {
+      timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+      timeoutMessage: '语言校对请求超时，请重试',
+      ...options,
+    },
+  );
+}
+
+export function polishChapterDraft(serverUrl: string, request: AIPolishRequest, options?: JsonRequestOptions) {
+  return postJson<AIPolishRequest, AIPolishResponse>(serverUrl, '/api/ai/polish', request, {
+    timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Polish 请求超时，请重试',
+    ...options,
+  });
+}
+
+export function extractChapterState(serverUrl: string, request: AIExtractRequest, options?: JsonRequestOptions) {
+  return postJson<AIExtractRequest, AIExtractResponse>(serverUrl, '/api/ai/extract', request, {
+    timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Extract 请求超时，请重试',
+    ...options,
+  });
+}
+
+export function syncGenerationArtifacts(serverUrl: string, request: GenerationArtifactSyncRequest) {
+  return postJson<GenerationArtifactSyncRequest, GenerationArtifactSyncResponse>(
+    serverUrl,
+    '/api/generation/artifacts/sync',
+    request,
+  );
 }
 
 export async function listGenerationJobs(serverUrl: string, projectId: string) {

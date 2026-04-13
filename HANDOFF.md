@@ -199,9 +199,9 @@
   - 不外推到 `volume_recap / dormant_foreshadow`
 - 不等价于完整“跨世界 / 跨阶段”隔离能力
 
-### 2.11 4.3b 二度关系查询（已完成最小消费实验）
+### 2.11 4.3b 二度关系查询（已完成最小正式接入）
 
-阶段 4.3b 当前已从“只读 PoC”推进到“门槛验证 + 最小消费实验已通过”，但仍未正式接入生成主链：
+阶段 4.3b 当前已从“只读 PoC”推进到“最小正式接入已落地”，但当前接入范围仍保持克制：
 
 - 已新增只读调试入口：
   - `GET /api/runtime/generation-debug/relationship-query-2hop`
@@ -217,10 +217,37 @@
 - 当前已完成最小消费实验：
   - 正样本可直接产出 `relationships_experimental_2hop` 注入块
   - 负样本会稳定降级为弱提示块
+- 当前已完成最小正式接入：
+  - Context `relationships` 层当前已受控消费 4.3b 结果
+  - 当前策略为：`graph_1hop` 优先，`graph_2hop` 在一度高噪音或强信号不足时补位，`degraded` 保底回退
+  - 若 `graph_2hop` 只是在重复一度层已覆盖的实体链，当前不会再额外冗余补充
+- 当前已完成主链样本校准：
+  - 已新增 `server/src/scripts/run-calibration-round43b-context.ts`
+  - 当前已覆盖 3 组仿真实战场景：`2` 组 `graph_2hop` 补位、`1` 组 `graph_1hop` 主信号补充二度路径
+  - 仿真实战扩样当前为 `pass=3/3`、`decision=pass`
+  - 关系层焦点实体当前已收紧为“当前章节主实体优先，其次显式命中实体”，以减少一度过宽焦点对 2hop 补位的抢占
+- 当前已完成非触发归因：
+  - 已新增 `server/src/scripts/run-calibration-round43b-nontrigger-analysis.ts`
+  - 当前已可稳定分型 4 类未命中 `graph_2hop` 的近似真实项目场景：
+    - `onehop_sufficient`
+    - `twohop_redundant`
+    - `sparse_history`
+    - `onehop_noise_without_twohop`
+  - 当前归因脚本结果为 `pass=4/4`、`decision=pass`
+- 当前已完成分布观察：
+  - 已新增 `server/src/scripts/run-calibration-round43b-distribution.ts`
+  - 当前 synthetic 样本分布为：`graph_2hop=2 / graph_1hop=3 / degraded=2`
+  - 当前 synthetic 非触发分布为：`onehop_sufficient=1 / twohop_redundant=1 / sparse_history=1 / onehop_noise_without_twohop=1`
+  - 当前 demo 样本分布为：`graph_1hop=3 / degraded=5`
+  - 当前 demo 非触发分布为：`onehop_sufficient=3 / sparse_history=5`
+- 当前已完成噪音降级保底：
+  - 在 `onehop_noise_without_twohop` 场景下，即使最终仍为 `degraded`，当前也会优先保留 1 条高置信一度边作为“弱结构提示”
+  - 当前不再只剩同章共现弱提示，便于继续人工判断是否值得追查
 - 当前口径保持克制：
-  - 仅说明 4.3b 已具备进入“主链接入评估”的条件
-  - 不等价于已正式并入 Context `relationships` 层
+  - 仅说明 4.3b 已最小正式并入 Context `relationships` 层
+  - 不等价于已并入 retrieval 主链
   - 不等价于整体生成质量已提升
+  - 当前 `demo-project-last-cultivator` 扩样下仍为 `graph2hopCount = 0`，说明补位样本已打通，但默认 demo 项目还未出现稳定 2hop 触发覆盖
 
 ### 2.12 4.5 向量检索基础设施（当前阶段）
 
@@ -264,6 +291,53 @@
 - 不等价于 `sqlite-vec` 已在所有真实项目章节上完成终态验证
 - 不等价于动态校准结论已经最终收敛
 - 当前更适合作为“样本口径下收官、后续转回归监测”的状态，而不是继续优先扩主链
+
+### 2.13 滚动规划裂变（功能已完成，待验证）
+
+当前“AI 裂变本卷”已经从一次性整卷裂变，升级为**里程碑驱动 + 批次规划 + 历史锚定**的滚动规划模式。
+
+当前已落地：
+
+- 卷纲已升级为：
+  - `estimatedChapterCount`
+  - `milestones[]`
+- 空卷已支持直接自动建章裂变
+- `ChapterBeat` 已新增 `milestoneIndex`
+- 已新增历史摘要构建器：
+  - 正文摘要优先
+  - 无摘要时回退 beat 摘要
+  - 不读取未确认草稿正文
+- 服务端裂变请求已支持：
+  - `milestoneIndex`
+  - `startChapterNumber / endChapterNumber`
+  - `estimatedTotalChapters`
+  - `currentMilestone`
+  - `historySummaries`
+- 服务端裂变 prompt 已支持：
+  - 注入历史摘要
+  - 注入当前里程碑说明
+  - 限定本次规划范围
+- 前端 `OutlineView` 已支持：
+  - 里程碑状态：`未规划 / 已规划 / 已推进`
+  - beat 列表按里程碑分组
+  - 未规划阶段占位卡
+  - “裂变此阶段”
+  - 裂变设置弹层
+  - 全卷回退模式 / 里程碑模式切换
+  - 阶段模式下的“本次规划章数”
+  - 续规划下一批次
+  - 重裂变覆盖提示
+  - 保留已有章节标题的提示
+- 章节拍保存语义已改为支持**局部替换**，不再要求整卷覆盖
+
+当前未做：
+
+- 尚未执行本地构建 / 测试
+- 尚未执行完整手工流程验证
+
+因此当前口径应理解为：
+
+> 滚动规划裂变功能已实现到“可进入验证”的状态，下一步不再是补功能，而是验证与小修。
 
 ---
 
@@ -448,7 +522,8 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
 ### 7.2 还没有做
 
 - `sqlite-vec` 当前仍未进入全量项目/长期运行验证
-- 4.3b 当前仍未正式接入 Context / retrieval 主链
+- 4.3b 当前仍未并入 retrieval 主链
+- 4.3b 当前虽已最小正式接入 Context `relationships` 层，但默认 demo 项目与真实项目下的 `graph_2hop` 触发覆盖仍需继续扩样
 - 当前结论仍限于 calibration 样本口径，不等价于已完成所有真实项目回归验证
 
 ---
@@ -465,15 +540,29 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
    - disabled 对照场景均稳定回退为 `lexical_only=2 / vector_only=0 / hybrid=0`
    - `sqlite-vec` PoC、写入共存、读路径切换与 `json_cache` 对比验证当前样本口径下均已 through
    - 4.3b 当前正向样本、负样本、门槛汇总与最小消费实验均已通过
+   - 4.3b 当前已最小正式接入 Context `relationships` 层，且主链 `graph_2hop` 补位校准样本已通过
+   - 4.3b 当前已补“未命中 `graph_2hop` 的章节类型归因”，4 类近似真实项目样本已分型 through
 2. 当前阶段结论：
    - 当前样本口径下，vector-only rescue 机制已跨样本稳定，且控噪成立
    - 当前样本口径下，强 `hybrid` 结果未见明显误伤
    - 当前样本口径下，`sqlite_vec` 相比 `json_cache` 未见明显退化
-   - 当前样本口径下，4.3b 已具备“进入主链接入评估”的条件
+   - 当前样本口径下，4.3b 已从“主链接入评估”推进到“最小正式接入已完成”
+   - 当前样本口径下，`graph_2hop` 主链补位分支已可复跑验证，但默认 demo 项目还未出现稳定命中
+   - 当前样本口径下，4.3b 未触发 `graph_2hop` 的原因已可收敛到 4 类，而不再只是笼统记为“没命中”
+   - 当前 demo 项目里的非触发主要仍集中在 `sparse_history`，说明短板更像“历史边不足”，而不是“2hop 规则没开”
 3. 下一步建议：
    - `4.5` 当前更适合作为“已完成最大可验证闭环”的状态收官，后续转回归监测
-   - `4.3b` 当前更适合进入“主链接入评估”，先设计最小接入策略，再决定是否接入 Context `relationships`
+   - `4.3b` 当前更适合进入“接入后定向校准与边界复核”，继续观察 4 类非触发场景在后续样本中的占比变化
+   - 当前最值得继续盯的是 `onehop_noise_without_twohop`，因为其余 3 类更多是“合理不触发”而不是“策略缺陷”
+   - 若后续继续推进 `onehop_noise_without_twohop`，优先尝试“单次备选焦点重试”：仅在首选焦点命中 `degraded + high_noise + no_two_hop_relationship` 时，使用第 2 候选焦点实体再试 1 次关系层
+   - 优先复核 `focusEntityNames` 选择是否过宽，以及是否需要为 4.3b 增加显式门控或调试摘要
    - 若后续真实项目样本中出现噪音上升、`vector-only` 大面积消失，或 `sqlite_vec` 相比 `json_cache` 出现明显退化，再回到 4.5 做定点复核
+   - 生成质量侧当前新增一条独立建议：优先落 `Language QA Checker`，专门处理语病、错字、搭配不当、局部逻辑矛盾、未铺垫专名与称谓/指代漂移；不要继续把这类语言校对问题全压在 `Polish` 上
+   - 当前推荐链路为：`Plan → Write → Style → Review → Language QA → Polish → Extract`
+   - 第一版先独立展示，不急着并入正式 `review.checkerResults`
+   - 与 `Language QA` 并列的另一条生成质量主线是 `powerDelta / 能力一致性链`：它不处理语病，而专门处理“能力跃迁过大、敌我强弱标尺不稳、环境限制失真、强敌前后表现不一致”
+   - 当前建议的推进顺序不是先做完整能力档案系统，而是：先让章节拍里的 `powerDelta` 真正被生成、被注入、被检查；再让 `Extract` 回写能力变化/限制暴露；最后再做独立的能力档案页
+   - 后续页面规划建议新增“运行态能力面板”：重点展示人物能力层级、伤势、器具可用性、敌方限制条件，以及最近几章 `powerDelta / stateChanges` 轨迹
 
 ---
 
@@ -488,6 +577,9 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
 - `server/npm run calibration:round2`
 - `server/npm run calibration:round43a-context`
 - `server/npm run calibration:round43a-expansion`
+- `server/npm run calibration:round43b-context`
+- `server/npm run calibration:round43b-nontrigger`
+- `server/npm run calibration:round43b-distribution`
 - 冷归档最小收益验证脚本（直接读取 SQLite 校验过滤/放行结果）
 - 其中后 3 条为 2A+2B 落地后的复跑校验命令
 
@@ -518,7 +610,10 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
   - 负样本已稳定命中 `degraded / high_noise`
   - 门槛汇总结果为：正样本 `3/3`、负样本 `2/2`，`decision=pass`
   - 最小消费实验已通过：正样本可产出 `relationships_experimental_2hop` 注入块，负样本稳定降级为弱提示块
-  - 结论：当前样本口径下，4.3b 已具备“进入主链接入评估”的条件
+  - 主链最小正式接入已通过：Context `relationships` 层当前已可在 `graph_1hop` 优先下受控消费 `graph_2hop`
+  - 主链仿真实战样本已通过：`run-calibration-round43b-context.ts` 当前已稳定覆盖 `graph_2hop` 补位与 `graph_1hop` + 2hop 补充两类场景
+  - 非触发归因样本已通过：`run-calibration-round43b-nontrigger-analysis.ts` 当前已稳定分出 4 类“为何没有触发 graph_2hop”的场景
+  - 结论：当前样本口径下，4.3b 已从“主链接入评估”推进到“最小正式接入已完成”
 - `04B` Embedding 资产口径：
   - Pass1：`created=2 / skipped=1`
   - Pass2：`reused=2 / skipped=1`
@@ -528,7 +623,15 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
 
 因此当前交接文档反映的是：
 
-> 统一检索主链、4.3a 最小消费接入、4.4 最小冷归档、4.5 向量检索基础设施样本级闭环验证、以及 4.3b 正负样本/门槛汇总/最小消费实验都已落地；当前更适合让 4.5 转入回归监测，并把主线切到 4.3b 主链接入评估。
+> 统一检索主链、4.3a 最小消费接入、4.4 最小冷归档、4.5 向量检索基础设施样本级闭环验证，以及 4.3b 只读验证/最小消费实验/Context 最小正式接入/非触发归因都已落地；当前更适合让 4.5 转入回归监测，并把 4.3b 主线切到“接入后定向校准与边界复核”。
+
+补充一条生成质量口径：
+
+> 当前已确认一类新问题不适合继续用“资源/物件/称谓专题硬规则”零散兜底，而更适合沉淀为独立 `Language QA Checker`：其目标是专门拦截语病、错别字、局部逻辑矛盾与语言层小型幻觉；`Polish` 仍负责修问题与润色，不再承担全部语言校对职责。
+
+再补一条能力一致性口径：
+
+> 当前已确认另一类问题不属于语病，也不属于资源守恒，而是能力标尺失稳：如“前文只体现小幅稳定性提升，后文却突然具备明显战斗跃迁”或“敌方既能打裂船舷，又会被普通障碍长时间拖住”。这类问题更适合走 `powerDelta → Write/Review → Extract → 能力档案页` 这条能力一致性链，不应继续混入 `Language QA` 处理。
 
 ---
 
@@ -537,12 +640,17 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
 建议接手人按以下顺序阅读：
 
 1. `HANDOFF.md`
-2. `PLAN.md`
-3. `ROADMAP.md`
+2. `ROADMAP.md`
+3. `PLAN.md`
 4. `server/src/services/generation-context.ts`
 5. `server/src/services/generation-volume-recap-store.ts`
 6. `server/src/services/generation-foreshadow-store.ts`
 7. `app/src/components/GenerationWorkspace.tsx`
+
+如果是继续跟进 `4.3b`，建议再补看：
+
+1. `server/src/services/generation-debug-store.ts`
+2. `server/src/scripts/run-calibration-round43b-context.ts`
 
 如果是要继续改配置链路，再补看：
 
@@ -561,20 +669,20 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
 - 主线优先跟 `ROADMAP.md`
 - 不跟 `PLAN.md` 里的产品化优先级走
 - 先做完整功能，再考虑产品化能力
-- 当前更适合让 `4.5` 转入回归监测，并把主线切到 `4.3b` 主链接入评估
+- 当前更适合让 `4.5` 转入回归监测，并把主线切到 `4.3b` 接入后定向校准与边界复核
 
 ### 11.2 当前建议的下一个完整功能
 
 优先建议：
 
-1. `4.3b` 主链接入评估
-2. 基于评估结果决定是否做 4.3b 最小正式接入
+1. `4.3b` 接入后定向校准与边界复核
+2. 基于校准结果决定是否继续扩 `graph_2hop` 覆盖、门控或调试口径
 3. `4.5` 转回归监测，暂不继续扩主链
 
 暂不建议：
 
 - 回到 `I6` 产品化能力
-- 再继续扩主检索逻辑而不先评估 4.3b 接入门槛
+- 再继续扩主检索逻辑而不先复核 4.3b 接入后的覆盖与边界
 
 ### 11.3 执行模式要求
 
@@ -635,17 +743,20 @@ GENERATION_LIGHTWEIGHT_RECALL_RECENCY_WEIGHT=1
 - 统一检索主链已完成
 - 4.3a 最小结构化关系查询已完成，并已最小接入 Context `relationships` 层
 - 4.3a 扩样收益验证已完成，但结论只说明 `relationships` 层信号价值增加，不等价于整体生成质量提升
-- 4.3b 只读 PoC、正负样本验证、门槛汇总与最小消费实验已完成，当前已具备进入主链接入评估的条件
+- 4.3b 只读 PoC、正负样本验证、门槛汇总与最小消费实验已完成，并已最小正式接入 Context `relationships` 层
+- 4.3b 当前主链策略为：`graph_1hop` 优先、`graph_2hop` 补位、`degraded` 回退
+- 4.3b 已新增主链校准样本，当前可稳定复现 `graph_2hop（补位强信号）`
 - 4.4 最小冷归档已完成，已证明旧卷噪音可压制、关键线索可保留，但当前只覆盖 `memory_chunk`
 - 4.5 向量检索基础设施当前样本口径下已完成最大可验证闭环，`sqlite-vec` 写入/读路径都已验证 through
 - 当前不建议回到 I6 产品化能力
 
 当前建议的下一步：
 
-1. 先做 `4.3b` 主链接入评估：
-   - 明确 `graph_2hop` 的最小接入策略
-   - 明确何时优先 `graph_1hop`、何时补充 `graph_2hop`
-   - 明确高噪音时的降级回退口径
+1. 先做 `4.3b` 接入后定向校准与边界复核：
+   - 继续扩样观察真实项目里 `graph_2hop` 的触发覆盖
+   - 继续观察 `onehop_sufficient / twohop_redundant / sparse_history / onehop_noise_without_twohop` 这 4 类非触发场景的占比变化
+   - 复核 `focusEntityNames` 选择是否过宽，是否影响 2hop 补位命中
+   - 决定是否为 4.3b 增加显式门控、调试摘要或更细粒度校准脚本
 2. `4.5` 暂时转回归监测：
    - 继续观察 `vector_only / hybrid / noiseRetained`
    - 继续观察 `sqlite_vec` 相比 `json_cache` 是否退化

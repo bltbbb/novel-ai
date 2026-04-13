@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Pin, PinOff, Plus, Trash2, Users } from 'lucide-react';
+import { fetchGenerationDebugEntities } from '@/lib/generation-debug-client';
 import { getLoreEntityTypeLabel } from '@/lib/lore-meta';
-import { useLoreStore } from '@/stores';
+import { useLoreStore, useSettingsStore } from '@/stores';
 import { useToast } from '@/components/Toast';
-import type { Id, LoreEntityType } from '@/types';
+import type { GenerationDebugEntityRecord, Id, LoreEntityType } from '@/types';
 
 interface LoreWorkspaceProps {
   projectId: Id;
@@ -23,14 +24,39 @@ const filterOptions: Array<{ key: LoreFilter; label: string }> = [
 
 export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
   const { entities, loadEntities, createEntity, togglePin, deleteEntity } = useLoreStore();
+  const settings = useSettingsStore((state) => state.settings);
   const { toast } = useToast();
   const [activeFilter, setActiveFilter] = useState<LoreFilter>('all');
+  const [runtimeEntities, setRuntimeEntities] = useState<GenerationDebugEntityRecord[]>([]);
+  const [runtimeError, setRuntimeError] = useState('');
 
   useEffect(() => {
     void loadEntities(projectId).catch(() => {
       toast('加载设定失败', 'error');
     });
   }, [loadEntities, projectId, toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetchGenerationDebugEntities(settings.serverUrl, projectId)
+      .then((items) => {
+        if (!cancelled) {
+          setRuntimeEntities(items);
+          setRuntimeError('');
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRuntimeEntities([]);
+          setRuntimeError(error instanceof Error ? error.message : '未知错误');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, settings.serverUrl]);
 
   const filteredEntities = useMemo(() => {
     if (activeFilter === 'all') {
@@ -40,6 +66,17 @@ export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
     return entities.filter((entity) => entity.type === activeFilter);
   }, [activeFilter, entities]);
   const activeFilterLabel = activeFilter === 'all' ? '全部设定' : getLoreEntityTypeLabel(activeFilter);
+  const runtimeOnlyEntities = useMemo(() => {
+    const localNameSet = new Set(entities.map((entity) => entity.name.trim().toLowerCase()));
+
+    return runtimeEntities.filter((entity) => {
+      if (activeFilter !== 'all' && entity.entityType !== activeFilter) {
+        return false;
+      }
+
+      return !localNameSet.has(entity.entityName.trim().toLowerCase());
+    });
+  }, [activeFilter, entities, runtimeEntities]);
 
   async function handleCreateEntity() {
     const targetType = activeFilter === 'all' ? 'character' : activeFilter;
@@ -109,7 +146,7 @@ export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-5">
-        {filteredEntities.length === 0 ? (
+        {filteredEntities.length === 0 && runtimeOnlyEntities.length === 0 ? (
           <div className="flex h-full items-center justify-center rounded-3xl border border-dashed border-neutral-800 bg-neutral-950/40 p-8 text-center">
             <div className="max-w-md">
               <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-neutral-800 text-neutral-500">
@@ -124,57 +161,118 @@ export function LoreWorkspace({ projectId }: LoreWorkspaceProps) {
             </div>
           </div>
         ) : (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {filteredEntities.map((entity) => (
-              <article
-                key={entity.id}
-                className="flex flex-col rounded-3xl border border-neutral-800 bg-neutral-950/60 p-4"
-              >
-                <div className="mb-3 flex items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-lg font-medium text-neutral-100">{entity.name}</h2>
-                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-neutral-500">
-                      {getLoreEntityTypeLabel(entity.type)}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => void handleTogglePin(entity.id, entity.name, entity.pinned)}
-                      className="rounded-xl p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-indigo-300"
-                      title={entity.pinned ? '取消钉选' : '钉选到上下文'}
-                    >
-                      {entity.pinned ? <PinOff size={15} /> : <Pin size={15} />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleDeleteEntity(entity.id, entity.name)}
-                      className="rounded-xl p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-red-400"
-                      title="删除设定"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
+          <div className="space-y-8">
+            {filteredEntities.length > 0 ? (
+              <section className="space-y-4">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">手工设定</p>
+                  <p className="mt-1 text-sm text-neutral-400">你手动维护的正式设定条目。</p>
                 </div>
-
-                <p className="mb-4 min-h-[44px] text-sm leading-6 text-neutral-400">
-                  {entity.description || '暂无描述。'}
-                </p>
-
-                <div className="space-y-2 border-t border-neutral-800 pt-3 text-sm text-neutral-300">
-                  {Object.keys(entity.fields).length === 0 ? (
-                    <p className="text-neutral-500">暂无结构化字段</p>
-                  ) : (
-                    Object.entries(entity.fields).map(([field, value]) => (
-                      <div key={field} className="flex items-center justify-between gap-3">
-                        <span className="text-neutral-500">{field}</span>
-                        <span className="text-right text-neutral-300">{String(value)}</span>
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {filteredEntities.map((entity) => (
+                    <article
+                      key={entity.id}
+                      className="flex flex-col rounded-3xl border border-neutral-800 bg-neutral-950/60 p-4"
+                    >
+                      <div className="mb-3 flex items-start justify-between gap-3">
+                        <div>
+                          <h2 className="text-lg font-medium text-neutral-100">{entity.name}</h2>
+                          <p className="mt-1 text-xs uppercase tracking-[0.2em] text-neutral-500">
+                            {getLoreEntityTypeLabel(entity.type)}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void handleTogglePin(entity.id, entity.name, entity.pinned)}
+                            className="rounded-xl p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-indigo-300"
+                            title={entity.pinned ? '取消钉选' : '钉选到上下文'}
+                          >
+                            {entity.pinned ? <PinOff size={15} /> : <Pin size={15} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteEntity(entity.id, entity.name)}
+                            className="rounded-xl p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-red-400"
+                            title="删除设定"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </div>
-                    ))
-                  )}
+
+                      <p className="mb-4 min-h-[44px] text-sm leading-6 text-neutral-400">
+                        {entity.description || '暂无描述。'}
+                      </p>
+
+                      <div className="space-y-2 border-t border-neutral-800 pt-3 text-sm text-neutral-300">
+                        {Object.keys(entity.fields).length === 0 ? (
+                          <p className="text-neutral-500">暂无结构化字段</p>
+                        ) : (
+                          Object.entries(entity.fields).map(([field, value]) => (
+                            <div key={field} className="flex items-center justify-between gap-3">
+                              <span className="text-neutral-500">{field}</span>
+                              <span className="text-right text-neutral-300">{String(value)}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </article>
+                  ))}
                 </div>
-              </article>
-            ))}
+              </section>
+            ) : null}
+
+            {runtimeOnlyEntities.length > 0 ? (
+              <section className="space-y-4">
+                <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 px-4 py-4 text-sm text-sky-100">
+                  这里展示的是生成系统内部自动沉淀的运行态设定，当前为只读视图，还没有自动转成正式设定条目。
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">运行态设定</p>
+                  <p className="mt-1 text-sm text-neutral-400">
+                    已从生成章节中提炼出 {runtimeOnlyEntities.length} 条未入库设定。
+                  </p>
+                  {runtimeError ? <p className="mt-2 text-xs text-yellow-400">读取失败：{runtimeError}</p> : null}
+                </div>
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {runtimeOnlyEntities.map((entity) => (
+                    <article
+                      key={`${entity.entityName}-${entity.updatedAt}`}
+                      className="flex flex-col rounded-3xl border border-sky-500/20 bg-sky-500/5 p-4"
+                    >
+                      <div className="mb-3">
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-lg font-medium text-neutral-100">{entity.entityName}</h2>
+                          <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-200">
+                            运行态
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs uppercase tracking-[0.2em] text-neutral-500">
+                          {getLoreEntityTypeLabel((entity.entityType as LoreEntityType) || 'event')}
+                        </p>
+                      </div>
+                      <p className="mb-4 min-h-[44px] text-sm leading-6 text-neutral-300">
+                        {entity.description || '暂无描述。'}
+                      </p>
+                      <div className="space-y-2 border-t border-neutral-800 pt-3 text-sm text-neutral-300">
+                        {Object.keys(entity.fields).length === 0 ? (
+                          <p className="text-neutral-500">暂无结构化字段</p>
+                        ) : (
+                          Object.entries(entity.fields).slice(0, 5).map(([field, value]) => (
+                            <div key={field} className="flex items-center justify-between gap-3">
+                              <span className="text-neutral-500">{field}</span>
+                              <span className="text-right text-neutral-300">{String(value)}</span>
+                            </div>
+                          ))
+                        )}
+                        <p className="pt-2 text-xs text-neutral-500">最近出现：{entity.lastSeenChapterTitle || '未知章节'}</p>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
         )}
       </div>

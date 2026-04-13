@@ -985,7 +985,7 @@ function pickPreferredChunk(
 function mergeChunkSignals(
   preferred: GenerationRetrievedChunk & { content: string },
   fallback: GenerationRetrievedChunk & { content: string },
-) {
+): GenerationRetrievedChunk & { content: string } {
   const mergedTerms = createUniqueList([...preferred.matchedTerms, ...fallback.matchedTerms]);
   const mergedEntities = createUniqueList([...preferred.matchedEntityNames, ...fallback.matchedEntityNames]);
   const mergedLocations = createUniqueList([...preferred.matchedLocations, ...fallback.matchedLocations]);
@@ -995,6 +995,8 @@ function mergeChunkSignals(
       ? preferred.contentExcerpt
       : `${preferred.contentExcerpt}\n...\n${fallback.contentExcerpt}`.slice(0, 260);
   const mergedVectorSimilarity = Math.max(preferred.vectorSimilarity ?? 0, fallback.vectorSimilarity ?? 0) || null;
+  const retrievalHitOrigin: GenerationRetrievedHitOrigin =
+    mergedSignals.length >= 2 ? 'hybrid' : mergedSignals[0] === 'vector' ? 'vector_only' : 'lexical_only';
 
   return {
     ...preferred,
@@ -1002,8 +1004,7 @@ function mergeChunkSignals(
     matchedEntityNames: mergedEntities,
     matchedLocations: mergedLocations,
     retrievalSignals: mergedSignals,
-    retrievalHitOrigin:
-      mergedSignals.length >= 2 ? 'hybrid' : mergedSignals[0] === 'vector' ? 'vector_only' : 'lexical_only',
+    retrievalHitOrigin,
     vectorSimilarity: mergedVectorSimilarity,
     mergedCandidateCount: preferred.mergedCandidateCount + fallback.mergedCandidateCount,
     contentExcerpt: mergedContentExcerpt,
@@ -1356,6 +1357,7 @@ export async function retrieveGenerationMemory(
       items: [] as GenerationRetrievedChunk[],
       vectorSearch: {
         status: 'disabled',
+        source: 'none',
         candidatePoolSize: 0,
         matchedCandidateCount: 0,
         topK: 0,
@@ -1383,9 +1385,15 @@ export async function retrieveGenerationMemory(
         selection: {
           inputCandidates: 0,
           selectedCandidates: 0,
+          thresholdSelectedCandidates: 0,
+          rescuedVectorOnlyCandidates: 0,
+          droppedBelowThresholdCandidates: 0,
+          droppedByLimitCandidates: 0,
           limit: Math.max(1, Math.min(12, Math.trunc(request.limit ?? 8))),
           topScore: null,
           dynamicThreshold: null,
+          rescuedVectorOnlyChunkIds: [],
+          droppedVectorOnlyChunkIds: [],
         },
       },
     };

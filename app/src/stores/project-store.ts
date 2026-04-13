@@ -1,9 +1,11 @@
+import type { Table } from 'dexie';
 import { create } from 'zustand';
 import { countDocumentCharacters, createParagraphDocument } from '@/lib/editor-content';
 import { DEFAULT_GENERATION_GATE_CONFIG, normalizeLightweightRecallConfig } from '@/lib/generation-gate-defaults';
-import { db, deleteProjectCascade } from '@/lib/db';
+import { db, DEFAULT_VOLUME_TITLE, deleteProjectCascade } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
 import { buildProjectArchive, importProjectArchive as importArchiveToDb } from '@/lib/project-archive';
+import { cloneTemplateSubTemplates } from '@/lib/project-template';
 import type {
   Chapter,
   Id,
@@ -13,12 +15,16 @@ import type {
   Project,
   ProjectArchive,
   ProjectGenerationGateOverride,
+  ProjectTemplateSnapshot,
+  Volume,
 } from '@/types';
 
 interface CreateProjectInput {
   title?: string;
   description?: string;
   genre?: string[];
+  stylePrompt?: string;
+  templateSnapshot?: ProjectTemplateSnapshot | null;
   seedChapters?: Array<{
     title: string;
     content?: string;
@@ -33,10 +39,16 @@ interface CreateProjectInput {
   }>;
 }
 
+interface CreateProjectOptions {
+  activate?: boolean;
+}
+
 interface UpdateProjectInput {
   title?: string;
   description?: string;
   genre?: string[];
+  stylePrompt?: string;
+  templateSnapshot?: ProjectTemplateSnapshot | null;
   generationGateOverride?: ProjectGenerationGateOverride | null;
 }
 
@@ -45,7 +57,7 @@ interface ProjectStoreState {
   activeProjectId: Id | null;
   isLoaded: boolean;
   loadProjects: () => Promise<void>;
-  createProject: (input?: CreateProjectInput) => Promise<Project>;
+  createProject: (input?: CreateProjectInput, options?: CreateProjectOptions) => Promise<Project>;
   updateProject: (projectId: Id, input: UpdateProjectInput) => Promise<void>;
   deleteProject: (projectId: Id) => Promise<void>;
   exportProjectArchive: (projectId: Id) => Promise<ProjectArchive>;
@@ -77,9 +89,24 @@ function normalizeProjectGateOverride(
   };
 }
 
+function normalizeProjectStylePrompt(stylePrompt: string | null | undefined) {
+  return stylePrompt?.trim() || '';
+}
+
 function normalizeProject(project: Project): Project {
   return {
     ...project,
+    stylePrompt: normalizeProjectStylePrompt(project.stylePrompt),
+    templateSnapshot: project.templateSnapshot
+      ? {
+          ...project.templateSnapshot,
+          tags: [...project.templateSnapshot.tags],
+          promptBundle: {
+            ...project.templateSnapshot.promptBundle,
+          },
+          subTemplates: cloneTemplateSubTemplates(project.templateSnapshot.subTemplates),
+        }
+      : null,
     generationGateOverride: normalizeProjectGateOverride(project.generationGateOverride),
   };
 }
@@ -99,15 +126,25 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
     }));
   },
 
-  async createProject(input) {
+  async createProject(input, options) {
     const now = createTimestamp();
     const projectId = createId();
+    const defaultVolume: Volume = {
+      id: createId(),
+      projectId,
+      title: DEFAULT_VOLUME_TITLE,
+      order: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
     const chapters: Chapter[] = (input?.seedChapters ?? []).map((seedChapter, index) => {
       const content = createParagraphDocument(seedChapter.content ?? '');
 
       return {
         id: createId(),
         projectId,
+        volumeId: defaultVolume.id,
+        volumeTitle: defaultVolume.title,
         title: seedChapter.title.trim() || `第${index + 1}章`,
         order: index + 1,
         content,
@@ -134,14 +171,24 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       title: input?.title?.trim() || '未命名项目',
       description: input?.description?.trim() || '',
       genre: input?.genre ?? [],
+      stylePrompt: normalizeProjectStylePrompt(input?.stylePrompt),
+      templateSnapshot: input?.templateSnapshot ?? null,
       generationGateOverride: null,
       wordCount: chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0),
       createdAt: now,
       updatedAt: now,
     };
 
-    await db.transaction('rw', [db.projects, db.chapters, db.entities], async () => {
+    const tables: Table<any, any>[] = [
+      db.projects,
+      db.chapters as Table<any, any>,
+      db.volumes,
+      db.entities,
+    ];
+
+    await db.transaction('rw', tables, async () => {
       await db.projects.put(project);
+      await db.volumes.put(defaultVolume);
 
       if (chapters.length > 0) {
         await db.chapters.bulkAdd(chapters);
@@ -154,7 +201,7 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
 
     set((state) => ({
       projects: sortProjects([project, ...state.projects]),
-      activeProjectId: project.id,
+      activeProjectId: options?.activate === false ? state.activeProjectId : project.id,
       isLoaded: true,
     }));
 
@@ -174,6 +221,14 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
       title: input.title?.trim() || current.title,
       description: input.description?.trim() ?? current.description,
       genre: input.genre ?? current.genre,
+      stylePrompt:
+        typeof input.stylePrompt === 'undefined'
+          ? current.stylePrompt
+          : normalizeProjectStylePrompt(input.stylePrompt),
+      templateSnapshot:
+        typeof input.templateSnapshot === 'undefined'
+          ? current.templateSnapshot
+          : input.templateSnapshot,
       generationGateOverride: normalizeProjectGateOverride(
         typeof input.generationGateOverride === 'undefined'
           ? current.generationGateOverride

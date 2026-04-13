@@ -30,6 +30,7 @@ type GenerationJobPatch = Partial<
     | 'generatedText'
     | 'style'
     | 'review'
+    | 'languageQa'
     | 'polish'
     | 'summary'
     | 'stateChanges'
@@ -152,12 +153,31 @@ function normalizeRequest(
     projectTitle: typeof requestCandidate.projectTitle === 'string' ? requestCandidate.projectTitle : undefined,
     projectDescription:
       typeof requestCandidate.projectDescription === 'string' ? requestCandidate.projectDescription : undefined,
+    bookOutline: typeof requestCandidate.bookOutline === 'string' ? requestCandidate.bookOutline : undefined,
+    volumeOutline: typeof requestCandidate.volumeOutline === 'string' ? requestCandidate.volumeOutline : undefined,
+    volumeGoal: typeof requestCandidate.volumeGoal === 'string' ? requestCandidate.volumeGoal : undefined,
+    chapterBeat: typeof requestCandidate.chapterBeat === 'string' ? requestCandidate.chapterBeat : undefined,
+    nextChapterPreview:
+      typeof requestCandidate.nextChapterPreview === 'string'
+        ? requestCandidate.nextChapterPreview
+        : undefined,
+    forbiddenZone:
+      typeof requestCandidate.forbiddenZone === 'string' ? requestCandidate.forbiddenZone : undefined,
     previousSummary: typeof requestCandidate.previousSummary === 'string' ? requestCandidate.previousSummary : undefined,
     worldState: typeof requestCandidate.worldState === 'string' ? requestCandidate.worldState : undefined,
     contextBundle: typeof requestCandidate.contextBundle === 'string' ? requestCandidate.contextBundle : undefined,
     stylePrompt: typeof requestCandidate.stylePrompt === 'string' ? requestCandidate.stylePrompt : undefined,
     model: typeof requestCandidate.model === 'string' ? requestCandidate.model : '',
     temperature: typeof requestCandidate.temperature === 'number' ? requestCandidate.temperature : 0.7,
+    reasoningEffort:
+      requestCandidate.reasoningEffort === 'none' ||
+      requestCandidate.reasoningEffort === 'minimal' ||
+      requestCandidate.reasoningEffort === 'low' ||
+      requestCandidate.reasoningEffort === 'medium' ||
+      requestCandidate.reasoningEffort === 'high' ||
+      requestCandidate.reasoningEffort === 'xhigh'
+        ? requestCandidate.reasoningEffort
+        : undefined,
     priority,
     gateConfigOverride:
       requestCandidate.gateConfigOverride && typeof requestCandidate.gateConfigOverride === 'object'
@@ -275,6 +295,10 @@ function normalizeGenerationJob(raw: unknown): GenerationJobRecord {
       candidate.review && typeof candidate.review === 'object'
         ? candidate.review
         : null,
+    languageQa:
+      candidate.languageQa && typeof candidate.languageQa === 'object'
+        ? candidate.languageQa
+        : null,
     polish:
       candidate.polish && typeof candidate.polish === 'object'
         ? candidate.polish
@@ -338,6 +362,7 @@ function mapRowToJob(row: Record<string, unknown>) {
     generatedText: row.generated_text,
     style: parseJsonText(String(row.style_json ?? 'null')),
     review: parseJsonText(String(row.review_json ?? 'null')),
+    languageQa: parseJsonText(String(row.language_qa_json ?? 'null')),
     polish: parseJsonText(String(row.polish_json ?? 'null')),
     summary: parseJsonText(String(row.summary_json ?? 'null')),
     stateChanges: parseJsonText(String(row.state_changes_json ?? '[]')),
@@ -355,13 +380,13 @@ function upsertJobRow(env: ServerEnv, job: GenerationJobRecord) {
       id, project_id, chapter_id, chapter_title, status, priority, current_step,
       completed_beat_count, total_beat_count, current_beat_index, current_beat_label,
       attempt_count, review_rewrite_count, review_gate_reason, rewrite_guidance, paused_at,
-      request_json, outline_json, generated_text, style_json, review_json, polish_json,
+      request_json, outline_json, generated_text, style_json, review_json, language_qa_json, polish_json,
       summary_json, state_changes_json, strand, error_message, created_at, updated_at
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?
     )
     ON CONFLICT(id) DO UPDATE SET
@@ -385,6 +410,7 @@ function upsertJobRow(env: ServerEnv, job: GenerationJobRecord) {
       generated_text = excluded.generated_text,
       style_json = excluded.style_json,
       review_json = excluded.review_json,
+      language_qa_json = excluded.language_qa_json,
       polish_json = excluded.polish_json,
       summary_json = excluded.summary_json,
       state_changes_json = excluded.state_changes_json,
@@ -416,6 +442,7 @@ function upsertJobRow(env: ServerEnv, job: GenerationJobRecord) {
     job.generatedText,
     serializeJson(job.style),
     serializeJson(job.review),
+    serializeJson(job.languageQa),
     serializeJson(job.polish),
     serializeJson(job.summary),
     JSON.stringify(job.stateChanges),

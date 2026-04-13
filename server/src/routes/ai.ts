@@ -45,6 +45,47 @@ function writeSseChunk(reply: FastifyReply, chunk: AIStreamChunk) {
   reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`);
 }
 
+function extractDeltaTextPart(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+
+  const candidate = value as Record<string, unknown>;
+
+  if (typeof candidate.text === 'string') {
+    return candidate.text;
+  }
+
+  if (typeof candidate.content === 'string') {
+    return candidate.content;
+  }
+
+  return '';
+}
+
+function extractDeltaText(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return extractDeltaTextPart(value);
+  }
+
+  if (!Array.isArray(value)) {
+    return '';
+  }
+
+  return value
+    .map((item) => extractDeltaTextPart(item))
+    .filter(Boolean)
+    .join('');
+}
+
 export async function registerAIRoutes(app: FastifyInstance, env: ServerEnv) {
   app.post('/api/ai/chat', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAIChatRequest(request.body)) {
@@ -73,11 +114,19 @@ export async function registerAIRoutes(app: FastifyInstance, env: ServerEnv) {
     try {
       const stream = await streamChatCompletion(env, request.body);
 
-      for await (const part of stream) {
-        const delta = part.choices[0]?.delta?.content ?? '';
+      for await (const part of stream as AsyncIterable<any>) {
+        const firstChoice = part.choices[0];
+        const delta = extractDeltaText(firstChoice?.delta?.content);
+        const refusal = typeof firstChoice?.delta?.refusal === 'string'
+          ? firstChoice.delta.refusal.trim()
+          : '';
 
-        if (!delta) {
+        if (!delta && !refusal) {
           continue;
+        }
+
+        if (refusal) {
+          throw new Error(`模型拒绝续写：${refusal}`);
         }
 
         writeSseChunk(reply, {

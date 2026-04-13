@@ -66,20 +66,24 @@ AI Novel Studio 已完成完整 MVP + I1-I5 迭代，`I6` 已部分落地，并�
 - [x] 阶段 4.1 运行时配置已补轻量召回参数：当前 `minScore / topK / phraseWeight / entityWeight / recencyWeight` 已纳入服务端门控配置与设置面板，轻量召回不再固定写死
 - [x] 阶段 4.3a 起步：已新增只读调试入口 `/api/runtime/generation-debug/relationship-query`，服务端可基于 SQLite `entities / relationships / chapter_index` 执行最小一度结构化关系查询（仅历史章）。
 - [x] 阶段 4.3a 起步：`graph_1hop` 与 `degraded` 两种模式均已验证可用；指定实体路径与“上一章实体回退”路径均可工作，但指定实体在历史边不足时会降级。
-- [x] 阶段 4.3a 接入建议：后续接入生成链路时，优先消费 `graph_1hop`，`degraded` 作为保底回退；当前仍处于 4.3a，不涉及 4.3b。
+- [x] 阶段 4.3a 接入建议：在 4.3a 范围内，优先消费 `graph_1hop`，`degraded` 作为保底回退；后续 4.3b 已另行推进。
 - [x] 阶段 4.3a 最小接入验证：结构化关系查询结果已按最小范围接入生成链路，当前已在 Context 的 `relationships` 层消费，并可在现有 context/debug 输出中直接识别命中模式与注入位置。
 - [x] 阶段 4.3a 扩样收益复核：相对空的 `relationships` 基线，扩样结果显示该层信号增量存在稳定分层（`graph_1hop` / `degraded`），不是个别样本现象。
 - [x] 阶段 4.3a 分层分布观察：当前样本下，`graph_1hop` 主要覆盖中后期或关系较明确章节，`degraded` 主要出现在早期或关系稀薄章节。
 - [x] 阶段 4.3a 边界确认（当前样本）：扩样统计 `worldStateRequiredCount = 0`，当前样本中强关系命中不依赖额外补 `worldState`；阶段口径仍为“可用起步版”，不宣称全章节稳定覆盖，也不构成进入 4.3b 的充分条件。
-- [x] 阶段 4.3a 结论口径收敛：当前仅证明 Context `relationships` 层信号价值增加，不等价于整体生成质量已提升，仍不足以直接进入 4.3b。
+- [x] 阶段 4.3a 结论口径收敛：当前仅证明 Context `relationships` 层信号价值增加，不等价于整体生成质量已提升；是否进入 4.3b 已由后续独立校准继续推进。
 - [x] 阶段 4.3b 只读 PoC：已新增 `/api/runtime/generation-debug/relationship-query-2hop`，当前可基于 SQLite `entities / relationships / chapter_index` 执行最小二度关系查询。
 - [x] 阶段 4.3b 正向样本验证：当前正向样本已稳定命中 `graph_2hop`，输出包含 `paths / edges / nodes / stats`。
 - [x] 阶段 4.3b 负样本验证：当前负样本已稳定命中 `degraded / no_two_hop_relationship` 与 `degraded / high_noise` 两类降级。
-- [x] 阶段 4.3b 当前口径：仅说明二度关系查询只读 PoC 已可验证 through，不等价于已进入生成主链消费。
-- [x] 阶段 4.3b 只读 PoC：已新增 `/api/runtime/generation-debug/relationship-query-2hop`，当前可基于 SQLite `entities / relationships / chapter_index` 执行最小二度关系查询。
-- [x] 阶段 4.3b 正向样本验证：当前正向样本已稳定命中 `graph_2hop`，输出包含 `paths / edges / nodes / stats`。
-- [x] 阶段 4.3b 负样本验证：当前负样本已稳定命中 `degraded / no_two_hop_relationship` 与 `degraded / high_noise` 两类降级。
-- [x] 阶段 4.3b 当前口径：仅说明二度关系查询只读 PoC 已可验证 through，不等价于已进入生成主链消费。
+- [x] 阶段 4.3b 门槛汇总与最小消费实验：`gate / preview` 已通过，当前实验注入块 `relationships_experimental_2hop` 可稳定输出。
+- [x] 阶段 4.3b 最小正式接入：结果已受控接入 Context `relationships` 层，当前策略为 `graph_1hop` 优先、`graph_2hop` 在一度高噪音或强信号不足时补位、`degraded` 保底回退。
+- [x] 阶段 4.3b 主链样本校准：已新增 `run-calibration-round43b-context.ts`，当前专门校准 `graph_2hop` 在主链中的补位触发，并已通过最小样本验证。
+- [x] 阶段 4.3b 仿真实战扩样：`run-calibration-round43b-context.ts` 当前已覆盖 `2` 组 `graph_2hop` 补位场景与 `1` 组 `graph_1hop` + 2hop 补充场景，当前结果为 `pass=3/3`。
+- [x] 阶段 4.3b 焦点收敛：关系层焦点实体当前已收紧到“当前章节主实体优先，其次显式命中实体”，以减少一度过宽焦点对 2hop 补位的抢占。
+- [x] 阶段 4.3b 非触发归因：已新增 `run-calibration-round43b-nontrigger-analysis.ts`，当前可将未命中 `graph_2hop` 的样本稳定分成 `onehop_sufficient / twohop_redundant / sparse_history / onehop_noise_without_twohop` 四类，结果为 `pass=4/4`。
+- [x] 阶段 4.3b 分布观察：已新增 `run-calibration-round43b-distribution.ts`；当前 synthetic 样本分布为 `graph_2hop=2 / graph_1hop=3 / degraded=2`，demo 样本分布为 `graph_1hop=3 / degraded=5`，且 demo 非触发当前集中在 `sparse_history=5 / onehop_sufficient=3`。
+- [x] 阶段 4.3b 噪音降级保底：当前在 `onehop_noise_without_twohop` 场景下，即使最终仍为 `degraded`，也会优先保留 1 条高置信一度边作为“弱结构提示”，不再只剩同章共现弱提示。
+- [x] 阶段 4.3b 当前边界：当前仅说明二度关系查询已最小正式并入 Context `relationships` 层，不等价于已并入 retrieval 主链，也不等价于整体生成质量已提升。
 - [x] 阶段 4 起步：生成控制台已补 memory backfill 维护入口，可按项目或当前调试章节触发切片 / 向量回填，并展示结果摘要
 - [x] 阶段 4.1 长期记忆已落地第一刀：生成控制台已补卷级总结调试与 `backfill-volume-recaps` 维护入口，可直接核对长期记忆资产
 - [x] 阶段 4.1 工作记忆已落地第一刀：生成控制台已补服务端伏笔调试展示，可直接核对当前工作记忆依赖的伏笔快照
@@ -227,6 +231,151 @@ AI Novel Studio 已完成完整 MVP + I1-I5 迭代，`I6` 已部分落地，并�
 - 在 Polish 阶段执行 Anti-AI 七层全文检查
 - 命中高危词汇必须改写或记录偏离原因
 - 输出 `anti_ai_force_check: pass/fail`
+
+#### 2.4 Language QA Checker（下一步计划）
+
+**进度更新（2026-04-03）**：
+
+- 第一版基础接入已落地
+- 当前链路已实装为：`Plan → Write → Style → Review → Language QA → Polish → Extract`
+- 服务端已新增独立 `Language QA` 类型、接口与落库，不并入现有 `review.checkerResults`
+- 前端审核态已新增“语言校对”卡片，与 `Review`、本地重复检测并列展示
+- `Polish` 当前会消费 `Language QA` 结果来做定稿修文
+- 当前仍未进入专项验证阶段，后续需继续观察命中口径与误报率
+
+**目标**：把“语病、错别字、局部逻辑矛盾、称谓漂移、未铺垫专名、搭配失真”这类细粒度语言问题，从 `Polish` 中拆出来，交给独立的语言校对检查器处理。
+
+**为什么单独做**：
+
+- 当前 `Polish` 已同时承担终稿润色、去 AI 味、表达压缩与审查问题修复，职责过重
+- `试过结实 / 收船 / 鱼腮 / 连你婶子都不能说 / 两尾死鱼鱼鳃还在一张一合` 这类问题，本质更像语言层局部幻觉，不适合继续靠专题硬规则逐个兜底
+- 这类问题可被独立审稿模型稳定识别，适合沉淀为专门 checker
+
+**建议链路位置**：
+
+```text
+Plan → Write → Style → Review → Language QA → Polish → Extract
+```
+
+第一版先不改主流程图中的阶段命名，可先作为独立检查器插在 `Review` 之后、`Polish` 之前，并在前端审核态中并列展示。
+
+**第一版检查范围**：
+
+- 错别字与误写
+- 病句 / 残句 / 主语缺失
+- 搭配不当 / 用词错误
+- 局部逻辑矛盾（如“死鱼鱼鳃还在一张一合”）
+- 未铺垫专名突然出现
+- 指代 / 称谓 / 局部关系错乱
+
+**第一版输出结构**：
+
+- `severity`
+- `issues[]`
+  - `title`
+  - `description`
+  - `suggestion`
+  - `evidence`
+- `summary`
+
+**实施策略**：
+
+1. 先做独立 `Language QA Checker`，不并入现有 `review.checkerResults` schema
+2. 前端审核态先增加“语言校对”卡片，与现有 `Review` 和本地 `repetition checker` 并列展示
+3. 等命中口径稳定后，再决定是否升级为正式第 4 个服务端 checker
+
+**与 `Polish` 的职责边界**：
+
+- `Language QA Checker`：负责找问题
+- `Polish`：负责在不改剧情事实的前提下修问题、润表达、去 AI 味
+
+当前建议：不要继续把语言校对职责堆进 `Polish` prompt，而是优先落独立 `Language QA Checker`。
+
+#### 2.5 Power Delta / 能力一致性链（下一步计划）
+
+**进度更新（2026-04-03）**：
+
+- 阶段 A 与阶段 B 的第一版基础接入已落地
+- `ChapterBeat.powerDelta` 已不再只是展示字段，而是已进入卷裂变、Plan、Write、Review、Extract 提示链路
+- `Write` 已显式约束能力变化幅度、敌方/环境限制、短时增幅与代价延续
+- `Review` 已增加对能力跃迁过大、威胁标尺失稳、限制条件失效的提示约束
+- `Extract` 已增加对能力变化、伤势、临时增幅、临时修复、限制条件暴露的提取约束
+- 能力档案页（阶段 C）仍未开始，当前优先级在滚动规划裂变与验证
+
+**目标**：解决“能力提升幅度飘移、敌我强弱标尺不稳、强敌表现前后不一、临时增幅和真实战力混写”这类问题，让模型在动作场景中稳定守住“现在到底能做到什么”。
+
+**为什么单独做**：
+
+- `李木田初次吐纳后提水桶变稳，但紧接着雨夜杀人时仍需拼尽全力并吐血`
+- `芦湾灰影能一掌拍裂船舷，却被破渔网和橹杆绊住许久`
+
+这类问题不是语言校对，也不是资源守恒，而是**能力标尺与威胁标尺失稳**。仅靠 `Review` 的泛化一致性描述不够，需要把“本章允许变化的能力幅度”和“敌我限制条件”显式结构化。
+
+**核心思路**：
+
+1. 用 `ChapterBeat.powerDelta` 表达“本章允许发生的能力变化幅度”
+2. 在 `Write` 前注入 `powerDelta`，避免把“小幅进步”写成“突然开挂”
+3. 在 `Review` 中增加能力一致性检查，识别“能力跃迁过大 / 强敌表现前后不一”
+4. 在 `Extract` 中回写“能力变化 / 限制暴露 / 临时增幅 / 临时修复”
+5. 最后再把这些结构沉淀为更完整的实体能力档案页
+
+**分阶段落法**：
+
+**阶段 A：先让 `powerDelta` 真正起作用**
+
+- `ChapterBeat` 中的 `powerDelta` 从“可有可无”升级为动作章重点字段
+- 批量裂变章节拍时，模型必须给出：
+  - 主角本章能力变化幅度
+  - 敌方/环境限制条件
+  - 是否为一次性爆发、短时增幅或稳定成长
+- 前端大纲页允许人工修改 `powerDelta`
+
+**阶段 B：Write / Review / Extract 联动**
+
+- `Write` 注入：
+  - 当前章 `powerDelta`
+  - 当前状态表中的伤势、体力、器具状态、敌方特性
+- `Review` 增加独立能力一致性检查：
+  - 能力跃迁过大
+  - 威胁标尺前后不一
+  - 环境限制未被兑现
+- `Extract` 明确提取：
+  - 能力变化
+  - 伤势变化
+  - 临时增幅
+  - 临时修复
+  - 暴露出的敌方限制条件
+
+**阶段 C：能力档案页（后续页面规划）**
+
+新增一个独立页面，用来查看“运行中的能力状态”，不是手工静态设定页的简单翻版。
+
+建议信息结构：
+
+- 人物当前能力层级
+- 最近一次能力变化来源章节
+- 当前伤势 / 体力 / 可持续作战状态
+- 当前持有关键器具及其可用性
+- 敌方特性与限制条件
+- 最近 5 次 `powerDelta / stateChanges` 轨迹
+
+这个页面优先作为**运行态能力面板**，后续再决定是否允许人工回写成正式设定。
+
+**职责划分**：
+
+- `powerDelta`：前置约束，说明“本章允许涨多少、弱多少、限制是什么”
+- 实体能力档案：长期底座，说明“这个人/物长期是什么状态”
+- `Extract stateChanges`：后置记账，说明“这一章实际上发生了什么变化”
+
+**当前建议**
+
+不要先做复杂的完整能力档案系统，最现实的推进顺序是：
+
+1. 先让章节拍里的 `powerDelta` 真正被生成、被注入、被检查
+2. 再让 `Extract` 提取“能力变化 / 限制暴露”
+3. 最后把这些沉淀成更完整的实体能力档案页
+
+这条线应与 `Language QA Checker` 并行规划，但不要混为一类问题。
 
 ---
 
@@ -377,12 +526,24 @@ Stage 3: Rerank + 去重
 **当前进度补充（4.3a）**：
 - 已完成最小一度结构化关系查询验证，当前提供 `graph_1hop`（命中关系边）与 `degraded`（降级线索）两种只读结果模式。
 - 已补只读调试入口 `/api/runtime/generation-debug/relationship-query`，支持指定实体查询与上一章实体回退两条路径。
-- 当前建议的后续接入策略：`graph_1hop` 优先，`degraded` 回退；不扩展到 4.3b。
+- 当前建议的后续接入策略：在 4.3a 范围内，`graph_1hop` 优先，`degraded` 回退；后续 4.3b 已另行推进。
 - 4.3a 最小接入生成链路已验证通过：结构化结果当前仅在 Context `relationships` 层做最小消费，`graph_1hop` 作为强关系信号，`degraded` 仅作弱提示回退。
 - 相对空的 `relationships` 基线，扩样结果显示 4.3a 信号增量存在稳定分层（`graph_1hop` / `degraded`），不是个别样本现象。
 - 当前样本下，`graph_1hop` 主要覆盖中后期或关系较明确章节，`degraded` 主要出现在早期或关系稀薄章节。
 - 扩样统计 `worldStateRequiredCount = 0`，说明当前样本中强关系命中不依赖额外补 `worldState`。
-- 上述结果不等价于整体生成质量已提升，当前证据仍不足以直接推进到 4.3b。
+- 上述结果本身不等价于整体生成质量已提升；进入 4.3b 的决定已由后续独立校准补充验证。
+
+**当前进度补充（4.3b）**：
+- 已完成只读二度关系查询 PoC、正负样本验证、门槛汇总与最小消费实验，当前 `graph_2hop / degraded(no_two_hop_relationship) / degraded(high_noise)` 三种模式均已验证 through。
+- 已完成最小正式接入：Context `relationships` 层当前采用“`graph_1hop` 优先、`graph_2hop` 补位、`degraded` 回退”的受控策略，而不是直接用 2hop 覆盖 1hop。
+- 已新增主链校准脚本 `server/src/scripts/run-calibration-round43b-context.ts`，当前可稳定复现“一度高噪音、二度补位成功”的 `graph_2hop` 主链样本。
+- 已完成仿真实战扩样：当前脚本已覆盖 `2` 组 `graph_2hop` 补位场景与 `1` 组 `graph_1hop` 主信号补充二度路径场景，结果为 `pass=3/3`。
+- 当前关系层焦点实体已进一步收敛到“当前章节主实体优先，其次显式命中实体”，用来避免一度焦点过宽抢占 2hop 补位机会。
+- 已新增非触发归因脚本 `server/src/scripts/run-calibration-round43b-nontrigger-analysis.ts`，当前可稳定归因 4 类“为何没有触发 graph_2hop”的近似真实项目场景。
+- 已新增分布脚本 `server/src/scripts/run-calibration-round43b-distribution.ts`，当前可直接观察 synthetic 与 demo 两套样本的模式分布和非触发类别分布。
+- 若后续继续优化 `onehop_noise_without_twohop`，当前建议优先尝试“单次备选焦点重试”，而不是立刻引入新的全局门控。
+- 当前 `demo-project-last-cultivator` 扩样结果中，`graph2hopCount = 0`；这说明主链接口与补位样本已打通，但不等价于默认 demo 项目或真实项目中已稳定大面积触发 2hop。
+- 当前边界仍需保持克制：4.3b 已最小正式并入 Context `relationships` 层，但尚未并入 retrieval 主链，也不足以直接宣称整体生成质量已提升。
 
 **当前进度补充（4.4）**：
 - 已落最小冷归档判定：当前以“进入新卷”作为阶段切换代理，在服务端从 `generation_entities.last_seen_volume_title` 派生旧卷实体冷归档集合。

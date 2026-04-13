@@ -146,7 +146,7 @@ export function loadServerEnv(): ServerEnv {
       reviewScoreThresholds: {
         consistency: parseScoreEnv('GENERATION_REVIEW_CONSISTENCY_MIN_SCORE', 60),
         continuity: parseScoreEnv('GENERATION_REVIEW_CONTINUITY_MIN_SCORE', 60),
-        reader_pull: parseScoreEnv('GENERATION_REVIEW_READER_PULL_MIN_SCORE', 55),
+        reader_pull: parseScoreEnv('GENERATION_REVIEW_READER_PULL_MIN_SCORE', 60),
       },
       polishFailBlockReady: parseBooleanEnv('GENERATION_POLISH_FAIL_BLOCK_READY', true),
       lightweightRecall: {

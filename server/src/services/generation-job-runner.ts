@@ -11,6 +11,7 @@ import {
   upsertGenerationJob,
 } from './generation-job-store.js';
 import {
+  checkChapterLanguageQa,
   extractChapterArtifacts,
   generateBeatDraft,
   generateChapterOutline,
@@ -21,6 +22,7 @@ import {
 import {
   replaceGenerationStateChanges,
   upsertGenerationChapterSummary,
+  upsertGenerationLanguageQaMetrics,
   upsertGenerationReviewMetrics,
 } from './generation-artifact-store.js';
 import {
@@ -33,6 +35,7 @@ import { replaceGenerationForeshadows } from './generation-foreshadow-store.js';
 import { replaceGenerationMemoryChunks } from './generation-memory-store.js';
 import { rebuildGenerationVolumeRecap } from './generation-volume-recap-store.js';
 import type {
+  ChapterLanguageQaDraft,
   ChapterReviewDraft,
   GenerationJobBatchAction,
   GenerationJobBatchRequest,
@@ -73,6 +76,7 @@ function createGenerationJob(request: GenerationJobRequest): GenerationJobRecord
     generatedText: '',
     style: null,
     review: null,
+    languageQa: null,
     polish: null,
     summary: null,
     stateChanges: [],
@@ -167,7 +171,11 @@ function buildReviewGateReason(review: ChapterReviewDraft, gateConfig: Generatio
   return review.summary || '审查层判定需要重写';
 }
 
-function buildRewriteGuidance(review: ChapterReviewDraft, gateConfig: GenerationGateConfig) {
+function buildRewriteGuidance(
+  review: ChapterReviewDraft,
+  gateConfig: GenerationGateConfig,
+  languageQa: ChapterLanguageQaDraft | null,
+) {
   const issueLines = review.checkerResults
     .flatMap((checker) =>
       checker.issues.map((issue) => {
@@ -192,12 +200,31 @@ function buildRewriteGuidance(review: ChapterReviewDraft, gateConfig: Generation
         `[${checker.checker}] 当前分数 ${checker.score}，低于门槛 ${gateConfig.reviewScoreThresholds[checker.checker]}；优先修复：${checker.summary}`,
     )
     .slice(0, 3);
+  const languageQaLines = languageQa
+    ? languageQa.issues
+        .slice(0, 3)
+        .map((issue) => {
+          const parts = [`[language_qa] ${issue.title}`, issue.description];
+
+          if (issue.suggestion) {
+            parts.push(`修改建议：${issue.suggestion}`);
+          }
+
+          if (issue.evidence) {
+            parts.push(`证据：${issue.evidence}`);
+          }
+
+          return parts.join('；');
+        })
+    : [];
 
   return [
     `审查总结：${review.summary}`,
     review.antiAiForceCheck === 'fail' ? 'Anti-AI 终检未通过，必须整体改写表达，避免重复高危词和机械句式。' : '',
+    languageQa ? `语言校对：${languageQa.summary}` : '',
     ...scoreLines,
     ...issueLines,
+    ...languageQaLines,
   ]
     .filter(Boolean)
     .join('\n');
@@ -325,6 +352,7 @@ export async function retryGenerationJob(env: ServerEnv, jobId: string) {
     generatedText: shouldResetForReviewGate ? '' : current.generatedText,
     style: shouldResetForReviewGate ? null : current.style,
     review: shouldResetForReviewGate ? null : current.review,
+    languageQa: shouldResetForReviewGate ? null : current.languageQa,
     polish: shouldResetForReviewGate || shouldResetForPolishGate ? null : current.polish,
     summary: shouldResetForReviewGate || shouldResetForPolishGate ? null : current.summary,
     stateChanges: shouldResetForReviewGate || shouldResetForPolishGate ? [] : current.stateChanges,
@@ -392,6 +420,7 @@ export async function rollbackGenerationJobStage(
     return updateGenerationJob(env, jobId, {
       status: 'queued',
       review: null,
+      languageQa: null,
       polish: null,
       summary: null,
       stateChanges: [],
@@ -490,12 +519,19 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
             previousChapterTitle: runnableJob.request.previousChapterTitle,
             projectTitle: runnableJob.request.projectTitle,
             projectDescription: runnableJob.request.projectDescription,
+            bookOutline: runnableJob.request.bookOutline,
+            volumeOutline: runnableJob.request.volumeOutline,
+            volumeGoal: runnableJob.request.volumeGoal,
+            chapterBeat: runnableJob.request.chapterBeat,
+            nextChapterPreview: runnableJob.request.nextChapterPreview,
+            forbiddenZone: runnableJob.request.forbiddenZone,
             previousSummary: runnableJob.request.previousSummary,
             worldState: runnableJob.request.worldState,
             contextBundle: runnableJob.request.contextBundle,
             gateConfigOverride: getEffectiveGateConfig(env, runnableJob),
             model: runnableJob.request.model,
             temperature: runnableJob.request.temperature,
+            reasoningEffort: runnableJob.request.reasoningEffort,
           })
         ).outline;
 
@@ -569,6 +605,12 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         previousChapterTitle: runnableJob.request.previousChapterTitle,
         projectTitle: runnableJob.request.projectTitle,
         projectDescription: runnableJob.request.projectDescription,
+        bookOutline: runnableJob.request.bookOutline,
+        volumeOutline: runnableJob.request.volumeOutline,
+        volumeGoal: runnableJob.request.volumeGoal,
+        chapterBeat: runnableJob.request.chapterBeat,
+        nextChapterPreview: runnableJob.request.nextChapterPreview,
+        forbiddenZone: runnableJob.request.forbiddenZone,
         outline: runnableJob.outline,
         beatIndex: index,
         currentBeat: beat,
@@ -581,6 +623,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         gateConfigOverride: getEffectiveGateConfig(env, runnableJob),
         model: runnableJob.request.model,
         temperature: runnableJob.request.temperature,
+        reasoningEffort: runnableJob.request.reasoningEffort,
       });
 
       const afterWriteJob = await loadJobOrThrow(env, jobId);
@@ -635,6 +678,8 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         previousChapterTitle: runnableJob.request.previousChapterTitle,
         projectTitle: runnableJob.request.projectTitle,
         projectDescription: runnableJob.request.projectDescription,
+        bookOutline: runnableJob.request.bookOutline,
+        volumeOutline: runnableJob.request.volumeOutline,
         outline: runnableJob.outline,
         previousSummary: runnableJob.request.previousSummary,
         worldState: runnableJob.request.worldState,
@@ -644,6 +689,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         content: runnableJob.generatedText,
         model: runnableJob.request.model,
         temperature: runnableJob.request.temperature,
+        reasoningEffort: runnableJob.request.reasoningEffort,
       });
 
       const afterStyleJob = await loadJobOrThrow(env, jobId);
@@ -656,6 +702,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         generatedText: styleResponse.content,
         style: styleResponse.style,
         review: null,
+        languageQa: null,
         polish: null,
         summary: null,
         stateChanges: [],
@@ -693,6 +740,9 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         previousChapterTitle: runnableJob.request.previousChapterTitle,
         projectTitle: runnableJob.request.projectTitle,
         projectDescription: runnableJob.request.projectDescription,
+        bookOutline: runnableJob.request.bookOutline,
+        volumeOutline: runnableJob.request.volumeOutline,
+        chapterBeat: runnableJob.request.chapterBeat,
         outline: runnableJob.outline,
         previousSummary: runnableJob.request.previousSummary,
         worldState: runnableJob.request.worldState,
@@ -701,6 +751,30 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         content: runnableJob.generatedText,
         model: runnableJob.request.model,
         temperature: runnableJob.request.temperature,
+        reasoningEffort: runnableJob.request.reasoningEffort,
+      });
+      const languageQaResponse = await checkChapterLanguageQa(env, {
+        projectId: runnableJob.projectId,
+        chapterId: runnableJob.chapterId,
+        chapterTitle: runnableJob.request.chapterTitle,
+        chapterOrder: runnableJob.request.chapterOrder,
+        volumeTitle: runnableJob.request.volumeTitle,
+        previousChapterId: runnableJob.request.previousChapterId,
+        previousChapterTitle: runnableJob.request.previousChapterTitle,
+        projectTitle: runnableJob.request.projectTitle,
+        projectDescription: runnableJob.request.projectDescription,
+        bookOutline: runnableJob.request.bookOutline,
+        volumeOutline: runnableJob.request.volumeOutline,
+        chapterBeat: runnableJob.request.chapterBeat,
+        outline: runnableJob.outline,
+        previousSummary: runnableJob.request.previousSummary,
+        worldState: runnableJob.request.worldState,
+        contextBundle: runnableJob.request.contextBundle,
+        gateConfigOverride: getEffectiveGateConfig(env, runnableJob),
+        content: runnableJob.generatedText,
+        model: runnableJob.request.model,
+        temperature: runnableJob.request.temperature,
+        reasoningEffort: runnableJob.request.reasoningEffort,
       });
 
       const afterReviewJob = await loadJobOrThrow(env, jobId);
@@ -715,18 +789,29 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         chapterTitle: runnableJob.request.chapterTitle,
         review: reviewResponse.review,
       });
+      upsertGenerationLanguageQaMetrics(env, {
+        projectId: runnableJob.projectId,
+        chapterId: runnableJob.chapterId,
+        chapterTitle: runnableJob.request.chapterTitle,
+        languageQa: languageQaResponse.languageQa,
+      });
 
       const effectiveGateConfig = getEffectiveGateConfig(env, afterReviewJob);
 
       if (shouldRewriteForReviewWithConfig(reviewResponse.review, effectiveGateConfig)) {
         const gateReason = buildReviewGateReason(reviewResponse.review, effectiveGateConfig);
-        const rewriteGuidance = buildRewriteGuidance(reviewResponse.review, effectiveGateConfig);
+        const rewriteGuidance = buildRewriteGuidance(
+          reviewResponse.review,
+          effectiveGateConfig,
+          languageQaResponse.languageQa,
+        );
         const nextRewriteCount = afterReviewJob.reviewRewriteCount + 1;
 
         if (nextRewriteCount > effectiveGateConfig.reviewMaxRewriteCount) {
           await updateGenerationJob(env, jobId, {
             status: 'error',
             review: reviewResponse.review,
+            languageQa: languageQaResponse.languageQa,
             reviewRewriteCount: afterReviewJob.reviewRewriteCount,
             reviewGateReason: `自动重写 ${effectiveGateConfig.reviewMaxRewriteCount} 次后仍未通过：${gateReason}`,
             rewriteGuidance,
@@ -742,6 +827,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         await updateGenerationJob(env, jobId, {
           generatedText: '',
           review: null,
+          languageQa: null,
           polish: null,
           summary: null,
           stateChanges: [],
@@ -762,6 +848,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
 
       await updateGenerationJob(env, jobId, {
         review: reviewResponse.review,
+        languageQa: languageQaResponse.languageQa,
         reviewGateReason: '',
         rewriteGuidance: '',
         polish: null,
@@ -798,15 +885,19 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         previousChapterTitle: runnableJob.request.previousChapterTitle,
         projectTitle: runnableJob.request.projectTitle,
         projectDescription: runnableJob.request.projectDescription,
+        bookOutline: runnableJob.request.bookOutline,
+        volumeOutline: runnableJob.request.volumeOutline,
         outline: runnableJob.outline,
         previousSummary: runnableJob.request.previousSummary,
         worldState: runnableJob.request.worldState,
         contextBundle: runnableJob.request.contextBundle,
         gateConfigOverride: getEffectiveGateConfig(env, runnableJob),
         review: runnableJob.review,
+        languageQa: runnableJob.languageQa,
         content: runnableJob.generatedText,
         model: runnableJob.request.model,
         temperature: runnableJob.request.temperature,
+        reasoningEffort: runnableJob.request.reasoningEffort,
       });
 
       const afterPolishJob = await loadJobOrThrow(env, jobId);
@@ -862,10 +953,13 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
       projectId: runnableJob.projectId,
       chapterId: runnableJob.chapterId,
       chapterTitle: runnableJob.request.chapterTitle,
+      chapterOrder: runnableJob.request.chapterOrder,
+      chapterBeat: runnableJob.request.chapterBeat,
       content: runnableJob.generatedText,
       loreSummary: runnableJob.request.worldState,
       model: runnableJob.request.model,
       temperature: runnableJob.request.temperature,
+      reasoningEffort: runnableJob.request.reasoningEffort,
     });
 
     const afterExtractJob = await loadJobOrThrow(env, jobId);

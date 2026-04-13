@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { BookOpen, FlaskConical, LibraryBig, LoaderCircle, Settings2, Share2, Sparkles, Target } from 'lucide-react';
+import { BookOpen, LibraryBig, LoaderCircle, Settings2, Share2, Sparkles, Target, X } from 'lucide-react';
 import { useToast } from '@/components/Toast';
 import { seedDemoData } from '@/lib/db';
 import {
@@ -11,24 +11,35 @@ import {
   useSettingsStore,
 } from '@/stores';
 
-type AppView = 'editor' | 'lore' | 'foreshadow' | 'graph' | 'generation';
+type AppView = 'workspace' | 'lore' | 'foreshadow' | 'graph';
 
 const navItems = [
-  { key: 'editor' as const, label: '编辑器', icon: BookOpen },
-  { key: 'generation' as const, label: '生成控制台', icon: FlaskConical },
+  { key: 'workspace' as const, label: '创作工作台', icon: BookOpen },
   { key: 'lore' as const, label: '设定库', icon: LibraryBig },
   { key: 'foreshadow' as const, label: '伏笔追踪', icon: Target },
   { key: 'graph' as const, label: '关系图谱', icon: Share2 },
 ];
+
+const viewLabels: Record<AppView, string> = {
+  workspace: '创作工作台',
+  lore: '设定库',
+  foreshadow: '伏笔追踪',
+  graph: '关系图谱',
+};
 
 const ProjectList = lazy(async () => {
   const module = await import('@/components/ProjectList');
   return { default: module.ProjectList };
 });
 
-const EditorWorkspace = lazy(async () => {
-  const module = await import('@/components/EditorWorkspace');
-  return { default: module.EditorWorkspace };
+const TemplateLibraryPage = lazy(async () => {
+  const module = await import('@/components/TemplateLibraryPage');
+  return { default: module.TemplateLibraryPage };
+});
+
+const WorkspaceLayout = lazy(async () => {
+  const module = await import('@/components/WorkspaceLayout');
+  return { default: module.WorkspaceLayout };
 });
 
 const LoreWorkspace = lazy(async () => {
@@ -56,6 +67,21 @@ const SettingsDialog = lazy(async () => {
   return { default: module.SettingsDialog };
 });
 
+const ProjectSettingsDialog = lazy(async () => {
+  const module = await import('@/components/ProjectSettingsDialog');
+  return { default: module.ProjectSettingsDialog };
+});
+
+const TemplateLibraryDialog = lazy(async () => {
+  const module = await import('@/components/TemplateLibraryDialog');
+  return { default: module.TemplateLibraryDialog };
+});
+
+const ProjectTemplateBindingDialog = lazy(async () => {
+  const module = await import('@/components/ProjectTemplateBindingDialog');
+  return { default: module.ProjectTemplateBindingDialog };
+});
+
 function ViewLoadingFallback({ label }: { label: string }) {
   return (
     <div className="flex min-h-[280px] items-center justify-center rounded-3xl border border-neutral-800 bg-neutral-900/70 text-sm text-neutral-400">
@@ -76,17 +102,19 @@ export function AppShell() {
   const refreshServerStatus = useServerStatusStore((state) => state.refresh);
   const { toast } = useToast();
   const [isBootstrapping, setIsBootstrapping] = useState(true);
-  const [activeView, setActiveView] = useState<AppView>('editor');
+  const [activeView, setActiveView] = useState<AppView>('workspace');
+  const [showLandingTemplateLibraryPage, setShowLandingTemplateLibraryPage] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showProjectSettings, setShowProjectSettings] = useState(false);
+  const [showTemplateLibrary, setShowTemplateLibrary] = useState(false);
+  const [showTemplateBinding, setShowTemplateBinding] = useState(false);
+  const [showCompatibilityConsole, setShowCompatibilityConsole] = useState(false);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, projects],
   );
-  const activeViewLabel = useMemo(
-    () => navItems.find((item) => item.key === activeView)?.label ?? '编辑器',
-    [activeView],
-  );
+  const activeViewLabel = useMemo(() => viewLabels[activeView], [activeView]);
 
   useEffect(() => {
     let mounted = true;
@@ -124,12 +152,22 @@ export function AppShell() {
     });
   }, [activeProjectId, loadChapters, loadEntities, loadForeshadows, toast]);
 
+  useEffect(() => {
+    if (activeProjectId) {
+      return;
+    }
+
+    setShowProjectSettings(false);
+    setShowTemplateBinding(false);
+    setShowCompatibilityConsole(false);
+  }, [activeProjectId]);
+
   function openEditor(chapterId?: string | null) {
     if (chapterId) {
       setActiveChapter(chapterId);
     }
 
-    setActiveView('editor');
+    setActiveView('workspace');
   }
 
   useEffect(() => {
@@ -169,10 +207,31 @@ export function AppShell() {
   }
 
   if (!activeProject) {
+    if (showLandingTemplateLibraryPage) {
+      return (
+        <>
+          <Suspense fallback={<ViewLoadingFallback label="模板库" />}>
+            <TemplateLibraryPage onClose={() => setShowLandingTemplateLibraryPage(false)} />
+          </Suspense>
+          <Suspense fallback={null}>
+            <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
+          </Suspense>
+        </>
+      );
+    }
+
     return (
-      <Suspense fallback={<ViewLoadingFallback label="项目列表" />}>
-        <ProjectList />
-      </Suspense>
+      <>
+        <Suspense fallback={<ViewLoadingFallback label="项目列表" />}>
+          <ProjectList
+            onOpenTemplateLibraryPage={() => setShowLandingTemplateLibraryPage(true)}
+            onOpenGlobalSettings={() => setShowSettings(true)}
+          />
+        </Suspense>
+        <Suspense fallback={null}>
+          <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
+        </Suspense>
+      </>
     );
   }
 
@@ -186,6 +245,11 @@ export function AppShell() {
             <p className="mt-2 text-sm leading-6 text-neutral-400">
               {activeProject.description || '暂无项目简介'}
             </p>
+            {activeProject.templateSnapshot ? (
+              <p className="mt-3 text-xs leading-6 text-indigo-300">
+                当前模板：{activeProject.templateSnapshot.templateName}
+              </p>
+            ) : null}
           </div>
 
           <nav className="space-y-2">
@@ -213,11 +277,38 @@ export function AppShell() {
 
           <button
             type="button"
-            onClick={() => setShowSettings(true)}
+            onClick={() => setShowProjectSettings(true)}
             className="mt-4 flex items-center gap-3 rounded-2xl border border-neutral-800 px-3 py-3 text-left text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
           >
             <Settings2 size={16} />
-            打开设置
+            项目设置
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            className="mt-3 flex items-center gap-3 rounded-2xl border border-neutral-800 px-3 py-3 text-left text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+          >
+            <Settings2 size={16} />
+            AI 设置
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowTemplateBinding(true)}
+            className="mt-3 flex items-center gap-3 rounded-2xl border border-neutral-800 px-3 py-3 text-left text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+          >
+            <Sparkles size={16} />
+            管理项目模板
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowTemplateLibrary(true)}
+            className="mt-3 flex items-center gap-3 rounded-2xl border border-neutral-800 px-3 py-3 text-left text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+          >
+            <LibraryBig size={16} />
+            打开模板库
           </button>
 
           <button
@@ -242,14 +333,40 @@ export function AppShell() {
               <p className="mt-2 text-sm leading-6 text-neutral-400">
                 {activeProject.description || '暂无项目简介。'}
               </p>
+              {activeProject.templateSnapshot ? (
+                <p className="mt-2 text-xs leading-6 text-indigo-300">
+                  当前模板：{activeProject.templateSnapshot.templateName}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowTemplateBinding(true)}
+                className="rounded-2xl border border-neutral-800 px-3 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+              >
+                项目模板
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowTemplateLibrary(true)}
+                className="rounded-2xl border border-neutral-800 px-3 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+              >
+                模板库
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowProjectSettings(true)}
+                className="rounded-2xl border border-neutral-800 px-3 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+              >
+                项目设置
+              </button>
               <button
                 type="button"
                 onClick={() => setShowSettings(true)}
                 className="rounded-2xl border border-neutral-800 px-3 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
               >
-                设置
+                AI 设置
               </button>
               <button
                 type="button"
@@ -299,20 +416,16 @@ export function AppShell() {
           </div>
 
           <Suspense fallback={<ViewLoadingFallback label={activeViewLabel} />}>
-            {activeView === 'editor' ? (
-              <EditorWorkspace
+            {activeView === 'workspace' ? (
+              <WorkspaceLayout
                 projectId={activeProject.id}
                 projectTitle={activeProject.title}
                 projectDescription={activeProject.description}
+                genre={activeProject.genre}
                 onOpenSettings={() => setShowSettings(true)}
+                onOpenProjectSettings={() => setShowProjectSettings(true)}
                 onOpenForeshadow={() => setActiveView('foreshadow')}
-              />
-            ) : activeView === 'generation' ? (
-              <GenerationWorkspace
-                projectId={activeProject.id}
-                projectTitle={activeProject.title}
-                projectDescription={activeProject.description}
-                onOpenChapter={(chapterId) => openEditor(chapterId)}
+                onOpenAdvancedGeneration={() => setShowCompatibilityConsole(true)}
               />
             ) : activeView === 'lore' ? (
               <LoreWorkspace projectId={activeProject.id} />
@@ -337,6 +450,66 @@ export function AppShell() {
       <Suspense fallback={null}>
         <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
       </Suspense>
+      <Suspense fallback={null}>
+        <ProjectSettingsDialog
+          open={showProjectSettings}
+          projectId={activeProject.id}
+          onClose={() => setShowProjectSettings(false)}
+        />
+      </Suspense>
+      <Suspense fallback={null}>
+        <TemplateLibraryDialog open={showTemplateLibrary} onClose={() => setShowTemplateLibrary(false)} />
+      </Suspense>
+      <Suspense fallback={null}>
+        <ProjectTemplateBindingDialog
+          open={showTemplateBinding}
+          projectId={activeProject.id}
+          currentTemplateSnapshot={activeProject.templateSnapshot}
+          onClose={() => setShowTemplateBinding(false)}
+          onOpenTemplateLibrary={() => {
+            setShowTemplateBinding(false);
+            setShowTemplateLibrary(true);
+          }}
+        />
+      </Suspense>
+
+      {showCompatibilityConsole ? (
+        <Suspense fallback={<ViewLoadingFallback label="兼容控制台" />}>
+          <div className="fixed inset-0 z-40 bg-black/55 px-6 py-6 backdrop-blur-sm">
+            <div className="mx-auto flex h-full w-full max-w-[1600px] flex-col gap-4">
+              <div className="flex items-center justify-between rounded-3xl border border-neutral-800 bg-neutral-900/80 px-5 py-4 text-neutral-100">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">兼容控制台</p>
+                  <p className="mt-2 text-sm text-neutral-400">
+                    旧版队列、调试与维护入口。主创作链路已经迁到“创作工作台”。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowCompatibilityConsole(false)}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                >
+                  <X size={16} />
+                  关闭
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <GenerationWorkspace
+                  projectId={activeProject.id}
+                  projectTitle={activeProject.title}
+                  projectDescription={activeProject.description}
+                  onOpenChapter={(chapterId) => {
+                    setShowCompatibilityConsole(false);
+                    openEditor(chapterId);
+                  }}
+                  onReturnToWorkspace={() => setShowCompatibilityConsole(false)}
+                />
+              </div>
+            </div>
+          </div>
+        </Suspense>
+      ) : null}
     </div>
   );
 }

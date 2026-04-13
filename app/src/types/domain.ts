@@ -9,6 +9,8 @@ export type SnapshotSource = 'manual' | 'ai_continue';
 export type IdeaCardSource = 'manual' | 'ai_output';
 export type StrandType = 'quest' | 'fire' | 'constellation';
 export type HookStrength = 'soft' | 'medium' | 'strong';
+export type AIReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningEffortSetting = 'model_default' | AIReasoningEffort;
 export type ProjectGateSeverity = 'critical' | 'high' | 'medium' | 'low';
 export type GenerationQueueStatus =
   | 'queued'
@@ -17,6 +19,13 @@ export type GenerationQueueStatus =
   | 'approved'
   | 'discarded'
   | 'error';
+export type GenerationQueueProgressStage =
+  | 'plan'
+  | 'write'
+  | 'style'
+  | 'review'
+  | 'polish'
+  | 'extract';
 
 export type LoreEntityType =
   | 'character'
@@ -47,11 +56,98 @@ export interface ProjectGenerationGateOverride {
   };
 }
 
+export interface TemplatePromptBundle {
+  bookOutlinePrompt: string;
+  volumeOutlinePrompt: string;
+  milestonePrompt: string;
+  beatPrompt: string;
+  writingPrompt: string;
+  stylePrompt: string;
+  negativePrompt: string;
+}
+
+export interface TemplateAnalysisMeta {
+  method: string;
+  totalSegments: number;
+  sampledSegments: number;
+  estimatedWordCount: number;
+  paragraphCount?: number;
+  averageParagraphLength?: number;
+  dialogueParagraphRatio?: number;
+  headingSegmentCount?: number;
+  dominantPerspective?: string;
+  topTransitionWords?: string[];
+  evidenceSnippets?: Array<{
+    title: string;
+    excerpt: string;
+  }>;
+}
+
+export interface TemplateSubPromptBundle {
+  beatPrompt: string;
+  writingPrompt: string;
+  stylePrompt: string;
+  negativePrompt: string;
+}
+
+export interface TemplateSubTemplateDraft {
+  summary: string;
+  usage: string;
+  promptBundle: TemplateSubPromptBundle;
+}
+
+export interface TemplateSubTemplates {
+  opening: TemplateSubTemplateDraft;
+  middle: TemplateSubTemplateDraft;
+  climax: TemplateSubTemplateDraft;
+  ending: TemplateSubTemplateDraft;
+}
+
+export interface TemplateLibraryDraft {
+  name: string;
+  sourceTitle: string;
+  sourceAuthor: string;
+  tags: string[];
+  summary: string;
+  narrativeStyle: string;
+  pacingStyle: string;
+  conflictStyle: string;
+  characterStyle: string;
+  dialogueStyle: string;
+  openingStyle: string;
+  endingHookStyle: string;
+  commonPatterns: string[];
+  forbiddenPatterns: string[];
+  promptBundle: TemplatePromptBundle;
+  subTemplates: TemplateSubTemplates;
+  analysisMeta: TemplateAnalysisMeta | null;
+}
+
+export interface TemplateLibraryItem extends TemplateLibraryDraft {
+  id: Id;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ProjectTemplateSnapshot {
+  templateId: Id | null;
+  templateName: string;
+  sourceTitle: string;
+  sourceAuthor: string;
+  summary: string;
+  tags: string[];
+  promptBundle: TemplatePromptBundle;
+  subTemplates: TemplateSubTemplates;
+  boundAt: Timestamp;
+}
+
 export interface Project {
   id: Id;
   title: string;
   description: string;
   genre: string[];
+  stylePrompt: string;
+  templateSnapshot: ProjectTemplateSnapshot | null;
   generationGateOverride: ProjectGenerationGateOverride | null;
   wordCount: number;
   createdAt: Timestamp;
@@ -61,12 +157,98 @@ export interface Project {
 export interface Chapter {
   id: Id;
   projectId: Id;
+  volumeId?: Id;
   volumeTitle?: string;
   title: string;
   order: number;
   content: RichTextDocument;
   wordCount: number;
   status: ChapterStatus;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface Volume {
+  id: Id;
+  projectId: Id;
+  title: string;
+  order: number;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface BookOutlineFields {
+  premise: string;
+  centralConflict: string;
+  protagonistArc: string;
+  thematicCore: string;
+  worldRules: string[];
+  endgameHint: string;
+  toneGuide: string;
+}
+
+export interface BookOutline extends BookOutlineFields {
+  id: Id;
+  projectId: Id;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface VolumeMilestoneDraft {
+  title: string;
+  targetChapterCount: number;
+  phaseGoal: string;
+  phaseConflict: string;
+  entryState: string;
+  exitState: string;
+  keyTurns: string[];
+  mustPlant: string[];
+  mustPayoff: string[];
+  powerCeiling: string;
+}
+
+export interface VolumeOutlineFields {
+  goal: string;
+  keyConflict: string;
+  arcSummary: string;
+  entryState: string;
+  exitState: string;
+  keyEvents: string[];
+  foreshadowSeeds: string[];
+  estimatedChapterCount: number;
+  milestones: VolumeMilestoneDraft[];
+}
+
+export interface VolumeOutline extends VolumeOutlineFields {
+  id: Id;
+  projectId: Id;
+  volumeId: Id;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ChapterBeatFields {
+  orderInVolume: number;
+  titleHint: string;
+  scenePurpose: string;
+  focusCharacter: string;
+  mainPlot: string;
+  subPlot: string;
+  pacing: string;
+  hookOut: string;
+  noveltyRequirement: string;
+  powerDelta: string;
+  forbiddenPhrases: string[];
+  forbiddenScenePatterns: string[];
+  keyItems: string[];
+  milestoneIndex?: number;
+}
+
+export interface ChapterBeat extends ChapterBeatFields {
+  id: Id;
+  projectId: Id;
+  volumeId: Id;
+  chapterId?: Id;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -206,14 +388,49 @@ export interface GenerationQueueStateChange {
   newValue: string;
 }
 
+export interface GenerationQueueReviewIssue {
+  severity: ProjectGateSeverity;
+  title: string;
+  description: string;
+  suggestion: string;
+  evidence: string;
+}
+
+export interface GenerationQueueReviewCheckerResult {
+  checker: 'consistency' | 'continuity' | 'reader_pull';
+  score: number;
+  summary: string;
+  issues: GenerationQueueReviewIssue[];
+}
+
+export interface GenerationQueueReview {
+  summary: string;
+  overallSeverity: ProjectGateSeverity;
+  needsRewrite: boolean;
+  antiAiForceCheck: 'pass' | 'fail';
+  checkerResults: GenerationQueueReviewCheckerResult[];
+}
+
+export interface GenerationQueueLanguageQa {
+  severity: ProjectGateSeverity;
+  summary: string;
+  issues: GenerationQueueReviewIssue[];
+}
+
 export interface GenerationQueueItem {
   id: Id;
   projectId: Id;
   chapterId: Id;
   chapterTitle: string;
   status: GenerationQueueStatus;
+  progressStage?: GenerationQueueProgressStage | null;
+  progressLabel?: string;
+  progressBeatIndex?: number | null;
+  progressBeatCount?: number | null;
   generatedText: string;
   outline: GenerationQueueOutline | null;
+  review: GenerationQueueReview | null;
+  languageQa: GenerationQueueLanguageQa | null;
   summary: GenerationQueueSummary | null;
   stateChanges: GenerationQueueStateChange[];
   strand: StrandType | null;
@@ -231,6 +448,10 @@ export interface ProjectArchive {
   foreshadows: Foreshadow[];
   snapshots: Snapshot[];
   ideaCards: IdeaCard[];
+  volumes?: Volume[];
+  bookOutlines?: BookOutline[];
+  volumeOutlines?: VolumeOutline[];
+  chapterBeats?: ChapterBeat[];
 }
 
 export interface AppSettings {
@@ -238,4 +459,5 @@ export interface AppSettings {
   modelName: string;
   temperature: number;
   stylePrompt: string;
+  reasoningEffort: ReasoningEffortSetting;
 }

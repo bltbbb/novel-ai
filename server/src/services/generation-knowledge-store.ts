@@ -42,6 +42,69 @@ function parseStringArrayJson(rawText: string | null | undefined) {
   }
 }
 
+export function replaceGenerationEntitiesSnapshot(
+  env: ServerEnv,
+  input: {
+    projectId: string;
+    entities: GenerationEntitySnapshot[];
+  },
+) {
+  const db = getGenerationDatabase(env);
+  const currentTime = nowIsoString();
+  const insertStatement = db.prepare(`
+    INSERT INTO generation_entities (
+      project_id,
+      entity_name,
+      entity_type,
+      description,
+      fields_json,
+      tags_json,
+      pinned,
+      last_seen_chapter_id,
+      last_seen_chapter_title,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  db.exec('BEGIN');
+
+  try {
+    db.prepare('DELETE FROM generation_entities WHERE project_id = ?').run(input.projectId);
+
+    for (const entity of input.entities) {
+      const entityName = entity.name.trim();
+
+      if (!entityName) {
+        continue;
+      }
+
+      insertStatement.run(
+        input.projectId,
+        entityName,
+        entity.type?.trim() || 'unknown',
+        entity.description?.trim() || '',
+        JSON.stringify(entity.fields ?? {}),
+        JSON.stringify(
+          Array.isArray(entity.tags)
+            ? entity.tags.map((tag) => tag.trim()).filter(Boolean)
+            : [],
+        ),
+        entity.pinned ? 1 : 0,
+        '',
+        '',
+        currentTime,
+        currentTime,
+      );
+    }
+
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 function extractLocations(stateChanges: StateChangeDraft[]) {
   return Array.from(
     new Set(

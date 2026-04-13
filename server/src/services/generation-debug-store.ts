@@ -3,6 +3,7 @@ import type {
   AntiAIForceCheck,
   ChapterOutlineDraft,
   GenerationDebugContext,
+  GenerationDebugStructuredRelationshipSummary,
   GenerationDebugChapterDetail,
   GenerationDebugChapterRecord,
   GenerationDebugMemoryChunkRecord,
@@ -17,6 +18,7 @@ import type {
   GenerationStructuredRelationshipEdge,
   GenerationStructuredRelationshipFallbackHint,
   GenerationStructuredRelationshipNode,
+  GenerationStructuredRelationshipQueryMode,
   GenerationStructuredRelationshipConsumptionPreview,
   GenerationStructuredRelationshipPath,
   GenerationStructuredRelationshipQueryReason,
@@ -108,6 +110,191 @@ function createUniqueList(values: Array<string | null | undefined>) {
         .filter(Boolean),
     ),
   );
+}
+
+function normalizeStructuredRelationshipMode(
+  value: string,
+): GenerationStructuredRelationshipQueryMode | 'unknown' {
+  const normalized = value.trim();
+
+  if (normalized.startsWith('graph_1hop')) {
+    return 'graph_1hop';
+  }
+
+  if (normalized.startsWith('graph_2hop')) {
+    return 'graph_2hop';
+  }
+
+  if (normalized.startsWith('degraded')) {
+    return 'degraded';
+  }
+
+  return 'unknown';
+}
+
+function normalizeStructuredRelationshipReason(
+  value: string,
+): GenerationStructuredRelationshipQueryReason | 'unknown' {
+  if (
+    value === 'ok'
+    || value === 'missing_chapter_context'
+    || value === 'no_focus_entity'
+    || value === 'no_historical_relationship'
+    || value === 'no_two_hop_relationship'
+    || value === 'high_noise'
+  ) {
+    return value;
+  }
+
+  return 'unknown';
+}
+
+function parseStructuredRelationshipReasonFromText(
+  value: string,
+): GenerationStructuredRelationshipQueryReason | 'unknown' {
+  const withoutDescription = value.split('（')[0]?.trim() ?? '';
+  const normalizedCandidate = withoutDescription.replace(/^一度\s+/u, '').trim();
+  return normalizeStructuredRelationshipReason(normalizedCandidate);
+}
+
+function parseStructuredRelationshipSummary(
+  sections: GenerationDebugContext['sections'],
+): GenerationDebugStructuredRelationshipSummary {
+  const relationshipsSection = sections.find((section) => section.key === 'relationships');
+  const blocks = relationshipsSection?.blocks ?? [];
+  const headerLines = (blocks[0] ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const defaultSummary: GenerationDebugStructuredRelationshipSummary = {
+    mode: 'unknown',
+    reason: 'unknown',
+    focusEntityNames: [],
+    policy: '',
+    secondaryEvaluation: null,
+    evaluatedTwoHop: false,
+    hasTwoHopPathBlock: false,
+    nonTriggerCategory: null,
+  };
+
+  if (headerLines.length === 0) {
+    return defaultSummary;
+  }
+
+  const summary = { ...defaultSummary };
+
+  for (const line of headerLines) {
+    if (line.startsWith('- 命中模式：')) {
+      summary.mode = normalizeStructuredRelationshipMode(line.replace('- 命中模式：', '').trim());
+      continue;
+    }
+
+    if (line.startsWith('原因：')) {
+      const rawReason = line.replace('原因：', '').trim();
+      summary.reason = parseStructuredRelationshipReasonFromText(rawReason);
+      continue;
+    }
+
+    if (line.startsWith('焦点实体：')) {
+      const rawValue = line.replace('焦点实体：', '').trim();
+      summary.focusEntityNames = rawValue === '无'
+        ? []
+        : rawValue.split('、').map((item) => item.trim()).filter(Boolean);
+      continue;
+    }
+
+    if (line.startsWith('接入策略：')) {
+      summary.policy = line.replace('接入策略：', '').trim();
+      continue;
+    }
+
+    if (line.startsWith('补充评估：')) {
+      const raw = line.replace('补充评估：', '').trim();
+      summary.secondaryEvaluation = {
+        label: 'supplement',
+        reason: parseStructuredRelationshipReasonFromText(raw),
+        raw,
+      };
+      continue;
+    }
+
+    if (line.startsWith('补位评估：')) {
+      const raw = line.replace('补位评估：', '').trim();
+      summary.secondaryEvaluation = {
+        label: 'fallback',
+        reason: parseStructuredRelationshipReasonFromText(raw),
+        raw,
+      };
+    }
+  }
+
+  summary.hasTwoHopPathBlock = blocks.slice(1).some((block) => block.includes('- 二跳路径：'));
+  summary.evaluatedTwoHop = Boolean(summary.secondaryEvaluation)
+    || summary.mode === 'graph_2hop'
+    || summary.hasTwoHopPathBlock;
+
+  if (summary.mode === 'graph_2hop') {
+    summary.nonTriggerCategory = null;
+    return summary;
+  }
+
+  if (summary.mode === 'graph_1hop' && summary.hasTwoHopPathBlock) {
+    summary.nonTriggerCategory = null;
+    return summary;
+  }
+
+  if (summary.mode === 'graph_1hop' && !summary.evaluatedTwoHop) {
+    summary.nonTriggerCategory = 'onehop_sufficient';
+    return summary;
+  }
+
+  if (
+    summary.mode === 'graph_1hop'
+    && summary.evaluatedTwoHop
+    && !summary.hasTwoHopPathBlock
+    && (
+      summary.secondaryEvaluation?.reason === 'no_two_hop_relationship'
+      || summary.secondaryEvaluation?.reason === 'high_noise'
+    )
+  ) {
+    summary.nonTriggerCategory = 'onehop_sufficient';
+    return summary;
+  }
+
+  if (
+    summary.mode === 'graph_1hop'
+    && summary.evaluatedTwoHop
+    && !summary.hasTwoHopPathBlock
+    && summary.secondaryEvaluation?.reason === 'ok'
+    && summary.secondaryEvaluation.raw.includes('未形成新增实体链')
+  ) {
+    summary.nonTriggerCategory = 'twohop_redundant';
+    return summary;
+  }
+
+  if (
+    summary.mode === 'degraded'
+    && summary.reason === 'no_historical_relationship'
+    && summary.secondaryEvaluation?.reason === 'no_two_hop_relationship'
+  ) {
+    summary.nonTriggerCategory = 'sparse_history';
+    return summary;
+  }
+
+  if (
+    summary.mode === 'degraded'
+    && summary.reason === 'high_noise'
+    && summary.secondaryEvaluation?.reason === 'no_two_hop_relationship'
+  ) {
+    summary.nonTriggerCategory = 'onehop_noise_without_twohop';
+    return summary;
+  }
+
+  summary.nonTriggerCategory = summary.mode === 'graph_1hop' || summary.mode === 'degraded'
+    ? 'unknown'
+    : null;
+
+  return summary;
 }
 
 function clampScore(value: number, min: number, max: number) {
@@ -1462,6 +1649,7 @@ export async function getGenerationDebugContext(
     preferStoredForeshadows: Array.isArray(request?.foreshadowSnapshot),
     lightweightRecallConfig: request?.gateConfigOverride?.lightweightRecall,
   });
+  const structuredRelationshipDebug = parseStructuredRelationshipSummary(context.sections);
 
   const debugContext: GenerationDebugContext = {
     chapterId: chapterRecord.chapterId,
@@ -1480,6 +1668,7 @@ export async function getGenerationDebugContext(
     focusEntityNames: context.focusEntityNames,
     queryPhrases: context.queryPhrases,
     lightweightRecallItems: context.lightweightRecallItems,
+    structuredRelationshipDebug,
     sections: context.sections,
   };
 

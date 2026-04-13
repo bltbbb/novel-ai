@@ -1,10 +1,12 @@
 import Dexie, { type Table } from 'dexie';
 import { createParagraphDocument, countDocumentCharacters } from '@/lib/editor-content';
-import { createTimestamp } from '@/lib/identity';
-import { DEFAULT_SETTINGS } from '@/lib/runtime-config';
+import { createId, createTimestamp } from '@/lib/identity';
+import { DEFAULT_SETTINGS, normalizeReasoningEffortSetting } from '@/lib/runtime-config';
 import type {
   AppSettings,
+  BookOutline,
   Chapter,
+  ChapterBeat,
   ChapterOutline,
   ChapterSummary,
   Foreshadow,
@@ -16,6 +18,9 @@ import type {
   Snapshot,
   StateChange,
   StrandTracker,
+  TemplateLibraryItem,
+  Volume,
+  VolumeOutline,
 } from '@/types';
 
 export interface SettingsRecord {
@@ -25,10 +30,25 @@ export interface SettingsRecord {
 }
 
 export const APP_SETTINGS_KEY = 'app-settings';
+export const DEFAULT_VOLUME_TITLE = '未分卷';
+
+interface ChapterMigrationRecord extends Chapter {
+  volumeId?: Id;
+  volumeTitle?: string;
+}
+
+function normalizeVolumeTitle(volumeTitle?: string | null) {
+  const normalized = volumeTitle?.trim() ?? '';
+  return normalized || DEFAULT_VOLUME_TITLE;
+}
 
 class NovelDatabase extends Dexie {
   projects!: Table<Project, Id>;
   chapters!: Table<Chapter, Id>;
+  volumes!: Table<Volume, Id>;
+  bookOutlines!: Table<BookOutline, Id>;
+  volumeOutlines!: Table<VolumeOutline, Id>;
+  chapterBeats!: Table<ChapterBeat, Id>;
   entities!: Table<LoreEntity, Id>;
   foreshadows!: Table<Foreshadow, Id>;
   snapshots!: Table<Snapshot, Id>;
@@ -38,6 +58,7 @@ class NovelDatabase extends Dexie {
   stateChanges!: Table<StateChange, Id>;
   strandTrackers!: Table<StrandTracker, Id>;
   generationQueue!: Table<GenerationQueueItem, Id>;
+  templateLibrary!: Table<TemplateLibraryItem, Id>;
   settings!: Table<SettingsRecord, string>;
 
   constructor() {
@@ -96,6 +117,123 @@ class NovelDatabase extends Dexie {
       generationQueue: 'id, projectId, chapterId, [projectId+chapterId], status, updatedAt',
       settings: 'key, updatedAt',
     });
+
+    this.version(6)
+      .stores({
+        projects: 'id, updatedAt, createdAt',
+        chapters: 'id, projectId, volumeId, [projectId+order], updatedAt',
+        volumes: 'id, projectId, [projectId+order], title, updatedAt',
+        bookOutlines: 'id, projectId, updatedAt',
+        volumeOutlines: 'id, projectId, volumeId, [projectId+volumeId], updatedAt',
+        entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+        foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+        snapshots: 'id, projectId, chapterId, [projectId+chapterId], source, createdAt, updatedAt',
+        ideaCards: 'id, projectId, sourceChapterId, source, updatedAt, createdAt',
+        chapterOutlines: 'id, projectId, chapterId, [projectId+chapterId], strand, updatedAt',
+        chapterSummaries: 'id, projectId, chapterId, [projectId+chapterId], updatedAt',
+        stateChanges: 'id, projectId, chapterId, entityId, updatedAt',
+        strandTrackers: 'projectId, updatedAt',
+        generationQueue: 'id, projectId, chapterId, [projectId+chapterId], status, updatedAt',
+        settings: 'key, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        const chapterTable = tx.table<ChapterMigrationRecord, Id>('chapters');
+        const volumeTable = tx.table<Volume, Id>('volumes');
+        const chapters = await chapterTable.toArray();
+
+        if (chapters.length === 0) {
+          return;
+        }
+
+        chapters.sort((left, right) => {
+          if (left.projectId === right.projectId) {
+            return left.order - right.order;
+          }
+
+          return left.projectId.localeCompare(right.projectId);
+        });
+
+        const volumeIdMap = new Map<string, Id>();
+        const volumeOrderMap = new Map<Id, number>();
+        const nextVolumes: Volume[] = [];
+        const nextChapters: ChapterMigrationRecord[] = [];
+
+        for (const chapter of chapters) {
+          const normalizedVolumeTitle = normalizeVolumeTitle(chapter.volumeTitle);
+          const volumeKey = `${chapter.projectId}::${normalizedVolumeTitle}`;
+          let volumeId = volumeIdMap.get(volumeKey);
+
+          if (!volumeId) {
+            volumeId = createId();
+            volumeIdMap.set(volumeKey, volumeId);
+
+            const order = (volumeOrderMap.get(chapter.projectId) ?? 0) + 1;
+            volumeOrderMap.set(chapter.projectId, order);
+
+            nextVolumes.push({
+              id: volumeId,
+              projectId: chapter.projectId,
+              title: normalizedVolumeTitle,
+              order,
+              createdAt: chapter.createdAt,
+              updatedAt: chapter.updatedAt,
+            });
+          }
+
+          nextChapters.push({
+            ...chapter,
+            volumeId,
+            volumeTitle: normalizedVolumeTitle,
+          });
+        }
+
+        if (nextVolumes.length > 0) {
+          await volumeTable.bulkPut(nextVolumes);
+        }
+
+        await chapterTable.bulkPut(nextChapters);
+      });
+
+    this.version(7).stores({
+      projects: 'id, updatedAt, createdAt',
+      chapters: 'id, projectId, volumeId, [projectId+order], updatedAt',
+      volumes: 'id, projectId, [projectId+order], title, updatedAt',
+      bookOutlines: 'id, projectId, updatedAt',
+      volumeOutlines: 'id, projectId, volumeId, [projectId+volumeId], updatedAt',
+      chapterBeats:
+        'id, projectId, volumeId, chapterId, orderInVolume, [volumeId+orderInVolume], [projectId+volumeId], updatedAt',
+      entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+      snapshots: 'id, projectId, chapterId, [projectId+chapterId], source, createdAt, updatedAt',
+      ideaCards: 'id, projectId, sourceChapterId, source, updatedAt, createdAt',
+      chapterOutlines: 'id, projectId, chapterId, [projectId+chapterId], strand, updatedAt',
+      chapterSummaries: 'id, projectId, chapterId, [projectId+chapterId], updatedAt',
+      stateChanges: 'id, projectId, chapterId, entityId, updatedAt',
+      strandTrackers: 'projectId, updatedAt',
+      generationQueue: 'id, projectId, chapterId, [projectId+chapterId], status, updatedAt',
+      settings: 'key, updatedAt',
+    });
+
+    this.version(8).stores({
+      projects: 'id, updatedAt, createdAt',
+      chapters: 'id, projectId, volumeId, [projectId+order], updatedAt',
+      volumes: 'id, projectId, [projectId+order], title, updatedAt',
+      bookOutlines: 'id, projectId, updatedAt',
+      volumeOutlines: 'id, projectId, volumeId, [projectId+volumeId], updatedAt',
+      chapterBeats:
+        'id, projectId, volumeId, chapterId, orderInVolume, [volumeId+orderInVolume], [projectId+volumeId], updatedAt',
+      entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+      snapshots: 'id, projectId, chapterId, [projectId+chapterId], source, createdAt, updatedAt',
+      ideaCards: 'id, projectId, sourceChapterId, source, updatedAt, createdAt',
+      chapterOutlines: 'id, projectId, chapterId, [projectId+chapterId], strand, updatedAt',
+      chapterSummaries: 'id, projectId, chapterId, [projectId+chapterId], updatedAt',
+      stateChanges: 'id, projectId, chapterId, entityId, updatedAt',
+      strandTrackers: 'projectId, updatedAt',
+      generationQueue: 'id, projectId, chapterId, [projectId+chapterId], status, updatedAt',
+      templateLibrary: 'id, updatedAt, createdAt, name, sourceTitle',
+      settings: 'key, updatedAt',
+    });
   }
 }
 
@@ -116,17 +254,24 @@ export async function loadAppSettings() {
     return DEFAULT_SETTINGS;
   }
 
-  const settings = settingsRecord.value;
+  const settings: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    ...settingsRecord.value,
+    serverUrl: DEFAULT_SETTINGS.serverUrl,
+    reasoningEffort: normalizeReasoningEffortSetting(settingsRecord.value.reasoningEffort),
+  };
 
-  // 将早期默认值 gpt-4o-mini 平滑迁移到当前本地服务可用的默认模型。
-  if (
+  const shouldMigrateServerUrl =
+    typeof settingsRecord.value.serverUrl === 'string' &&
+    settingsRecord.value.serverUrl.trim() !== DEFAULT_SETTINGS.serverUrl;
+  const shouldMigrateDefaultModel =
     settings.modelName === 'gpt-4o-mini' &&
-    settings.serverUrl === DEFAULT_SETTINGS.serverUrl &&
-    settings.stylePrompt === ''
-  ) {
+    settings.stylePrompt === '';
+
+  if (shouldMigrateServerUrl || shouldMigrateDefaultModel) {
     const migratedSettings = {
       ...settings,
-      modelName: DEFAULT_SETTINGS.modelName,
+      ...(shouldMigrateDefaultModel ? { modelName: DEFAULT_SETTINGS.modelName } : {}),
     };
 
     await saveAppSettings(migratedSettings);
@@ -152,33 +297,43 @@ export async function recalculateProjectWordCount(projectId: Id) {
 }
 
 export async function deleteProjectCascade(projectId: Id) {
+  const tables: Table<any, any>[] = [
+    db.projects,
+    db.chapters as Table<any, any>,
+    db.volumes,
+    db.bookOutlines,
+    db.volumeOutlines,
+    db.chapterBeats,
+    db.entities,
+    db.foreshadows,
+    db.snapshots,
+    db.ideaCards,
+    db.chapterOutlines,
+    db.chapterSummaries,
+    db.stateChanges,
+    db.strandTrackers,
+    db.generationQueue,
+  ];
+
   await db.transaction(
     'rw',
-    [
-      db.projects,
-      db.chapters,
-      db.entities,
-      db.foreshadows,
-      db.snapshots,
-      db.ideaCards,
-      db.chapterOutlines,
-      db.chapterSummaries,
-      db.stateChanges,
-      db.strandTrackers,
-      db.generationQueue,
-    ],
+    tables,
     async () => {
-    await db.projects.delete(projectId);
-    await db.chapters.where('projectId').equals(projectId).delete();
-    await db.entities.where('projectId').equals(projectId).delete();
-    await db.foreshadows.where('projectId').equals(projectId).delete();
-    await db.snapshots.where('projectId').equals(projectId).delete();
-    await db.ideaCards.where('projectId').equals(projectId).delete();
-    await db.chapterOutlines.where('projectId').equals(projectId).delete();
-    await db.chapterSummaries.where('projectId').equals(projectId).delete();
-    await db.stateChanges.where('projectId').equals(projectId).delete();
-    await db.strandTrackers.where('projectId').equals(projectId).delete();
-    await db.generationQueue.where('projectId').equals(projectId).delete();
+      await db.projects.delete(projectId);
+      await db.chapters.where('projectId').equals(projectId).delete();
+      await db.volumes.where('projectId').equals(projectId).delete();
+      await db.bookOutlines.where('projectId').equals(projectId).delete();
+      await db.volumeOutlines.where('projectId').equals(projectId).delete();
+      await db.chapterBeats.where('projectId').equals(projectId).delete();
+      await db.entities.where('projectId').equals(projectId).delete();
+      await db.foreshadows.where('projectId').equals(projectId).delete();
+      await db.snapshots.where('projectId').equals(projectId).delete();
+      await db.ideaCards.where('projectId').equals(projectId).delete();
+      await db.chapterOutlines.where('projectId').equals(projectId).delete();
+      await db.chapterSummaries.where('projectId').equals(projectId).delete();
+      await db.stateChanges.where('projectId').equals(projectId).delete();
+      await db.strandTrackers.where('projectId').equals(projectId).delete();
+      await db.generationQueue.where('projectId').equals(projectId).delete();
     },
   );
 }
@@ -202,6 +357,10 @@ export async function seedDemoData() {
     mistSaltGuild: 'demo-entity-mist-salt-guild',
     mistSaltStation: 'demo-entity-mist-salt-station',
     copperCrowLedger: 'demo-entity-copper-crow-ledger',
+  } as const;
+  const demoVolumeIds = {
+    volume1: 'demo-volume-1',
+    volume2: 'demo-volume-2',
   } as const;
   const chapterSeeds = [
     {
@@ -453,12 +612,17 @@ export async function seedDemoData() {
   const chapterContentMap = new Map(
     chapterSeeds.map((seed) => [seed.id, createParagraphDocument(seed.content)] as const),
   );
+  const volumeIdByTitle = new Map<string, Id>([
+    ['第一卷', demoVolumeIds.volume1],
+    ['第二卷', demoVolumeIds.volume2],
+  ]);
   const demoChapters: Chapter[] = chapterSeeds.map((seed) => {
     const content = chapterContentMap.get(seed.id)!;
 
     return {
       id: seed.id,
       projectId,
+      volumeId: volumeIdByTitle.get(seed.volumeTitle) ?? demoVolumeIds.volume1,
       volumeTitle: seed.volumeTitle,
       title: seed.title,
       order: seed.order,
@@ -469,11 +633,152 @@ export async function seedDemoData() {
       updatedAt: now,
     };
   });
+  const demoVolumes: Volume[] = [
+    {
+      id: demoVolumeIds.volume1,
+      projectId,
+      title: '第一卷',
+      order: 1,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: demoVolumeIds.volume2,
+      projectId,
+      title: '第二卷',
+      order: 2,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+  const demoBookOutline: BookOutline = {
+    id: 'demo-book-outline',
+    projectId,
+    premise: '末法时代，最后一名修仙者在废墟中追索失落炼器文明。',
+    centralConflict: '林冲必须在旧势力争夺前，找到归炉井并掌握钥印真相。',
+    protagonistArc: '林冲从被动求生转向主动布局，逐步成为新秩序的制定者。',
+    thematicCore: '传承与断代之间，个人选择如何改写时代命运。',
+    worldRules: ['末法时代灵气稀薄', '归炉井仪轨需要同频钥印', '越级施礼会触发反噬'],
+    endgameHint: '黑铁片只是第一枚钥印，真正终局在更深层遗迹。',
+    toneGuide: '废土仙侠+悬疑推进，节奏偏紧，情绪克制但有爆点。',
+    createdAt: now,
+    updatedAt: now,
+  };
+  const demoVolumeOutlines: VolumeOutline[] = [
+    {
+      id: 'demo-volume-outline-1',
+      projectId,
+      volumeId: demoVolumeIds.volume1,
+      goal: '确认黑铁片与归炉井体系的关系，建立主线任务。',
+      keyConflict: '线索残缺且多方势力试探，主角信息长期不对称。',
+      arcSummary: '从废墟苏醒到钥印底纹确认，完成“线索期”主弧。',
+      entryState: '林冲刚苏醒，黑铁片来历未知。',
+      exitState: '确认黑铁片是钥印，进入开井前夜准备阶段。',
+      keyEvents: ['古井铭纹共鸣', '谢无咎提出钥印说', '钥印底纹抄录曝光'],
+      foreshadowSeeds: ['开井礼反噬条件', '第二枚钥印回声'],
+      estimatedChapterCount: 100,
+      milestones: [
+        {
+          title: '废墟苏醒与线索起手',
+          targetChapterCount: 30,
+          phaseGoal: '让林冲站稳脚跟，并确认黑铁片与归炉井存在直接联系。',
+          phaseConflict: '信息残缺，谢无咎等人试探不断，主角始终处于信息劣势。',
+          entryState: '林冲刚苏醒，黑铁片来历未知。',
+          exitState: '林冲确认钥印体系存在，开始主动追线。',
+          keyTurns: ['古井铭纹第一次共鸣', '谢无咎提出钥印说'],
+          mustPlant: ['开井礼反噬条件', '第二枚钥印回声'],
+          mustPayoff: [],
+          powerCeiling: '只能小幅恢复与试探，不能提前掌握完整炼器体系。',
+        },
+        {
+          title: '钥印确认与前夜准备',
+          targetChapterCount: 35,
+          phaseGoal: '围绕钥印底纹、归炉井入口和开井前夜做持续推进。',
+          phaseConflict: '各方势力逐步下场，主角必须在暴露与隐藏之间找平衡。',
+          entryState: '钥印体系被初步确认。',
+          exitState: '进入开井前夜，局势明显收紧。',
+          keyTurns: ['钥印底纹抄录曝光', '前夜仪轨条件逐渐完整'],
+          mustPlant: ['谁提前开启入口', '谢无咎真实立场'],
+          mustPayoff: ['第二枚钥印回声'],
+          powerCeiling: '主角仍以布局和试探为主，不能提前无代价破局。',
+        },
+        {
+          title: '归炉井开启与卷末抛悬',
+          targetChapterCount: 35,
+          phaseGoal: '推进归炉井真正开启，并把卷末悬念立住。',
+          phaseConflict: '未知对手先手布置，入口异常开启带来新的威胁。',
+          entryState: '开井前夜准备完成。',
+          exitState: '黑铁片钥印身份确认，第二枚钥印成为新主问题。',
+          keyTurns: ['归炉井外围侦查', '第二枚钥印回声出现'],
+          mustPlant: ['更深层遗迹', '旧时代炼器文明真空'],
+          mustPayoff: ['开井礼反噬条件'],
+          powerCeiling: '卷末只能完成阶段性突破，不能把深层遗迹主谜团一次性写完。',
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'demo-volume-outline-2',
+      projectId,
+      volumeId: demoVolumeIds.volume2,
+      goal: '推进归炉井开启并回收第一卷核心伏笔。',
+      keyConflict: '入口被提前动过，主角必须在未知对手前完成开井。',
+      arcSummary: '完成场景切换并回收主伏笔，同时抛出更深层悬念。',
+      entryState: '林冲抵达归炉井外围，入口已有异常开启痕迹。',
+      exitState: '黑铁片钥印身份确认，第二枚钥印成为新主问题。',
+      keyEvents: ['归炉井外围侦查', '前夜仪轨触发', '第二枚钥印回声出现'],
+      foreshadowSeeds: ['谁提前开启入口', '谢无咎真实立场'],
+      estimatedChapterCount: 120,
+      milestones: [
+        {
+          title: '外围侦查与敌意显形',
+          targetChapterCount: 40,
+          phaseGoal: '摸清归炉井外围局势，确认谁先动了入口。',
+          phaseConflict: '对手隐藏在暗处，主角每推进一步都可能暴露底牌。',
+          entryState: '林冲抵达归炉井外围。',
+          exitState: '入口异动背后的敌意被初步锁定。',
+          keyTurns: ['外围侦查', '异常开启痕迹被确认'],
+          mustPlant: ['谁提前开启入口'],
+          mustPayoff: [],
+          powerCeiling: '只能局部试探，不应无准备正面碾压敌手。',
+        },
+        {
+          title: '前夜仪轨与阵营洗牌',
+          targetChapterCount: 45,
+          phaseGoal: '围绕前夜仪轨推进，并让盟友与对手关系重组。',
+          phaseConflict: '仪轨触发条件苛刻，局势在合作与背刺之间反复摇摆。',
+          entryState: '敌意来源初步浮出水面。',
+          exitState: '主角完成关键前夜布置，但代价明显。',
+          keyTurns: ['前夜仪轨触发', '谢无咎立场摇摆'],
+          mustPlant: ['更深层遗迹线索'],
+          mustPayoff: ['谁提前开启入口'],
+          powerCeiling: '只能完成阶段准备，不能直接写成终局战。',
+        },
+        {
+          title: '钥印确认与新主问题抛出',
+          targetChapterCount: 35,
+          phaseGoal: '确认黑铁片钥印身份，并抛出更大的主线问题。',
+          phaseConflict: '真相越清晰，真正的争夺者越逼近。',
+          entryState: '前夜布置完成。',
+          exitState: '第二枚钥印成为下一卷核心问题。',
+          keyTurns: ['第二枚钥印回声出现', '黑铁片身份确认'],
+          mustPlant: ['第二枚钥印真正持有者'],
+          mustPayoff: ['谢无咎真实立场'],
+          powerCeiling: '卷末只能完成身份确认，不能把所有敌手与终局全部揭穿。',
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
   const demoProject: Project = {
     id: projectId,
     title: '最后一个修仙者',
     description: '末法时代下的赛博修仙故事；当前内置为稀疏章序的检索参数标定样本。',
     genre: ['仙侠', '赛博朋克'],
+    stylePrompt: '',
+    templateSnapshot: null,
     generationGateOverride: null,
     wordCount: demoChapters.reduce((sum, chapter) => sum + chapter.wordCount, 0),
     createdAt: now,
@@ -737,24 +1042,32 @@ export async function seedDemoData() {
     updatedAt: now,
   };
 
+  const tables: Table<any, any>[] = [
+    db.projects,
+    db.chapters as Table<any, any>,
+    db.volumes,
+    db.bookOutlines,
+    db.volumeOutlines,
+    db.entities,
+    db.foreshadows,
+    db.snapshots,
+    db.ideaCards,
+    db.chapterOutlines,
+    db.chapterSummaries,
+    db.stateChanges,
+    db.strandTrackers,
+    db.settings,
+  ];
+
   await db.transaction(
     'rw',
-    [
-      db.projects,
-      db.chapters,
-      db.entities,
-      db.foreshadows,
-      db.snapshots,
-      db.ideaCards,
-      db.chapterOutlines,
-      db.chapterSummaries,
-      db.stateChanges,
-      db.strandTrackers,
-      db.settings,
-    ],
+    tables,
     async () => {
       await db.projects.add(demoProject);
       await db.chapters.bulkAdd(demoChapters);
+      await db.volumes.bulkAdd(demoVolumes);
+      await db.bookOutlines.put(demoBookOutline);
+      await db.volumeOutlines.bulkAdd(demoVolumeOutlines);
       await db.entities.bulkAdd(demoEntities);
       await db.foreshadows.bulkAdd(demoForeshadows);
       await db.snapshots.bulkAdd(demoSnapshots);

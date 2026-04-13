@@ -10,7 +10,7 @@ export const DEFAULT_PROMPT_CONFIG: Required<PromptConfig> = {
   enableCoreConstraints: true,
   enableAntiAI: true,
   enableStrandWeave: true,
-  enableCoolPoints: false,
+  enableCoolPoints: true,
   enableNoPoison: true,
 };
 
@@ -26,6 +26,7 @@ const CORE_CONSTRAINTS_PROMPT = `## 写作核心约束（三大定律）
 
 - 本章必须让读者看懂“发生了什么 / 谁在做什么 / 为什么”。
 - 本章必须有明确推进：问题、目标、代价、关系变化、信息变化至少出现一项。
+- 若首次引入一个具名人物，首次出现后的 1 到 2 句内必须交代其身份、与主角关系、当下意图或为何在场，不能只抛名字。
 - 若上文已经给出钩子或未闭合问题，本章必须回应。
 - 禁止输出占位正文，例如 [待补充]、TODO、……省略。`;
 

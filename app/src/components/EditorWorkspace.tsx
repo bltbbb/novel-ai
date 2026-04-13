@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Download, FileText, FlaskConical, History, Plus, Save, Settings2, Sparkles, Target, Trash2, WifiOff } from 'lucide-react';
+import { ChevronDown, Download, FileText, History, Plus, Save, Settings2, Sparkles, Target, Trash2, WifiOff } from 'lucide-react';
 import { streamChat } from '@/lib/ai-client';
 import { retrieveChapterSearchResults } from '@/lib/chapter-search';
 import { assembleContinueWritingContext } from '@/lib/context-assembler';
@@ -8,11 +8,14 @@ import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { chapterToMarkdown, downloadMarkdown, projectToMarkdown } from '@/lib/export';
 import { createId } from '@/lib/identity';
+import { getProjectStylePrompt } from '@/lib/project-style';
+import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import {
   useEditorStore,
   useForeshadowStore,
   useIdeaCardStore,
   useLoreStore,
+  useProjectStore,
   useServerStatusStore,
   useSettingsStore,
   useSnapshotStore,
@@ -26,6 +29,8 @@ interface EditorWorkspaceProps {
   projectDescription?: string;
   onOpenSettings: () => void;
   onOpenForeshadow: () => void;
+  hideChapterSidebar?: boolean;
+  hideAiWritingEntry?: boolean;
 }
 
 const RichTextEditor = lazy(async () => {
@@ -41,11 +46,6 @@ const ContextInspector = lazy(async () => {
 const CreativeRecordsDialog = lazy(async () => {
   const module = await import('@/components/CreativeRecordsDialog');
   return { default: module.CreativeRecordsDialog };
-});
-
-const GenerationLabDialog = lazy(async () => {
-  const module = await import('@/components/GenerationLabDialog');
-  return { default: module.GenerationLabDialog };
 });
 
 function EditorChunkFallback({ label }: { label: string }) {
@@ -74,6 +74,8 @@ export function EditorWorkspace({
   projectDescription = '',
   onOpenSettings,
   onOpenForeshadow,
+  hideChapterSidebar = false,
+  hideAiWritingEntry = false,
 }: EditorWorkspaceProps) {
   const {
     chapters,
@@ -94,6 +96,7 @@ export function EditorWorkspace({
   const createIdeaCard = useIdeaCardStore((state) => state.createIdeaCard);
   const entities = useLoreStore((state) => state.entities);
   const settings = useSettingsStore((state) => state.settings);
+  const currentProject = useProjectStore((state) => state.projects.find((project) => project.id === projectId) ?? null);
   const serverAvailability = useServerStatusStore((state) => state.availability);
   const serverMessage = useServerStatusStore((state) => state.message);
   const refreshServerStatus = useServerStatusStore((state) => state.refresh);
@@ -104,7 +107,6 @@ export function EditorWorkspace({
   const [isAiWriting, setIsAiWriting] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showCreativeRecords, setShowCreativeRecords] = useState(false);
-  const [showGenerationLab, setShowGenerationLab] = useState(false);
   const [lastAiGeneratedText, setLastAiGeneratedText] = useState('');
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const previousAvailabilityRef = useRef(serverAvailability);
@@ -118,6 +120,24 @@ export function EditorWorkspace({
   const chapterTitleMap = useMemo(() => {
     return new Map(chapters.map((chapter) => [chapter.id, chapter.title] as const));
   }, [chapters]);
+  const effectiveContinueSettings = useMemo(
+    () => ({
+      ...settings,
+      stylePrompt: mergePromptSections(
+        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
+        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
+        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
+        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
+      ),
+    }),
+    [
+      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
+      currentProject?.templateSnapshot?.promptBundle.stylePrompt,
+      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
+      currentProject?.stylePrompt,
+      settings,
+    ],
+  );
 
   useEffect(() => {
     void loadChapters(projectId).catch(() => {
@@ -232,8 +252,12 @@ export function EditorWorkspace({
       return;
     }
 
-    await deleteChapter(currentChapter.id);
+    const result = await deleteChapter(currentChapter.id);
     toast(`已删除「${currentChapter.title}」`, 'warning');
+
+    if (!result.rebuildSucceeded) {
+      toast(`章节已删除，但服务端生成态重建失败：${result.rebuildError || '未知错误'}`, 'error');
+    }
   }
 
   async function handleCreateForeshadowFromChapter() {
@@ -417,7 +441,7 @@ export function EditorWorkspace({
       chapterId: currentChapter.id,
       chapterTitle: draftTitle || currentChapter.title,
       content: draftDocument,
-      settings,
+      settings: effectiveContinueSettings,
       entities,
       searchResults,
       messageId: createId(),
@@ -507,48 +531,50 @@ export function EditorWorkspace({
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-900/70">
-      <aside className="hidden w-72 flex-shrink-0 border-r border-neutral-800 bg-neutral-950/70 xl:flex xl:flex-col">
-        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">章节</p>
-            <p className="mt-1 text-sm text-neutral-300">{chapters.length} 个章节</p>
+      {!hideChapterSidebar ? (
+        <aside className="hidden w-72 flex-shrink-0 border-r border-neutral-800 bg-neutral-950/70 xl:flex xl:flex-col">
+          <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">章节</p>
+              <p className="mt-1 text-sm text-neutral-300">{chapters.length} 个章节</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleCreateChapter()}
+              className="rounded-xl bg-indigo-600 p-2 text-white transition-colors hover:bg-indigo-500"
+              title="新建章节"
+            >
+              <Plus size={16} />
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleCreateChapter()}
-            className="rounded-xl bg-indigo-600 p-2 text-white transition-colors hover:bg-indigo-500"
-            title="新建章节"
-          >
-            <Plus size={16} />
-          </button>
-        </div>
 
-        <div className="flex-1 overflow-y-auto p-3">
-          {chapters.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-neutral-800 p-4 text-sm text-neutral-500">
-              还没有章节，先创建一章开始写作。
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {chapters.map((chapter) => (
-                <button
-                  key={chapter.id}
-                  type="button"
-                  onClick={() => void handleSelectChapter(chapter.id)}
-                  className={`w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
-                    chapter.id === currentChapter?.id
-                      ? 'border-indigo-500/50 bg-indigo-500/10 text-indigo-200'
-                      : 'border-neutral-800 bg-neutral-900/70 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900'
-                  }`}
-                >
-                  <p className="text-sm font-medium">{chapter.title}</p>
-                  <p className="mt-1 text-xs text-neutral-500">{chapter.wordCount} 字</p>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </aside>
+          <div className="flex-1 overflow-y-auto p-3">
+            {chapters.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-neutral-800 p-4 text-sm text-neutral-500">
+                还没有章节，先创建一章开始写作。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {chapters.map((chapter) => (
+                  <button
+                    key={chapter.id}
+                    type="button"
+                    onClick={() => void handleSelectChapter(chapter.id)}
+                    className={`w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
+                      chapter.id === currentChapter?.id
+                        ? 'border-indigo-500/50 bg-indigo-500/10 text-indigo-200'
+                        : 'border-neutral-800 bg-neutral-900/70 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900'
+                    }`}
+                  >
+                    <p className="text-sm font-medium">{chapter.title}</p>
+                    <p className="mt-1 text-xs text-neutral-500">{chapter.wordCount} 字</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </aside>
+      ) : null}
 
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="border-b border-neutral-800 px-5 py-3">
@@ -586,6 +612,7 @@ export function EditorWorkspace({
               type="button"
               onClick={() => void handleContinueWriting()}
               disabled={!currentChapter || isAiWriting || !isAiAvailable}
+              hidden={hideAiWritingEntry}
               className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
               title={!isAiAvailable ? `AI 功能暂不可用：${serverMessage}` : undefined}
             >
@@ -609,15 +636,6 @@ export function EditorWorkspace({
             >
               <History size={14} />
               记录
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowGenerationLab(true)}
-              disabled={!currentChapter || !isAiAvailable}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <FlaskConical size={14} />
-              生成实验
             </button>
             <div ref={exportMenuRef} className="relative hidden xl:block">
               <button
@@ -734,7 +752,7 @@ export function EditorWorkspace({
                   markDirty();
                 }}
                 slashCommands={
-                  isAiAvailable
+                  !hideAiWritingEntry && isAiAvailable
                     ? [
                         {
                           key: 'continue',
@@ -769,7 +787,7 @@ export function EditorWorkspace({
                         className="inline-flex items-center gap-2 rounded-2xl border border-yellow-400/30 px-3 py-2 text-sm text-yellow-100 transition-colors hover:bg-yellow-500/10"
                       >
                         <Settings2 size={15} />
-                        打开设置
+                        打开 AI 设置
                       </button>
                     </div>
                   </div>
@@ -777,9 +795,11 @@ export function EditorWorkspace({
               </div>
             )}
             <p className="text-xs leading-6 text-neutral-500">
-              {isAiAvailable
-                ? '输入 / 可呼出 AI 指令菜单；创作记录里可以查看快照，生成实验里可以测试 Plan → Write → Extract。'
-                : '当前仅保留本地写作能力，恢复服务连接后 AI 续写会自动可用。'}
+              {hideAiWritingEntry
+                ? '当前视图用于人工精修正文；生成与审核入口已集中到“生成”页。'
+                : isAiAvailable
+                  ? '输入 / 可呼出 AI 指令菜单；创作记录里可以查看快照，生成实验里可以测试 Plan → Write → Extract。'
+                  : '当前仅保留本地写作能力，恢复服务连接后 AI 续写会自动可用。'}
             </p>
           </div>
         )}
@@ -809,26 +829,6 @@ export function EditorWorkspace({
           onRestoreSnapshot={handleRestoreSnapshot}
           onCreateManualIdeaCard={handleCreateManualIdeaCard}
           onCreateAiIdeaCard={handleCreateAiIdeaCard}
-        />
-      </Suspense>
-
-      <Suspense fallback={null}>
-        <GenerationLabDialog
-          open={showGenerationLab}
-          onClose={() => setShowGenerationLab(false)}
-          projectId={projectId}
-          projectTitle={projectTitle}
-          projectDescription={projectDescription}
-          chapter={currentChapter}
-          chapters={chapters}
-          content={draftDocument}
-          settings={settings}
-          entities={entities}
-          onApplyGeneratedContent={(nextDocument) => {
-            setDraftDocument(nextDocument);
-            markDirty();
-          }}
-          onCreateSnapshot={handleCreateManualSnapshot}
         />
       </Suspense>
     </div>

@@ -3,8 +3,9 @@ import { Activity, AlertTriangle, BookOpen, Pin, Search, Sparkles } from 'lucide
 import { assembleContinueWritingContext } from '@/lib/context-assembler';
 import { retrieveChapterSearchResults } from '@/lib/chapter-search';
 import { analyzeLoreConsistency } from '@/lib/lore-consistency';
+import { withProjectStylePrompt } from '@/lib/project-style';
 import { estimateTextTokens } from '@/lib/token-counter';
-import { useEditorStore, useLoreStore, useSettingsStore } from '@/stores';
+import { useEditorStore, useLoreStore, useProjectStore, useSettingsStore } from '@/stores';
 import { createId } from '@/lib/identity';
 import { richTextToPlainText } from '@/lib/editor-content';
 import type { Id, RichTextDocument, SearchResult } from '@/types';
@@ -27,6 +28,7 @@ export function ContextInspector({
   const chapters = useEditorStore((state) => state.chapters);
   const entities = useLoreStore((state) => state.entities);
   const settings = useSettingsStore((state) => state.settings);
+  const currentProject = useProjectStore((state) => state.projects.find((project) => project.id === projectId) ?? null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchState, setSearchState] = useState<'idle' | 'loading' | 'ready' | 'degraded'>('idle');
 
@@ -36,13 +38,13 @@ export function ContextInspector({
       chapterId,
       chapterTitle,
       content,
-      settings,
+      settings: withProjectStylePrompt(settings, currentProject),
       entities,
       searchResults,
       messageId: createId(),
       maxReferences: 6,
     });
-  }, [chapterId, chapterTitle, content, entities, projectId, searchResults, settings]);
+  }, [chapterId, chapterTitle, content, currentProject, entities, projectId, searchResults, settings]);
 
   const plainText = richTextToPlainText(content);
   const contentTokens = estimateTextTokens(plainText);
@@ -117,6 +119,7 @@ export function ContextInspector({
           <div className="space-y-2 text-xs text-neutral-400">
             <p>模型：{settings.modelName}</p>
             <p>温度：{settings.temperature}</p>
+            <p>思考等级：{settings.reasoningEffort === 'model_default' ? '模型默认' : settings.reasoningEffort}</p>
             <p>服务端：{settings.serverUrl}</p>
             <p className={isAiWriting ? 'text-indigo-300' : 'text-neutral-400'}>
               AI 状态：{isAiWriting ? '续写中' : '待命'}

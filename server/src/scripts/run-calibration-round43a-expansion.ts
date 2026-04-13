@@ -41,6 +41,7 @@ interface CalibrationExpansionReport {
   rows: CalibrationExpansionRow[];
   summary: {
     graph1hopCount: number;
+    graph2hopCount: number;
     degradedCount: number;
     worldStateRequiredCount: number;
     averageRelationshipsAddedBlockCount: number;
@@ -111,7 +112,15 @@ function compareChapterRecords(left: GenerationDebugChapterRecord, right: Genera
 }
 
 function normalizeRelationshipMode(value: string): GenerationStructuredRelationshipQueryMode {
-  return value.startsWith('graph_1hop') ? 'graph_1hop' : 'degraded';
+  if (value.startsWith('graph_1hop')) {
+    return 'graph_1hop';
+  }
+
+  if (value.startsWith('graph_2hop')) {
+    return 'graph_2hop';
+  }
+
+  return 'degraded';
 }
 
 function normalizeRelationshipReason(value: string): GenerationStructuredRelationshipQueryReason | 'unknown' {
@@ -331,6 +340,7 @@ async function main() {
   }
 
   const graph1hopCount = rows.filter((row) => row.mode === 'graph_1hop').length;
+  const graph2hopCount = rows.filter((row) => row.mode === 'graph_2hop').length;
   const degradedCount = rows.filter((row) => row.mode === 'degraded').length;
   const worldStateRequiredCount = rows.filter((row) => row.worldStateRequiredForGraph1Hop).length;
   const relationshipsAddedBlockTotal = rows.reduce(
@@ -344,6 +354,7 @@ async function main() {
     rows,
     summary: {
       graph1hopCount,
+      graph2hopCount,
       degradedCount,
       worldStateRequiredCount,
       averageRelationshipsAddedBlockCount:

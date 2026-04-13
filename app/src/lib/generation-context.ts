@@ -1,7 +1,7 @@
 import { db } from '@/lib/db';
-import { richTextToPlainText } from '@/lib/editor-content';
+import { getEffectiveChapterSummary, getEffectiveChapterText, loadGenerationQueueMap } from '@/lib/generation-storage';
 import { buildWorldStateSummary } from '@/lib/generation-utils';
-import type { Chapter, Foreshadow, Id, LoreEntity } from '@/types';
+import type { Chapter, ChapterSummary, Foreshadow, GenerationQueueItem, Id, LoreEntity } from '@/types';
 
 interface GenerationContextBundleInput {
   projectId: Id;
@@ -14,13 +14,13 @@ function formatChapterLabel(chapter: Chapter) {
   return `第${chapter.order}章 ${chapter.title}`;
 }
 
-function buildRecentChapterSection(chapters: Chapter[]) {
+function buildRecentChapterSection(chapters: Chapter[], queueMap: Map<Id, GenerationQueueItem>) {
   if (chapters.length === 0) {
     return '';
   }
 
   const lines = chapters.map((chapter) => {
-    const tail = richTextToPlainText(chapter.content).trim().slice(-600);
+    const tail = getEffectiveChapterText(chapter, queueMap.get(chapter.id)).slice(-600);
     return `- ${formatChapterLabel(chapter)}\n${tail || '暂无正文尾部'}`;
   });
 
@@ -29,11 +29,15 @@ function buildRecentChapterSection(chapters: Chapter[]) {
 
 function buildRecentSummarySection(
   chapters: Chapter[],
-  summaryMap: Map<Id, { summary: string; hook: string }>,
+  summaryMap: Map<Id, ChapterSummary>,
+  queueMap: Map<Id, GenerationQueueItem>,
 ) {
   const lines = chapters
     .map((chapter) => {
-      const summary = summaryMap.get(chapter.id);
+      const summary = getEffectiveChapterSummary(
+        summaryMap.get(chapter.id),
+        queueMap.get(chapter.id),
+      );
 
       if (!summary) {
         return '';
@@ -71,21 +75,17 @@ export async function buildGenerationContextBundle(input: GenerationContextBundl
   const recentChapters = previousChapters.slice(-5);
   const recentSummaryChapters = previousChapters.slice(-20);
   const summaryIds = new Set(recentSummaryChapters.map((chapter) => chapter.id));
-  const [summaries, foreshadows] = await Promise.all([
+  const [summaries, foreshadows, queueItems] = await Promise.all([
     db.chapterSummaries.where('projectId').equals(input.projectId).toArray(),
     db.foreshadows.where('projectId').equals(input.projectId).toArray(),
+    loadGenerationQueueMap(input.projectId),
   ]);
-  const summaryMap = new Map(
+  const summaryMap = new Map<Id, ChapterSummary>(
     summaries
       .filter((summary) => summaryIds.has(summary.chapterId))
-      .map((summary) => [
-        summary.chapterId,
-        {
-          summary: summary.summary,
-          hook: summary.hook,
-        },
-      ] as const),
+      .map((summary) => [summary.chapterId, summary] as const),
   );
+  const queueMap = new Map(queueItems.map((item) => [item.chapterId, item] as const));
   const chapterTitleMap = new Map(sortedChapters.map((chapter) => [chapter.id, chapter.title] as const));
   const activeForeshadows = foreshadows
     .filter((foreshadow) => foreshadow.status === 'activated' || foreshadow.status === 'overdue')
@@ -94,8 +94,8 @@ export async function buildGenerationContextBundle(input: GenerationContextBundl
 
   const sections = [
     worldState ? `当前世界状态快照：\n${worldState}` : '',
-    buildRecentSummarySection(recentSummaryChapters, summaryMap),
-    buildRecentChapterSection(recentChapters),
+    buildRecentSummarySection(recentSummaryChapters, summaryMap, queueMap),
+    buildRecentChapterSection(recentChapters, queueMap),
     buildForeshadowSection(activeForeshadows, chapterTitleMap),
   ].filter(Boolean);
 

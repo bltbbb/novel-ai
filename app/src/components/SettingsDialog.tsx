@@ -1,163 +1,199 @@
 import { useEffect, useMemo, useState } from 'react';
-import { RotateCcw, Save, Settings2, Wifi, X } from 'lucide-react';
+import { RefreshCw, RotateCcw, Save, Settings2, Wifi, X } from 'lucide-react';
+import { AI_PROVIDER_PRESETS, getProviderDefaultBaseUrl } from '@/lib/ai-provider-presets';
+import { DEFAULT_SETTINGS, REASONING_EFFORT_OPTIONS } from '@/lib/runtime-config';
 import {
-  applyLightweightRecallPreset,
-  DEFAULT_GENERATION_GATE_CONFIG,
-  findMatchingLightweightRecallPreset,
-  LIGHTWEIGHT_RECALL_PRESETS,
-  normalizeGenerationGateConfig,
-} from '@/lib/generation-gate-defaults';
-import { fetchGenerationGateConfig, saveGenerationGateConfig } from '@/lib/server-config-client';
+  fetchAiRuntimeConfig,
+  fetchAiRuntimeModels,
+  saveAiRuntimeConfig,
+} from '@/lib/server-config-client';
 import { checkServerHealth } from '@/lib/server-health';
-import { DEFAULT_SETTINGS } from '@/lib/runtime-config';
 import { useServerStatusStore, useSettingsStore } from '@/stores';
 import { useToast } from '@/components/Toast';
-import type { GenerationGateConfig, ReviewSeverity } from '@/types';
+import type { AIRuntimeConfig, AIProviderPreset, ReasoningEffortSetting } from '@/types';
 
 interface SettingsDialogProps {
   open: boolean;
   onClose: () => void;
 }
 
-const modelPresets = ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.2', 'gpt-5.3-codex', 'gpt-5'];
-const severityOptions: ReviewSeverity[] = ['critical', 'high', 'medium', 'low'];
+const EMPTY_RUNTIME_CONFIG: AIRuntimeConfig = {
+  provider: 'custom',
+  apiKey: '',
+  baseUrl: '',
+  defaultModel: DEFAULT_SETTINGS.modelName,
+  embeddingModel: '',
+};
+
+const reasoningEffortOptions: Array<{
+  value: ReasoningEffortSetting;
+  label: string;
+}> = [
+  { value: 'model_default', label: '模型默认' },
+  ...REASONING_EFFORT_OPTIONS.map((value) => ({
+    value,
+    label: value,
+  })),
+];
+
+function normalizeRuntimeConfig(config: AIRuntimeConfig) {
+  return {
+    ...config,
+    apiKey: config.apiKey.trim(),
+    baseUrl:
+      config.provider === 'custom'
+        ? config.baseUrl.trim()
+        : getProviderDefaultBaseUrl(config.provider),
+    defaultModel: config.defaultModel.trim(),
+    embeddingModel: config.embeddingModel?.trim() || undefined,
+  } satisfies AIRuntimeConfig;
+}
 
 export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const { settings, updateSettings, resetSettings } = useSettingsStore();
   const refreshServerStatus = useServerStatusStore((state) => state.refresh);
   const { toast } = useToast();
-  const [serverUrl, setServerUrl] = useState(settings.serverUrl);
-  const [modelName, setModelName] = useState(settings.modelName);
+  const [runtimeConfig, setRuntimeConfig] = useState<AIRuntimeConfig>(EMPTY_RUNTIME_CONFIG);
+  const [savedRuntimeConfig, setSavedRuntimeConfig] = useState<AIRuntimeConfig | null>(null);
+  const [chatModel, setChatModel] = useState(settings.modelName);
+  const [embeddingModel, setEmbeddingModel] = useState('');
   const [temperature, setTemperature] = useState(settings.temperature);
-  const [stylePrompt, setStylePrompt] = useState(settings.stylePrompt);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortSetting>(settings.reasoningEffort);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
-  const [testStatus, setTestStatus] = useState<string>('');
-  const [gateConfig, setGateConfig] = useState<GenerationGateConfig>(DEFAULT_GENERATION_GATE_CONFIG);
-  const [savedGateConfig, setSavedGateConfig] = useState<GenerationGateConfig | null>(null);
-  const [isGateConfigLoading, setIsGateConfigLoading] = useState(false);
-  const [isGateConfigSaving, setIsGateConfigSaving] = useState(false);
-  const [gateConfigStatus, setGateConfigStatus] = useState('');
+  const [isModelLoading, setIsModelLoading] = useState(false);
+  const [statusText, setStatusText] = useState('');
+  const [testStatus, setTestStatus] = useState('');
 
+  const resolvedBaseUrl = useMemo(() => {
+    return runtimeConfig.provider === 'custom'
+      ? runtimeConfig.baseUrl.trim()
+      : getProviderDefaultBaseUrl(runtimeConfig.provider);
+  }, [runtimeConfig.baseUrl, runtimeConfig.provider]);
+  const mergedModelOptions = useMemo(() => {
+    return Array.from(new Set([chatModel, embeddingModel, ...modelOptions].map((item) => item.trim()).filter(Boolean)))
+      .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  }, [chatModel, embeddingModel, modelOptions]);
   const hasChanges = useMemo(() => {
+    const normalizedRuntimeConfig = normalizeRuntimeConfig({
+      ...runtimeConfig,
+      baseUrl: resolvedBaseUrl,
+      defaultModel: chatModel,
+      embeddingModel,
+    });
+
     return (
-      serverUrl !== settings.serverUrl ||
-      modelName !== settings.modelName ||
+      (savedRuntimeConfig
+        ? normalizedRuntimeConfig.provider !== savedRuntimeConfig.provider ||
+          normalizedRuntimeConfig.apiKey !== savedRuntimeConfig.apiKey ||
+          normalizedRuntimeConfig.baseUrl !== savedRuntimeConfig.baseUrl ||
+          normalizedRuntimeConfig.defaultModel !== savedRuntimeConfig.defaultModel ||
+          (normalizedRuntimeConfig.embeddingModel || '') !== (savedRuntimeConfig.embeddingModel || '')
+        : true) ||
+      chatModel !== settings.modelName ||
       temperature !== settings.temperature ||
-      stylePrompt !== settings.stylePrompt
+      reasoningEffort !== settings.reasoningEffort ||
+      embeddingModel !== (runtimeConfig.embeddingModel || '')
     );
-  }, [modelName, serverUrl, settings, stylePrompt, temperature]);
-  const hasGateConfigChanges = useMemo(() => {
-    if (!savedGateConfig) {
-      return false;
-    }
-
-    return (
-      gateConfig.reviewRewriteMinSeverity !== savedGateConfig.reviewRewriteMinSeverity ||
-      gateConfig.reviewMaxRewriteCount !== savedGateConfig.reviewMaxRewriteCount ||
-      gateConfig.reviewScoreThresholds.consistency !== savedGateConfig.reviewScoreThresholds.consistency ||
-      gateConfig.reviewScoreThresholds.continuity !== savedGateConfig.reviewScoreThresholds.continuity ||
-      gateConfig.reviewScoreThresholds.reader_pull !== savedGateConfig.reviewScoreThresholds.reader_pull ||
-      gateConfig.polishFailBlockReady !== savedGateConfig.polishFailBlockReady ||
-      gateConfig.lightweightRecall.minScore !== savedGateConfig.lightweightRecall.minScore ||
-      gateConfig.lightweightRecall.topK !== savedGateConfig.lightweightRecall.topK ||
-      gateConfig.lightweightRecall.phraseWeight !== savedGateConfig.lightweightRecall.phraseWeight ||
-      gateConfig.lightweightRecall.entityWeight !== savedGateConfig.lightweightRecall.entityWeight ||
-      gateConfig.lightweightRecall.recencyWeight !== savedGateConfig.lightweightRecall.recencyWeight
-    );
-  }, [gateConfig, savedGateConfig]);
-  const matchedLightweightRecallPreset = useMemo(
-    () => findMatchingLightweightRecallPreset(gateConfig.lightweightRecall),
-    [gateConfig.lightweightRecall],
-  );
+  }, [chatModel, embeddingModel, reasoningEffort, resolvedBaseUrl, runtimeConfig, savedRuntimeConfig, settings.modelName, settings.reasoningEffort, settings.temperature, temperature]);
 
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    setServerUrl(settings.serverUrl);
-    setModelName(settings.modelName);
+    setChatModel(settings.modelName);
     setTemperature(settings.temperature);
-    setStylePrompt(settings.stylePrompt);
+    setReasoningEffort(settings.reasoningEffort);
+    setModelOptions([]);
+    setStatusText('');
     setTestStatus('');
-    setGateConfigStatus('');
-    void loadGateConfig(settings.serverUrl);
+    void loadRuntimeConfig();
   }, [open, settings]);
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    function handleEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    }
-
-    window.addEventListener('keydown', handleEscape);
-    return () => {
-      window.removeEventListener('keydown', handleEscape);
-    };
-  }, [onClose, open]);
 
   if (!open) {
     return null;
   }
 
-  async function loadGateConfig(targetServerUrl: string) {
-    setIsGateConfigLoading(true);
-    setGateConfigStatus('');
+  async function loadRuntimeConfig() {
+    setIsLoading(true);
 
     try {
-      const config = normalizeGenerationGateConfig(await fetchGenerationGateConfig(targetServerUrl.trim()));
-      setGateConfig(config);
-      setSavedGateConfig(config);
-      setGateConfigStatus('已读取后端门控配置');
+      const config = normalizeRuntimeConfig(await fetchAiRuntimeConfig(settings.serverUrl));
+      setRuntimeConfig(config);
+      setSavedRuntimeConfig(config);
+      setEmbeddingModel(config.embeddingModel || '');
+      await loadModels(config);
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
-      setSavedGateConfig(null);
-      setGateConfig(DEFAULT_GENERATION_GATE_CONFIG);
-      setGateConfigStatus(`读取失败：${message}`);
+      setStatusText(`读取 AI 配置失败：${message}`);
     } finally {
-      setIsGateConfigLoading(false);
+      setIsLoading(false);
+    }
+  }
+
+  async function loadModels(config = runtimeConfig) {
+    setIsModelLoading(true);
+
+    try {
+      const models = await fetchAiRuntimeModels(settings.serverUrl, {
+        provider: config.provider,
+        apiKey: config.apiKey.trim(),
+        baseUrl: config.provider === 'custom' ? config.baseUrl.trim() : getProviderDefaultBaseUrl(config.provider),
+      });
+      setModelOptions(models.map((item) => item.id));
+      setStatusText(models.length > 0 ? `已拉取 ${models.length} 个模型` : '未返回可用模型');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      setModelOptions([]);
+      setStatusText(`拉取模型失败：${message}`);
+    } finally {
+      setIsModelLoading(false);
     }
   }
 
   async function handleSave() {
+    if (!chatModel.trim()) {
+      toast('请先选择聊天模型', 'warning');
+      return;
+    }
+
     setIsSaving(true);
 
     try {
-      await updateSettings({
-        serverUrl: serverUrl.trim(),
-        modelName: modelName.trim(),
-        temperature,
-        stylePrompt,
+      const savedRuntimeConfig = normalizeRuntimeConfig({
+        ...runtimeConfig,
+        baseUrl: resolvedBaseUrl,
+        defaultModel: chatModel,
+        embeddingModel,
       });
-      await refreshServerStatus(serverUrl.trim());
-
-      toast('设置已保存', 'success');
+      await saveAiRuntimeConfig(settings.serverUrl, savedRuntimeConfig);
+      setRuntimeConfig(savedRuntimeConfig);
+      setSavedRuntimeConfig(savedRuntimeConfig);
+      await updateSettings({
+        modelName: chatModel.trim(),
+        temperature,
+        reasoningEffort,
+      });
+      await refreshServerStatus(settings.serverUrl);
+      toast('全局 AI 设置已保存', 'success');
       onClose();
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
-      toast(`保存设置失败：${message}`, 'error');
+      toast(`保存失败：${message}`, 'error');
     } finally {
       setIsSaving(false);
     }
   }
 
   async function handleReset() {
-    const confirmed = window.confirm('确认恢复默认设置吗？');
-
-    if (!confirmed) {
-      return;
-    }
-
     await resetSettings();
-    await refreshServerStatus(DEFAULT_SETTINGS.serverUrl);
-    toast('已恢复默认设置', 'info');
-    onClose();
+    setChatModel(DEFAULT_SETTINGS.modelName);
+    setTemperature(DEFAULT_SETTINGS.temperature);
+    setReasoningEffort(DEFAULT_SETTINGS.reasoningEffort);
+    toast('模型参数已恢复默认值', 'info');
   }
 
   async function handleTestConnection() {
@@ -165,7 +201,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     setTestStatus('');
 
     try {
-      const result = await checkServerHealth(serverUrl.trim());
+      const result = await checkServerHealth(settings.serverUrl);
 
       if (!result.ok) {
         throw new Error(result.message);
@@ -182,27 +218,6 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     }
   }
 
-  async function handleSaveGateConfig() {
-    setIsGateConfigSaving(true);
-    setGateConfigStatus('');
-
-    try {
-      const saved = normalizeGenerationGateConfig(
-        await saveGenerationGateConfig(serverUrl.trim(), normalizeGenerationGateConfig(gateConfig)),
-      );
-      setGateConfig(saved);
-      setSavedGateConfig(saved);
-      setGateConfigStatus('后端门控配置已保存');
-      toast('后端门控配置已保存', 'success');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '未知错误';
-      setGateConfigStatus(`保存失败：${message}`);
-      toast(`保存后端门控配置失败：${message}`, 'error');
-    } finally {
-      setIsGateConfigSaving(false);
-    }
-  }
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 py-6 backdrop-blur-sm">
       <div className="w-full max-w-2xl rounded-3xl border border-neutral-800 bg-neutral-900 shadow-2xl shadow-black/40">
@@ -212,8 +227,8 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
               <Settings2 size={18} />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-neutral-100">系统设置</h2>
-              <p className="text-sm text-neutral-500">管理服务地址、模型、温度和全局文风。</p>
+              <h2 className="text-lg font-semibold text-neutral-100">全局 AI 设置</h2>
+              <p className="text-sm text-neutral-500">Provider、模型和推理参数统一放到项目列表级管理。</p>
             </div>
           </div>
           <button
@@ -225,427 +240,193 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
           </button>
         </div>
 
-        <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.1fr_0.9fr]">
-          <div className="space-y-5">
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium text-neutral-200">后端地址</span>
-              <input
-                value={serverUrl}
-                onChange={(event) => setServerUrl(event.target.value)}
-                placeholder="http://localhost:3001"
-                className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
-              />
-            </label>
+        <div className="max-h-[72vh] space-y-5 overflow-y-auto px-6 py-6">
+          <section className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+            <p className="text-xs uppercase tracking-[0.18em] text-indigo-300">Provider</p>
+            <p className="mt-2 text-sm text-neutral-500">当前按 OpenAI 兼容接口工作；后端地址改为读取 `VITE_SERVER_URL`。</p>
 
-            <div>
-              <div className="mb-2 text-sm font-medium text-neutral-200">模型</div>
-              <input
-                value={modelName}
-                onChange={(event) => setModelName(event.target.value)}
-                placeholder="输入模型名"
-                className="mb-3 w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
-              />
-              <div className="flex flex-wrap gap-2">
-                {modelPresets.map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => setModelName(preset)}
-                    className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                      modelName === preset
-                        ? 'bg-indigo-500/15 text-indigo-300'
-                        : 'bg-neutral-950/70 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
-                    }`}
-                  >
-                    {preset}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="mb-2 flex items-center justify-between text-sm font-medium text-neutral-200">
-                <span>温度</span>
-                <span className="text-neutral-400">{temperature.toFixed(1)}</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1.5"
-                step="0.1"
-                value={temperature}
-                onChange={(event) => setTemperature(Number(event.target.value))}
-                className="w-full accent-indigo-500"
-              />
-              <div className="mt-2 flex justify-between text-xs text-neutral-500">
-                <span>更严谨</span>
-                <span>更发散</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-5">
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium text-neutral-200">全局文风 Prompt</span>
-              <textarea
-                value={stylePrompt}
-                onChange={(event) => setStylePrompt(event.target.value)}
-                placeholder="例如：保持冷峻克制的末法修仙风格，描写偏写实。"
-                className="min-h-[220px] w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm leading-7 text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
-              />
-            </label>
-
-            <div className="rounded-2xl border border-neutral-800 bg-neutral-950/50 p-4">
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-neutral-200">
-                <Wifi size={15} className="text-indigo-400" />
-                连接测试
-              </div>
-              <p className="text-xs leading-6 text-neutral-500">
-                测试的是 `${serverUrl.replace(/\/+$/, '')}/api/health`，用于确认前端能否访问本地后端。
-              </p>
-              <div className="mt-4 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => void handleTestConnection()}
-                  disabled={isTesting}
-                  className="rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+            <div className="mt-5 space-y-5">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-neutral-200">模型提供方</span>
+                <select
+                  value={runtimeConfig.provider}
+                  onChange={(event) => {
+                    const nextProvider = event.target.value as AIProviderPreset;
+                    setRuntimeConfig((current) => ({
+                      ...current,
+                      provider: nextProvider,
+                      baseUrl: nextProvider === 'custom' ? current.baseUrl : getProviderDefaultBaseUrl(nextProvider),
+                    }));
+                  }}
+                  className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
                 >
-                  {isTesting ? '测试中...' : '测试连接'}
-                </button>
-                <span className={`text-xs ${testStatus.startsWith('连接成功') ? 'text-green-400' : 'text-neutral-500'}`}>
-                  {testStatus || '尚未测试'}
-                </span>
-              </div>
-            </div>
+                  {AI_PROVIDER_PRESETS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-            <div className="rounded-2xl border border-neutral-800 bg-neutral-950/50 p-4">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium text-neutral-200">后端门控策略</div>
-                  <p className="mt-1 text-xs leading-6 text-neutral-500">
-                    直接读写 `${serverUrl.replace(/\/+$/, '')}/api/runtime/generation-gate`，会覆盖服务端运行时门控配置。
-                  </p>
-                </div>
-              </div>
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-neutral-200">Base URL</span>
+                <input
+                  value={resolvedBaseUrl}
+                  readOnly={runtimeConfig.provider !== 'custom'}
+                  onChange={(event) =>
+                    setRuntimeConfig((current) => ({
+                      ...current,
+                      baseUrl: event.target.value,
+                    }))
+                  }
+                  className={`w-full rounded-2xl border border-neutral-800 px-4 py-3 text-sm outline-none transition-colors ${
+                    runtimeConfig.provider === 'custom'
+                      ? 'bg-neutral-950/70 text-neutral-100 focus:border-indigo-500'
+                      : 'bg-neutral-900 text-neutral-500'
+                  }`}
+                />
+              </label>
 
-              <div className="mt-4 space-y-4">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-neutral-200">API Key</span>
+                <input
+                  type="password"
+                  value={runtimeConfig.apiKey}
+                  onChange={(event) =>
+                    setRuntimeConfig((current) => ({
+                      ...current,
+                      apiKey: event.target.value,
+                    }))
+                  }
+                  placeholder="输入当前 provider 的 API Key"
+                  className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
+                />
+              </label>
+
+              <div className="grid gap-4 md:grid-cols-2">
                 <label className="block">
-                  <span className="mb-2 block text-xs font-medium text-neutral-300">Review 自动重写最低级别</span>
+                  <span className="mb-2 block text-sm font-medium text-neutral-200">聊天模型</span>
                   <select
-                    value={gateConfig.reviewRewriteMinSeverity}
-                    onChange={(event) =>
-                      setGateConfig((current) => ({
-                        ...current,
-                        reviewRewriteMinSeverity: event.target.value as ReviewSeverity,
-                      }))
-                    }
+                    value={chatModel}
+                    onChange={(event) => setChatModel(event.target.value)}
                     className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
                   >
-                    {severityOptions.map((severity) => (
-                      <option key={severity} value={severity}>
-                        {severity}
+                    {!chatModel ? <option value="">请选择模型</option> : null}
+                    {mergedModelOptions.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
                       </option>
                     ))}
                   </select>
                 </label>
 
                 <label className="block">
-                  <span className="mb-2 block text-xs font-medium text-neutral-300">最大自动重写次数</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={gateConfig.reviewMaxRewriteCount}
-                    onChange={(event) =>
-                      setGateConfig((current) => ({
-                        ...current,
-                        reviewMaxRewriteCount: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                      }))
-                    }
+                  <span className="mb-2 block text-sm font-medium text-neutral-200">Embedding 模型</span>
+                  <select
+                    value={embeddingModel}
+                    onChange={(event) => setEmbeddingModel(event.target.value)}
                     className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                  />
+                  >
+                    <option value="">关闭向量增强</option>
+                    {mergedModelOptions.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
                 </label>
+              </div>
 
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">一致性最低分</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={gateConfig.reviewScoreThresholds.consistency}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          reviewScoreThresholds: {
-                            ...current.reviewScoreThresholds,
-                            consistency: Math.max(0, Math.min(100, Math.trunc(Number(event.target.value) || 0))),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void loadModels()}
+                  disabled={isModelLoading || isLoading}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <RefreshCw size={15} className={isModelLoading ? 'animate-spin' : ''} />
+                  {isModelLoading ? '拉取中...' : '拉取模型'}
+                </button>
+                <span className="text-xs text-neutral-500">{statusText || '尚未拉取模型列表'}</span>
+              </div>
+            </div>
+          </section>
 
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">连贯性最低分</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={gateConfig.reviewScoreThresholds.continuity}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          reviewScoreThresholds: {
-                            ...current.reviewScoreThresholds,
-                            continuity: Math.max(0, Math.min(100, Math.trunc(Number(event.target.value) || 0))),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
+          <section className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+            <p className="text-xs uppercase tracking-[0.18em] text-indigo-300">请求参数</p>
+            <div className="mt-5 space-y-5">
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-neutral-200">思考等级</span>
+                <select
+                  value={reasoningEffort}
+                  onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffortSetting)}
+                  className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
+                >
+                  {reasoningEffortOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">追读力最低分</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={gateConfig.reviewScoreThresholds.reader_pull}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          reviewScoreThresholds: {
-                            ...current.reviewScoreThresholds,
-                            reader_pull: Math.max(0, Math.min(100, Math.trunc(Number(event.target.value) || 0))),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
+              <div>
+                <div className="mb-2 flex items-center justify-between text-sm font-medium text-neutral-200">
+                  <span>温度</span>
+                  <span className="text-neutral-400">{temperature.toFixed(1)}</span>
                 </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="1.5"
+                  step="0.1"
+                  value={temperature}
+                  onChange={(event) => setTemperature(Number(event.target.value))}
+                  className="w-full accent-indigo-500"
+                />
+              </div>
 
-                <label className="flex items-start gap-3 rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={gateConfig.polishFailBlockReady}
-                    onChange={(event) =>
-                      setGateConfig((current) => ({
-                        ...current,
-                        polishFailBlockReady: event.target.checked,
-                      }))
-                    }
-                    className="mt-1 h-4 w-4 rounded border-neutral-700 bg-neutral-950 text-indigo-500"
-                  />
-                  <div>
-                    <p className="text-sm text-neutral-200">Polish 失败时阻止进入 ready</p>
-                    <p className="mt-1 text-xs leading-6 text-neutral-500">
-                      开启后，润色终检返回 fail 会直接把任务停在 error，必须人工处理或手动重试。
-                    </p>
-                  </div>
-                </label>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">轻量召回最低分</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={gateConfig.lightweightRecall.minScore}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          lightweightRecall: {
-                            ...current.lightweightRecall,
-                            minScore: Math.max(0, Math.min(100, Math.trunc(Number(event.target.value) || 0))),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
-
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">轻量召回 Top-K</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={gateConfig.lightweightRecall.topK}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          lightweightRecall: {
-                            ...current.lightweightRecall,
-                            topK: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-950/50 p-4">
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium text-neutral-200">
+                  <Wifi size={15} className="text-indigo-400" />
+                  服务端状态
                 </div>
-
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">轻量召回词命中权重</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={gateConfig.lightweightRecall.phraseWeight}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          lightweightRecall: {
-                            ...current.lightweightRecall,
-                            phraseWeight: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
-
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">轻量召回实体命中权重</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={gateConfig.lightweightRecall.entityWeight}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          lightweightRecall: {
-                            ...current.lightweightRecall,
-                            entityWeight: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
-
-                  <label className="block">
-                    <span className="mb-2 block text-xs font-medium text-neutral-300">轻量召回时序权重</span>
-                    <input
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={gateConfig.lightweightRecall.recencyWeight}
-                      onChange={(event) =>
-                        setGateConfig((current) => ({
-                          ...current,
-                          lightweightRecall: {
-                            ...current.lightweightRecall,
-                            recencyWeight: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
-                          },
-                        }))
-                      }
-                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                    />
-                  </label>
-                </div>
-
-                <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm text-neutral-200">轻量召回权重预设</p>
-                      <p className="mt-1 text-xs leading-6 text-neutral-500">
-                        当前：{matchedLightweightRecallPreset ? matchedLightweightRecallPreset.label : '自定义权重'}
-                      </p>
-                    </div>
-                    <p className="text-[11px] text-neutral-500">
-                      词 {gateConfig.lightweightRecall.phraseWeight} / 实体 {gateConfig.lightweightRecall.entityWeight} / 时序 {gateConfig.lightweightRecall.recencyWeight}
-                    </p>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {LIGHTWEIGHT_RECALL_PRESETS.map((preset) => {
-                      const active = matchedLightweightRecallPreset?.key === preset.key;
-
-                      return (
-                        <button
-                          key={preset.key}
-                          type="button"
-                          onClick={() =>
-                            setGateConfig((current) => ({
-                              ...current,
-                              lightweightRecall: applyLightweightRecallPreset(current.lightweightRecall, preset.key),
-                            }))
-                          }
-                          className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
-                            active
-                              ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-200'
-                              : 'border-neutral-800 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-900'
-                          }`}
-                          title={preset.description}
-                        >
-                          {preset.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <p className="mt-3 text-xs leading-6 text-neutral-500">
-                    {matchedLightweightRecallPreset?.description ?? '当前权重不是内置预设，可继续细调后保存。'}
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3">
+                <p className="text-xs leading-6 text-neutral-500">
+                  测试 `${settings.serverUrl.replace(/\/+$/, '')}/api/health`，这里只确认前端能否访问后端。
+                </p>
+                <div className="mt-4 flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={() => void loadGateConfig(serverUrl)}
-                    disabled={isGateConfigLoading}
+                    onClick={() => void handleTestConnection()}
+                    disabled={isTesting}
                     className="rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    {isGateConfigLoading ? '读取中...' : '读取后端配置'}
+                    {isTesting ? '测试中...' : '测试连接'}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleSaveGateConfig()}
-                    disabled={!savedGateConfig || !hasGateConfigChanges || isGateConfigSaving}
-                    className="rounded-2xl bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isGateConfigSaving ? '保存中...' : '保存后端配置'}
-                  </button>
-                  <span className={`text-xs ${gateConfigStatus.startsWith('已读取') || gateConfigStatus.startsWith('后端门控配置已保存') ? 'text-green-400' : 'text-neutral-500'}`}>
-                    {gateConfigStatus || '尚未读取'}
+                  <span className={`text-xs ${testStatus.startsWith('连接成功') ? 'text-green-400' : 'text-neutral-500'}`}>
+                    {testStatus || '尚未测试'}
                   </span>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
         </div>
 
-        <div className="flex flex-col gap-3 border-t border-neutral-800 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-neutral-800 px-6 py-5">
           <button
             type="button"
             onClick={() => void handleReset()}
-            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-800 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
+            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
           >
             <RotateCcw size={15} />
-            恢复默认
+            恢复默认模型参数
           </button>
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-2xl border border-neutral-800 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-700 hover:bg-neutral-800"
-            >
-              取消
-            </button>
+            <span className="text-xs text-neutral-500">{isLoading ? '正在读取当前 AI 配置...' : '项目文风已改为项目级设置。'}</span>
             <button
               type="button"
               onClick={() => void handleSave()}
-              disabled={!hasChanges || isSaving}
+              disabled={isSaving || !hasChanges}
               className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Save size={15} />

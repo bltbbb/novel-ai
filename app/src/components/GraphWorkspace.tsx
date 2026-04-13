@@ -2,10 +2,20 @@ import { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Eye, GitBranch, LibraryBig, Network, Sparkles, Target } from 'lucide-react';
 import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
+import {
+  fetchGenerationDebugEntities,
+  fetchGenerationDebugForeshadows,
+  fetchGenerationDebugRelationships,
+} from '@/lib/generation-debug-client';
 import { buildProjectGraph, type GraphEdge, type GraphNode, type GraphNodeKind } from '@/lib/project-graph';
-import { useForeshadowStore, useLoreStore, useEditorStore } from '@/stores';
+import { useForeshadowStore, useLoreStore, useEditorStore, useSettingsStore } from '@/stores';
 import { useToast } from '@/components/Toast';
-import type { Id } from '@/types';
+import type {
+  GenerationDebugEntityRecord,
+  GenerationDebugForeshadowRecord,
+  GenerationDebugRelationshipRecord,
+  Id,
+} from '@/types';
 
 interface GraphWorkspaceProps {
   projectId: Id;
@@ -74,6 +84,7 @@ export function GraphWorkspace({
 }: GraphWorkspaceProps) {
   const chapters = useEditorStore((state) => state.chapters);
   const entities = useLoreStore((state) => state.entities);
+  const settings = useSettingsStore((state) => state.settings);
   const {
     foreshadows,
     loadedProjectId,
@@ -83,6 +94,9 @@ export function GraphWorkspace({
   const { toast } = useToast();
   const [activeFilter, setActiveFilter] = useState<GraphFilter>('all');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [runtimeEntities, setRuntimeEntities] = useState<GenerationDebugEntityRecord[]>([]);
+  const [runtimeForeshadows, setRuntimeForeshadows] = useState<GenerationDebugForeshadowRecord[]>([]);
+  const [runtimeRelationships, setRuntimeRelationships] = useState<GenerationDebugRelationshipRecord[]>([]);
 
   useEffect(() => {
     if (loadedProjectId === projectId) {
@@ -93,6 +107,28 @@ export function GraphWorkspace({
       toast('加载图谱数据失败', 'error');
     });
   }, [loadForeshadows, loadedProjectId, projectId, toast]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void Promise.all([
+      fetchGenerationDebugEntities(settings.serverUrl, projectId).catch(() => []),
+      fetchGenerationDebugForeshadows(settings.serverUrl, projectId).catch(() => []),
+      fetchGenerationDebugRelationships(settings.serverUrl, projectId).catch(() => []),
+    ]).then(([nextEntities, nextForeshadows, nextRelationships]) => {
+      if (cancelled) {
+        return;
+      }
+
+      setRuntimeEntities(nextEntities);
+      setRuntimeForeshadows(nextForeshadows);
+      setRuntimeRelationships(nextRelationships);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, settings.serverUrl]);
 
   const graph = useMemo(() => {
     return buildProjectGraph({
@@ -183,7 +219,12 @@ export function GraphWorkspace({
     }
   }
 
-  if (graph.nodes.length === 0) {
+  if (
+    graph.nodes.length === 0 &&
+    runtimeEntities.length === 0 &&
+    runtimeForeshadows.length === 0 &&
+    runtimeRelationships.length === 0
+  ) {
     return (
       <div className="flex min-h-0 flex-1 p-8">
         <EmptyState
@@ -369,6 +410,53 @@ export function GraphWorkspace({
                   <p>3. 设定之间若共享标签或互相提及，会自动建立关联。</p>
                 </div>
               </section>
+
+              {(runtimeRelationships.length > 0 || runtimeEntities.length > 0 || runtimeForeshadows.length > 0) ? (
+                <section className="rounded-3xl border border-indigo-500/20 bg-indigo-500/5 p-4">
+                  <p className="text-sm text-neutral-200">运行态知识层</p>
+                  <p className="mt-2 text-xs leading-6 text-neutral-500">
+                    这里展示的是生成系统内部已经沉淀但尚未完全同步到前台台账的关系、设定和伏笔。
+                  </p>
+
+                  {runtimeRelationships.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">运行态关系</p>
+                      {runtimeRelationships.slice(0, 6).map((item) => (
+                        <div key={item.id} className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-3 py-3 text-sm text-neutral-300">
+                          <p className="text-neutral-100">
+                            {item.sourceEntityName} {item.relationshipType} {item.targetEntityName || '未知对象'}
+                          </p>
+                          <p className="mt-1 text-xs text-neutral-500">{item.chapterTitle}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {runtimeEntities.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">运行态设定</p>
+                      {runtimeEntities.slice(0, 4).map((item) => (
+                        <div key={`${item.entityName}-${item.updatedAt}`} className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-3 py-3 text-sm text-neutral-300">
+                          <p className="text-neutral-100">{item.entityName}</p>
+                          <p className="mt-1 text-xs text-neutral-500">{item.lastSeenChapterTitle || '未知章节'}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {runtimeForeshadows.length > 0 ? (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">运行态伏笔</p>
+                      {runtimeForeshadows.slice(0, 4).map((item) => (
+                        <div key={item.id} className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-3 py-3 text-sm text-neutral-300">
+                          <p className="text-neutral-100">{item.title}</p>
+                          <p className="mt-1 text-xs text-neutral-500">{item.sourceChapterTitle || '未关联章节'}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
             </div>
           )}
         </div>

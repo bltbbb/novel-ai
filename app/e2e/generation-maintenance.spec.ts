@@ -9,6 +9,15 @@ test.use({
   },
 });
 
+async function openProjectList(page: import('@playwright/test').Page) {
+  const backButton = page.getByRole('button', { name: '返回项目列表' });
+
+  if (await backButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await backButton.click();
+    await expect(page.getByRole('heading', { name: '项目列表' })).toBeVisible();
+  }
+}
+
 test('验证生成控制台维护入口', async ({ page }) => {
   const chunkBackfillRequests: Array<Record<string, unknown>> = [];
   let activeProjectId = '';
@@ -266,11 +275,24 @@ test('验证生成控制台维护入口', async ({ page }) => {
           recentTextCount: 1,
           volumeRecapCount: 1,
           relatedChapterCount: 0,
+          dormantForeshadowRecallCount: 0,
+          volumeRecapRecallCount: 0,
           entityCount: 1,
           relationshipCount: 1,
           hasFallbackContext: false,
           focusEntityNames: ['林冲'],
           queryPhrases: ['黑铁片'],
+          lightweightRecallItems: [],
+          structuredRelationshipDebug: {
+            mode: 'graph_1hop',
+            reason: 'ok',
+            focusEntityNames: ['林冲'],
+            policy: 'mock',
+            secondaryEvaluation: null,
+            evaluatedTwoHop: false,
+            hasTwoHopPathBlock: false,
+            nonTriggerCategory: null,
+          },
           sections: [
             {
               key: 'working_memory',
@@ -321,6 +343,55 @@ test('验证生成控制台维护入口', async ({ page }) => {
           chapterTitle,
           queryPhrases: ['黑铁片'],
           focusEntityNames: ['林冲'],
+          vectorBackend: {
+            configuredBackend: 'json_cache',
+            activeBackend: 'json_cache',
+            embeddingModel: null,
+            isVectorEnabled: false,
+            supportsIndexedSearch: false,
+            fallbackReason: null,
+          },
+          vectorSearch: {
+            status: 'disabled',
+            source: 'none',
+            candidatePoolSize: 0,
+            matchedCandidateCount: 0,
+            topK: 0,
+            minScore: 0,
+            minSimilarity: 0,
+            fallbackReason: null,
+          },
+          pipeline: {
+            metadataFilter: {
+              inputCandidates: 0,
+              outputCandidates: 0,
+              filteredOutCandidates: 0,
+            },
+            hybridRecall: {
+              candidateCount: 0,
+              lexicalOnlyCount: 0,
+              vectorOnlyCount: 0,
+              hybridCount: 0,
+            },
+            dedupeRerank: {
+              inputCandidates: 0,
+              dedupedCandidates: 0,
+              mergedAwayCandidates: 0,
+            },
+            selection: {
+              inputCandidates: 0,
+              selectedCandidates: 0,
+              thresholdSelectedCandidates: 0,
+              rescuedVectorOnlyCandidates: 0,
+              droppedBelowThresholdCandidates: 0,
+              droppedByLimitCandidates: 0,
+              limit: 0,
+              topScore: null,
+              dynamicThreshold: null,
+              rescuedVectorOnlyChunkIds: [],
+              droppedVectorOnlyChunkIds: [],
+            },
+          },
           items: [],
         }),
       });
@@ -354,22 +425,22 @@ test('验证生成控制台维护入口', async ({ page }) => {
     await route.abort();
   });
 
-  await page.goto('http://127.0.0.1:5173', { waitUntil: 'networkidle' });
+  await page.goto('http://127.0.0.1:5173', { waitUntil: 'domcontentloaded' });
+  await openProjectList(page);
 
-  const projectCard = page.getByText('最后一个修仙者').first();
+  const projectCard = page
+    .locator('article')
+    .filter({ has: page.getByRole('heading', { name: '最后一个修仙者' }) })
+    .first();
 
-  if (await projectCard.isVisible()) {
-    await projectCard.click();
-  }
+  await projectCard.click();
 
-  await page.getByRole('button', { name: '生成控制台' }).click();
-
-  const maintenancePanel = page
-    .getByText('维护入口')
-    .locator('xpath=ancestor::div[contains(@class,"rounded-2xl")][1]');
+  await page.getByRole('button', { name: '生成', exact: true }).click();
+  await page.getByRole('button', { name: /高级选项/ }).click();
+  await page.getByRole('button', { name: '打开兼容控制台' }).click();
 
   await expect(page.getByText('SQLite 调试面板')).toBeVisible();
-  await expect(page.getByText('维护入口')).toBeVisible();
+  await expect(page.getByRole('button', { name: /回填/ }).first()).toBeVisible();
   await expect(
     page.locator('p').filter({ hasText: /^轻量召回权重：词 2 \/ 实体 3 \/ 时序 1$/ }).first(),
   ).toBeVisible();
