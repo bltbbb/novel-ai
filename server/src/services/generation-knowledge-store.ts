@@ -3,6 +3,7 @@ import type {
   ChapterOutlineDraft,
   ChapterSummaryDraft,
   GenerationEntitySnapshot,
+  GenerationRelationSnapshot,
   StateChangeDraft,
   StrandType,
 } from '../types/ai.js';
@@ -59,12 +60,14 @@ export function replaceGenerationEntitiesSnapshot(
       description,
       fields_json,
       tags_json,
+      aliases_json,
       pinned,
+      draft,
       last_seen_chapter_id,
       last_seen_chapter_title,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   db.exec('BEGIN');
@@ -90,9 +93,96 @@ export function replaceGenerationEntitiesSnapshot(
             ? entity.tags.map((tag) => tag.trim()).filter(Boolean)
             : [],
         ),
+        JSON.stringify(
+          Array.isArray(entity.aliases)
+            ? entity.aliases.map((alias) => alias.trim()).filter(Boolean)
+            : [],
+        ),
         entity.pinned ? 1 : 0,
+        entity.draft ? 1 : 0,
         '',
         '',
+        currentTime,
+        currentTime,
+      );
+    }
+
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export function replaceGenerationRelationshipsSnapshot(
+  env: ServerEnv,
+  input: {
+    projectId: string;
+    relationships: GenerationRelationSnapshot[];
+  },
+) {
+  const db = getGenerationDatabase(env);
+  const currentTime = nowIsoString();
+  const insertStatement = db.prepare(`
+    INSERT INTO generation_relationships (
+      id,
+      project_id,
+      source_entity_name,
+      target_entity_name,
+      relationship_type,
+      source_kind,
+      description,
+      evidence,
+      chapter_id,
+      chapter_title,
+      created_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  db.exec('BEGIN');
+
+  try {
+    db.prepare(
+      "DELETE FROM generation_relationships WHERE project_id = ? AND source_kind IN ('explicit_manual', 'explicit_manual_draft')",
+    ).run(input.projectId);
+
+    for (const relation of input.relationships) {
+      const relationId = relation.id.trim();
+      const sourceEntityName = relation.sourceEntityName.trim();
+      const targetEntityName = relation.targetEntityName.trim();
+      const relationshipType = relation.relationType.trim();
+
+      if (!relationId || !sourceEntityName || !targetEntityName || !relationshipType) {
+        continue;
+      }
+
+      const sourceKind = relation.draft ? 'explicit_manual_draft' : 'explicit_manual';
+      const chapterId = `manual:${relationId}`;
+      const chapterTitle = relation.draft ? '显式关系草案' : '显式关系快照';
+      const description = relation.description.trim() || relation.currentStance.trim() || relation.origin.trim();
+      const evidence = [
+        `关系类型：${relationshipType}`,
+        relation.currentStance.trim() ? `当前态度：${relation.currentStance.trim()}` : '',
+        relation.currentIntensity > 0 ? `当前强度：${relation.currentIntensity}` : '',
+        relation.origin.trim() ? `建立原因：${relation.origin.trim()}` : '',
+        relation.stanceReason.trim() ? `态度锚点：${relation.stanceReason.trim()}` : '',
+        relation.draft ? '状态：草案' : '状态：已确认',
+      ]
+        .filter(Boolean)
+        .join('；');
+
+      insertStatement.run(
+        relationId,
+        input.projectId,
+        sourceEntityName,
+        targetEntityName,
+        relationshipType,
+        sourceKind,
+        description,
+        evidence,
+        chapterId,
+        chapterTitle,
         currentTime,
         currentTime,
       );
@@ -308,7 +398,9 @@ export function upsertGenerationEntitiesSnapshot(
     SELECT
       fields_json,
       tags_json,
+      aliases_json,
       pinned,
+      draft,
       entity_type,
       description,
       created_at
@@ -323,18 +415,22 @@ export function upsertGenerationEntitiesSnapshot(
       description,
       fields_json,
       tags_json,
+      aliases_json,
       pinned,
+      draft,
       last_seen_chapter_id,
       last_seen_chapter_title,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(project_id, entity_name) DO UPDATE SET
       entity_type = excluded.entity_type,
       description = excluded.description,
       fields_json = excluded.fields_json,
       tags_json = excluded.tags_json,
+      aliases_json = excluded.aliases_json,
       pinned = excluded.pinned,
+      draft = excluded.draft,
       last_seen_chapter_id = excluded.last_seen_chapter_id,
       last_seen_chapter_title = excluded.last_seen_chapter_title,
       updated_at = excluded.updated_at
@@ -354,7 +450,9 @@ export function upsertGenerationEntitiesSnapshot(
         | {
             fields_json?: string;
             tags_json?: string;
+            aliases_json?: string;
             pinned?: number;
+            draft?: number;
             entity_type?: string;
             description?: string;
             created_at?: string;
@@ -371,6 +469,12 @@ export function upsertGenerationEntitiesSnapshot(
           ...parseStringArrayJson(currentRow?.tags_json),
         ].map((tag) => tag.trim()).filter(Boolean)),
       );
+      const mergedAliases = Array.from(
+        new Set([
+          ...(Array.isArray(entity.aliases) ? entity.aliases : []),
+          ...parseStringArrayJson(currentRow?.aliases_json),
+        ].map((alias) => alias.trim()).filter(Boolean)),
+      );
 
       upsertStatement.run(
         input.projectId,
@@ -379,7 +483,13 @@ export function upsertGenerationEntitiesSnapshot(
         entity.description?.trim() || currentRow?.description || '',
         JSON.stringify(nextFields),
         JSON.stringify(mergedTags),
-        entity.pinned || Number(currentRow?.pinned ?? 0) > 0 ? 1 : 0,
+        JSON.stringify(mergedAliases),
+        typeof entity.pinned === 'boolean'
+          ? (entity.pinned ? 1 : 0)
+          : (Number(currentRow?.pinned ?? 0) > 0 ? 1 : 0),
+        typeof entity.draft === 'boolean'
+          ? (entity.draft ? 1 : 0)
+          : (Number(currentRow?.draft ?? 0) > 0 ? 1 : 0),
         input.chapterId,
         input.chapterTitle,
         currentRow?.created_at ?? currentTime,

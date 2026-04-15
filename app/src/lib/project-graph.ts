@@ -1,4 +1,5 @@
 import { richTextToPlainText } from '@/lib/editor-content';
+import { getLoreEntityMatchTerms } from '@/lib/lore-entity';
 import { getLoreEntityTypeLabel } from '@/lib/lore-meta';
 import type { Chapter, Foreshadow, Id, LoreEntity } from '@/types';
 
@@ -43,7 +44,7 @@ function includesEntityName(text: string, entity: LoreEntity) {
     return false;
   }
 
-  if (normalizedText.includes(normalizeText(entity.name))) {
+  if (getLoreEntityMatchTerms(entity).some((term) => normalizedText.includes(term))) {
     return true;
   }
 

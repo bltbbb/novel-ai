@@ -1,6 +1,8 @@
 import type {
   AIBookAnalysisRequest,
   AIBookAnalysisResponse,
+  AIInspirationBlueprint,
+  AIInspirationBlueprintRequest,
   AIEpubExtractRequest,
   AIEpubExtractResponse,
   AIBookOutlineRequest,
@@ -24,6 +26,8 @@ import type {
   AIVolumeMilestonesResponse,
   AIVolumeOutlineRequest,
   AIVolumeOutlineResponse,
+  AIVolumePlanReconcileRequest,
+  AIVolumePlanReconcileResponse,
   GenerationArtifactSyncRequest,
   GenerationArtifactSyncResponse,
   GenerationJobBatchActionRequest,
@@ -42,6 +46,14 @@ interface JsonRequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   timeoutMessage?: string;
+}
+
+interface LocalInspirationTranscriptResponse {
+  sourceName: string;
+  transcript: string;
+  messageCount: number;
+  bytes: number;
+  updatedAt: string;
 }
 
 const LONG_AI_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
@@ -152,6 +164,34 @@ export function createBookOutline(serverUrl: string, request: AIBookOutlineReque
   );
 }
 
+export function createInspirationBlueprint(serverUrl: string, request: AIInspirationBlueprintRequest) {
+  return postJson<AIInspirationBlueprintRequest, AIInspirationBlueprint>(
+    serverUrl,
+    '/api/ai/inspiration-blueprint',
+    request,
+    {
+      timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+      timeoutMessage: '灵感提炼请求超时，请稍后重试',
+    },
+  );
+}
+
+export async function fetchDiscussTranscript(serverUrl: string) {
+  const response = await fetch(createApiUrl(serverUrl, '/api/local/inspiration-transcripts/discuss'), {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(extractErrorMessage(errorText) || `请求失败：${response.status}`);
+  }
+
+  return (await response.json()) as LocalInspirationTranscriptResponse;
+}
+
 export function analyzeBookTemplate(serverUrl: string, request: AIBookAnalysisRequest, options?: JsonRequestOptions) {
   return postJson<AIBookAnalysisRequest, AIBookAnalysisResponse>(
     serverUrl,
@@ -252,6 +292,18 @@ export function createVolumeMilestones(serverUrl: string, request: AIVolumeMiles
     serverUrl,
     '/api/ai/volume-milestones',
     request,
+  );
+}
+
+export function reconcileVolumePlan(serverUrl: string, request: AIVolumePlanReconcileRequest) {
+  return postJson<AIVolumePlanReconcileRequest, AIVolumePlanReconcileResponse>(
+    serverUrl,
+    '/api/ai/volume-plan-reconcile',
+    request,
+    {
+      timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+      timeoutMessage: '卷规划修正请求超时，请稍后重试',
+    },
   );
 }
 

@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { DEFAULT_PROMPT_CONFIG, type PromptConfig } from '../prompts/index.js';
 import type {
+  AIProviderPreset,
   GenerationGateConfig,
   GenerationVectorBackendKind,
   ReviewSeverity,
@@ -12,6 +13,7 @@ export interface ServerEnv {
   port: number;
   host: string;
   corsOrigin: string;
+  openaiProvider: AIProviderPreset;
   openaiApiKey: string;
   openaiBaseUrl?: string;
   defaultModel: string;
@@ -113,6 +115,16 @@ function parseGenerationVectorBackendEnv(
   throw new Error(`环境变量 ${name} 不是有效的向量后端类型`);
 }
 
+function inferOpenAIProvider(baseUrl?: string): AIProviderPreset {
+  const normalizedBaseUrl = baseUrl?.trim().replace(/\/+$/u, '').toLowerCase() || '';
+
+  if (normalizedBaseUrl.includes('anthropic')) {
+    return 'claude_compatible';
+  }
+
+  return 'openai';
+}
+
 export function loadServerEnv(): ServerEnv {
   const port = Number(process.env.PORT ?? '3001');
 
@@ -124,6 +136,7 @@ export function loadServerEnv(): ServerEnv {
     port,
     host: process.env.HOST ?? '0.0.0.0',
     corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+    openaiProvider: inferOpenAIProvider(process.env.OPENAI_BASE_URL),
     openaiApiKey: process.env.OPENAI_API_KEY ?? '',
     openaiBaseUrl: process.env.OPENAI_BASE_URL?.trim() || undefined,
     defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',

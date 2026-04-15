@@ -11,11 +11,13 @@
     "test:e2e": "playwright test",
     "test:e2e:ai": "playwright test e2e/ai-continuation.spec.ts --reporter=line --workers=1",
     "test:e2e:export": "playwright test e2e/export.spec.ts --reporter=line --workers=1",
-    "test:e2e:records": "playwright test e2e/records-foreshadow.spec.ts --reporter=line --workers=1",
+    "test:e2e:records": "playwright test e2e/records-foreshadow.spec.ts e2e/inspiration-entry.spec.ts --reporter=line --workers=1",
+    "test:e2e:inspiration": "playwright test e2e/inspiration-entry.spec.ts --reporter=line --workers=1",
     "test:e2e:archive": "playwright test e2e/archive-import.spec.ts --reporter=line --workers=1",
     "test:e2e:graph": "playwright test e2e/graph-template.spec.ts --reporter=line --workers=1",
     "test:e2e:inspector": "playwright test e2e/inspector-context.spec.ts --reporter=line --workers=1",
-    "test:e2e:generation": "playwright test e2e/generation-maintenance.spec.ts e2e/generation-retrieval.spec.ts --reporter=line --workers=1",
+    "test:e2e:generation": "playwright test e2e/generation-maintenance.spec.ts e2e/generation-retrieval.spec.ts e2e/volume-plan-reconcile.spec.ts --reporter=line --workers=1",
+    "test:e2e:planning": "playwright test e2e/volume-plan-reconcile.spec.ts --reporter=line --workers=1",
     "test:e2e:retrieval": "playwright test e2e/generation-retrieval.spec.ts --reporter=line --workers=1"
   },
   "dependencies": {

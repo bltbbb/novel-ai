@@ -1,4 +1,9 @@
 import { richTextToPlainText } from '@/lib/editor-content';
+import {
+  CHARACTER_DYNAMIC_FIELD_DEFINITIONS,
+  CHARACTER_STATIC_FIELD_DEFINITIONS,
+  getLoreEntityMatchTerms,
+} from '@/lib/lore-entity';
 import { buildWritingRulesPrompt } from '@/lib/prompt-rules';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { estimateTextTokens } from '@/lib/token-counter';
@@ -24,6 +29,12 @@ export interface ContextAssemblerInput {
   writingRules?: string;
   maxReferences?: number;
 }
+
+const CONTEXT_ASSEMBLER_LIMITS = {
+  maxReferencesDefault: 8,
+  entityFieldPreviewMax: 4,
+  continueWritingTailChars: 3000,
+} as const;
 
 export interface ContextAssemblerResult {
   request: AIChatRequest;
@@ -67,9 +78,11 @@ function matchEntitiesByContent(content: string, entities: LoreEntity[]) {
   const normalizedContent = normalizeText(content);
 
   return entities.filter((entity) => {
-    const nameMatched = normalizedContent.includes(normalizeText(entity.name));
+    if (entity.draft) {
+      return false;
+    }
 
-    if (nameMatched) {
+    if (getLoreEntityMatchTerms(entity).some((term) => normalizedContent.includes(term))) {
       return true;
     }
 
@@ -80,16 +93,36 @@ function matchEntitiesByContent(content: string, entities: LoreEntity[]) {
 }
 
 function buildEntityReference(entity: LoreEntity): AIContextReference {
-  const fieldPreview = Object.entries(entity.fields)
-    .slice(0, 4)
+  const orderedFieldKeys =
+    entity.type === 'character'
+      ? [
+          ...CHARACTER_STATIC_FIELD_DEFINITIONS.map((item) => item.key),
+          ...CHARACTER_DYNAMIC_FIELD_DEFINITIONS.map((item) => item.key),
+          ...Object.keys(entity.fields),
+        ]
+      : Object.keys(entity.fields);
+  const seenFieldKeys = new Set<string>();
+  const fieldPreview = orderedFieldKeys
+    .filter((key) => {
+      if (seenFieldKeys.has(key)) {
+        return false;
+      }
+
+      seenFieldKeys.add(key);
+      return true;
+    })
+    .map((key) => [key, entity.fields[key]] as const)
+    .filter(([, value]) => typeof value !== 'undefined' && value !== null && String(value).trim())
+    .slice(0, CONTEXT_ASSEMBLER_LIMITS.entityFieldPreviewMax)
     .map(([key, value]) => `${key}：${String(value)}`)
     .join('；');
+  const aliasPreview = (entity.aliases ?? []).slice(0, 4).join('、');
 
   return {
     id: entity.id,
     label: entity.name,
     type: 'lore',
-    excerpt: [entity.description, fieldPreview].filter(Boolean).join('\n'),
+    excerpt: [entity.description, aliasPreview ? `别名：${aliasPreview}` : '', fieldPreview].filter(Boolean).join('\n'),
   };
 }
 
@@ -134,14 +167,18 @@ export function assembleChatContext(input: ContextAssemblerInput): ContextAssemb
   const plainText = richTextToPlainText(input.content);
   const searchResults = input.searchResults ?? [];
   const chapterReferences = searchResults.map(buildSearchReference);
-  const pinnedEntities = input.entities.filter((entity) => entity.pinned);
-  const matchedEntities = matchEntitiesByContent(plainText, input.entities);
+  const confirmedEntities = input.entities.filter((entity) => !entity.draft);
+  const pinnedEntities = confirmedEntities.filter((entity) => entity.pinned);
+  const matchedEntities = matchEntitiesByContent(plainText, confirmedEntities);
   const mergedEntities = deduplicateEntities([...pinnedEntities, ...matchedEntities]).slice(
     0,
-    input.maxReferences ?? 8,
+    input.maxReferences ?? CONTEXT_ASSEMBLER_LIMITS.maxReferencesDefault,
   );
   const loreReferences = mergedEntities.map(buildEntityReference);
-  const references = [...chapterReferences, ...loreReferences].slice(0, input.maxReferences ?? 8);
+  const references = [...chapterReferences, ...loreReferences].slice(
+    0,
+    input.maxReferences ?? CONTEXT_ASSEMBLER_LIMITS.maxReferencesDefault,
+  );
   const systemPrompt = buildSystemPrompt(input, references);
   const estimatedPromptTokens =
     estimateTextTokens(systemPrompt) +
@@ -173,7 +210,7 @@ export function createContinueWritingPrompt(chapterTitle: string, plainText: str
       '直接输出可以插入正文的后续内容，不要解释，不要使用 Markdown 标题。',
       '',
       '当前正文：',
-      plainText.slice(-3000),
+      plainText.slice(-CONTEXT_ASSEMBLER_LIMITS.continueWritingTailChars),
     ].join('\n');
   }
 

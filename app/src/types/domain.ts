@@ -5,6 +5,13 @@ export type Timestamp = string;
 
 export type ChapterStatus = 'draft' | 'first_draft' | 'revised' | 'published';
 export type ForeshadowStatus = 'planted' | 'activated' | 'resolved' | 'overdue';
+export type ThreadLedgerStatus = 'active' | 'dormant' | 'resolved';
+export type ForeshadowPlanImportance = 'major' | 'minor';
+export type QuestionPoolStatus = 'open' | 'partial' | 'answered';
+export type AntagonistAgendaStatus = 'active' | 'defeated' | 'dormant';
+export type ResourceContinuityStatus = 'active' | 'recovered' | 'permanent';
+export type ResourceContinuityRiskLevel = 'critical' | 'high' | 'medium' | 'low';
+export type StructureMemorySyncStatus = 'synced' | 'pending_push' | 'sync_error';
 export type SnapshotSource = 'manual' | 'ai_continue';
 export type IdeaCardSource = 'manual' | 'ai_output';
 export type StrandType = 'quest' | 'fire' | 'constellation';
@@ -177,11 +184,23 @@ export interface Volume {
   updatedAt: Timestamp;
 }
 
+export interface BookCharacterArcDraft {
+  characterId: Id | null;
+  characterName: string;
+  arc: string;
+}
+
 export interface BookOutlineFields {
   premise: string;
   centralConflict: string;
   protagonistArc: string;
   thematicCore: string;
+  subPlots: string[];
+  characterArcs: BookCharacterArcDraft[];
+  powerSystem: string;
+  antagonistSystem: string;
+  narrativeArc: string;
+  logline: string;
   worldRules: string[];
   endgameHint: string;
   toneGuide: string;
@@ -201,10 +220,21 @@ export interface VolumeMilestoneDraft {
   phaseConflict: string;
   entryState: string;
   exitState: string;
+  phasePacing: string;
+  phaseEmotionShift: string;
+  phasePOV: string;
   keyTurns: string[];
   mustPlant: string[];
   mustPayoff: string[];
   powerCeiling: string;
+  requiredEntities?: string[];
+  requiredForeshadows?: string[];
+}
+
+export interface VolumeInheritedThreadDraft {
+  threadId: Id | null;
+  threadName: string;
+  note: string;
 }
 
 export interface VolumeOutlineFields {
@@ -213,8 +243,17 @@ export interface VolumeOutlineFields {
   arcSummary: string;
   entryState: string;
   exitState: string;
+  antagonist: string;
+  subPlot: string;
+  inheritedThreads: VolumeInheritedThreadDraft[];
+  protagonistGrowth: string;
+  emotionalArc: string;
+  estimatedWordCount: number;
+  povPlan: string;
   keyEvents: string[];
   foreshadowSeeds: string[];
+  requiredEntities?: string[];
+  requiredForeshadows?: string[];
   estimatedChapterCount: number;
   milestones: VolumeMilestoneDraft[];
 }
@@ -232,6 +271,8 @@ export interface ChapterBeatFields {
   titleHint: string;
   scenePurpose: string;
   focusCharacter: string;
+  mustAppearCharacters?: string[];
+  availableCharacters?: string[];
   mainPlot: string;
   subPlot: string;
   pacing: string;
@@ -262,6 +303,26 @@ export interface LoreEntity {
   fields: LoreEntityFields;
   tags: string[];
   pinned: boolean;
+  aliases?: string[];
+  draft?: boolean;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface EntityRelation {
+  id: Id;
+  projectId: Id;
+  sourceEntityId: Id;
+  targetEntityId: Id;
+  sourceEntityName: string;
+  targetEntityName: string;
+  relationType: string;
+  origin: string;
+  description: string;
+  currentStance: string;
+  currentIntensity: number;
+  stanceReason: string;
+  draft: boolean;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -361,6 +422,268 @@ export interface StrandTracker {
   updatedAt: Timestamp;
 }
 
+export interface ThreadLedger {
+  id: Id;
+  projectId: Id;
+  name: string;
+  type: string;
+  coreQuestion: string;
+  currentPhase: string;
+  lastProgressAt: string;
+  lastProgressChapterId: Id | null;
+  lastProgressChapterTitle: string;
+  lastProgressChapterOrder: number | null;
+  nextTrigger: string;
+  blockedBy: string;
+  relatedCharacterIds: Id[];
+  relatedCharacterNames: string[];
+  relatedForeshadowIds: Id[];
+  relatedForeshadowTitles: string[];
+  plannedResolveVolume: number | null;
+  status: ThreadLedgerStatus;
+  audienceHeat: number;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ThreadLedgerAlert {
+  threadLedgerId: Id;
+  projectId: Id;
+  name: string;
+  lastProgressAt: string;
+  lastProgressChapterOrder: number | null;
+  currentChapterOrder: number;
+  overdueChapterCount: number;
+  staleChapterGap: number;
+  message: string;
+}
+
+export interface ForeshadowPlan {
+  id: Id;
+  projectId: Id;
+  foreshadowId: Id;
+  foreshadowTitle: string;
+  type: string;
+  importance: ForeshadowPlanImportance;
+  plannedActivateVolume: number | null;
+  plannedResolveVolume: number | null;
+  activationCondition: string;
+  resolveCondition: string;
+  dependsOnForeshadowIds: Id[];
+  dependsOnForeshadowTitles: string[];
+  dependsOnEventKeys: string[];
+  relatedQuestionIds: Id[];
+  payoffEffect: string;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ForeshadowPlanAlert {
+  foreshadowPlanId: Id;
+  projectId: Id;
+  foreshadowId: Id;
+  foreshadowTitle: string;
+  plannedResolveVolume: number | null;
+  currentVolumeOrder: number;
+  overdueVolumeCount: number;
+  message: string;
+}
+
+export interface WorldStateEntry {
+  id: Id;
+  projectId: Id;
+  volumeId: Id;
+  volumeTitle: string;
+  volumeOrder: number;
+  milestoneIndex: number | null;
+  publicEvents: string[];
+  secretEvents: string[];
+  powerBalanceChange: string;
+  institutionChange: string;
+  ruleChange: string;
+  rumorState: string;
+  knownByCharacterIds: Id[];
+  knownByCharacterNames: string[];
+  currentRisks: string[];
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface QuestionPool {
+  id: Id;
+  projectId: Id;
+  question: string;
+  firstRaisedChapterId: Id | null;
+  firstRaisedAt: string;
+  belongsToThreadId: Id | null;
+  belongsToThreadName: string;
+  currentClue: string;
+  falseAnswers: string[];
+  expectedRevealWindow: string;
+  finalAnswerSummary: string;
+  status: QuestionPoolStatus;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface QuestionPoolAlert {
+  questionPoolId: Id;
+  projectId: Id;
+  question: string;
+  expectedRevealWindow: string;
+  currentVolumeOrder: number | null;
+  overdueVolumeCount: number;
+  message: string;
+}
+
+export interface AntagonistAgenda {
+  id: Id;
+  projectId: Id;
+  characterEntityId: Id | null;
+  characterName: string;
+  publicRole: string;
+  hiddenAgenda: string;
+  currentObjective: string;
+  currentAction: string;
+  triggerToStrike: string;
+  bottomLine: string;
+  resourceBase: string;
+  nextMoveWindow: string;
+  intelligenceBlindSpot: string;
+  ifProtagonistDoesNothing: string;
+  status: AntagonistAgendaStatus;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface POVPermission {
+  id: Id;
+  projectId: Id;
+  volumeId: Id | null;
+  volumeTitle: string;
+  milestoneIndex: number | null;
+  chapterId: Id | null;
+  chapterTitle: string;
+  povCharacterId: Id | null;
+  povCharacterName: string;
+  readerKnows: string[];
+  protagonistKnows: string[];
+  antagonistKnows: string[];
+  mustHide: string[];
+  canHint: string[];
+  forbiddenReveal: string[];
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export interface ResourceContinuity {
+  id: Id;
+  projectId: Id;
+  resourceType: string;
+  ownerCharacterId: Id | null;
+  ownerCharacterName: string;
+  currentState: string;
+  performanceImpact: string;
+  lastConsumedAt: string;
+  recoveryCondition: string;
+  hiddenCost: string;
+  continuityRisk: string;
+  status: ResourceContinuityStatus;
+  riskLevel: ResourceContinuityRiskLevel;
+  createdAt: Timestamp;
+  updatedAt: Timestamp;
+}
+
+export type StructureMemorySystemKey =
+  | 'thread_ledger'
+  | 'foreshadow_plan'
+  | 'world_state_entry'
+  | 'question_pool'
+  | 'antagonist_agenda'
+  | 'pov_permission'
+  | 'resource_continuity';
+
+export type StructureMemoryBackfillSystem =
+  | 'thread_ledger'
+  | 'question_pool'
+  | 'world_state_entry'
+  | 'resource_continuity';
+
+export interface StructureMemoryBackfillEvidence {
+  sourceType: 'volume_recap' | 'chapter_summary' | 'state_change' | 'foreshadow' | 'generated_text';
+  sourceLabel: string;
+  excerpt: string;
+}
+
+export interface StructureMemoryBackfillCandidate {
+  candidateId: Id;
+  system: StructureMemoryBackfillSystem;
+  status: 'new' | 'existing';
+  title: string;
+  scopeLabel: string;
+  summary: string;
+  evidence: StructureMemoryBackfillEvidence[];
+}
+
+export interface StructureMemoryBackfillSystemCount {
+  system: StructureMemoryBackfillSystem;
+  total: number;
+  newCount: number;
+  existingCount: number;
+}
+
+export interface StructureMemoryBackfillPreviewResult {
+  projectId: Id;
+  generatedAt: Timestamp;
+  totalCandidates: number;
+  newCandidates: number;
+  existingCandidates: number;
+  counts: StructureMemoryBackfillSystemCount[];
+  candidates: StructureMemoryBackfillCandidate[];
+}
+
+export interface StructureMemoryBackfillApplyResult {
+  projectId: Id;
+  generatedAt: Timestamp;
+  requestedCandidateCount: number;
+  createdCount: number;
+  skippedExistingCount: number;
+  counts: Array<{
+    system: StructureMemoryBackfillSystem;
+    requestedCount: number;
+    createdCount: number;
+    skippedExistingCount: number;
+  }>;
+  createdRecordIds: Id[];
+}
+
+export type StructureMemoryGuardTrigger =
+  | 'project_scan'
+  | 'chapter_completed'
+  | 'volume_completed'
+  | 'structure_memory_updated';
+
+export type StructureMemoryGuardAlertSeverity = 'high' | 'medium' | 'low';
+
+export interface StructureMemoryGuardAlert {
+  id: Id;
+  ruleKey: string;
+  trigger: StructureMemoryGuardTrigger;
+  severity: StructureMemoryGuardAlertSeverity;
+  title: string;
+  message: string;
+  evidence: string;
+  targetSystem: StructureMemorySystemKey;
+  targetRecordId: Id | null;
+}
+
+export interface StructureMemoryGuardAlertResult {
+  projectId: Id;
+  scannedAt: Timestamp;
+  trigger: StructureMemoryGuardTrigger;
+  items: StructureMemoryGuardAlert[];
+}
+
 export interface GenerationQueueOutline {
   goal: string;
   obstacle: string;
@@ -445,6 +768,7 @@ export interface ProjectArchive {
   project: Project;
   chapters: Chapter[];
   entities: LoreEntity[];
+  entityRelations?: EntityRelation[];
   foreshadows: Foreshadow[];
   snapshots: Snapshot[];
   ideaCards: IdeaCard[];

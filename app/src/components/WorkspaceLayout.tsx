@@ -250,6 +250,7 @@ export function WorkspaceLayout({
               projectDescription={projectDescription}
               onOpenAdvancedConsole={onOpenAdvancedGeneration}
               onOpenEditor={() => setActiveTab('editor')}
+              onOpenOutline={() => setActiveTab('outline')}
             />
           ) : (
             <EditorView

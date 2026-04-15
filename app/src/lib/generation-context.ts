@@ -68,6 +68,7 @@ function buildForeshadowSection(foreshadows: Foreshadow[], chapterTitleMap: Map<
 }
 
 export async function buildGenerationContextBundle(input: GenerationContextBundleInput) {
+  const confirmedEntities = input.entities.filter((entity) => !entity.draft);
   const sortedChapters = [...input.chapters].sort((left, right) => left.order - right.order);
   const currentIndex = sortedChapters.findIndex((chapter) => chapter.id === input.currentChapterId);
   const previousChapters =
@@ -90,7 +91,7 @@ export async function buildGenerationContextBundle(input: GenerationContextBundl
   const activeForeshadows = foreshadows
     .filter((foreshadow) => foreshadow.status === 'activated' || foreshadow.status === 'overdue')
     .slice(0, 8);
-  const worldState = buildWorldStateSummary(input.entities);
+  const worldState = buildWorldStateSummary(confirmedEntities);
 
   const sections = [
     worldState ? `当前世界状态快照：\n${worldState}` : '',

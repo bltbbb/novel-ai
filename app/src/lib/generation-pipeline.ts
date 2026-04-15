@@ -1,5 +1,7 @@
 import { buildGenerationContextBundle } from '@/lib/generation-context';
+import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { DEFAULT_GENERATION_GATE_CONFIG, normalizeGenerationGateConfig } from '@/lib/generation-gate-defaults';
+import { collectPlanningRequirements } from '@/lib/planning-requirements';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import {
   checkChapterLanguageQa,
@@ -19,6 +21,7 @@ import type {
   ChapterOutlineDraft,
   ChapterPolishDraft,
   ChapterReviewDraft,
+  GenerationRelationSnapshot,
   ChapterStyleDraft,
   ChapterSummaryDraft,
   GenerationGateConfig,
@@ -28,6 +31,7 @@ import type {
   ReviewSeverity,
   StateChangeDraft,
   StrandType,
+  VolumeOutlineFields,
 } from '@/types';
 
 export type GenerationPipelineStage =
@@ -54,10 +58,16 @@ interface RunGenerationPipelineInput {
   projectDescription?: string;
   settings: AppSettings;
   worldState: string;
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   bookOutline?: string;
   volumeOutline?: string;
+  volumeOutlineDraft?: VolumeOutlineFields | null;
   volumeGoal?: string;
   chapterBeat?: string;
+  milestoneIndex?: number | null;
   nextChapterPreview?: string;
   forbiddenZone?: string;
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
@@ -102,6 +112,16 @@ const REVIEW_SEVERITY_WEIGHTS: Record<ReviewSeverity, number> = {
   medium: 2,
   low: 1,
 };
+
+function dedupeTextList(values: Array<string | undefined>) {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value?.trim() ?? '')
+        .filter(Boolean),
+    ),
+  );
+}
 
 function getReviewSeverityWeight(severity: ReviewSeverity) {
   return REVIEW_SEVERITY_WEIGHTS[severity] ?? REVIEW_SEVERITY_WEIGHTS.low;
@@ -209,6 +229,25 @@ export async function runGenerationPipeline(
     .filter(Boolean)
     .join('\n\n');
   const effectiveGateConfig = normalizeGenerationGateConfig(input.gateConfig ?? DEFAULT_GENERATION_GATE_CONFIG);
+  const derivedPlanningRequirements = collectPlanningRequirements({
+    volumeOutline: input.volumeOutlineDraft,
+    milestoneIndex: input.milestoneIndex ?? undefined,
+  });
+  const planningRequirements = {
+    requiredEntityNames: dedupeTextList([
+      ...(input.requiredEntityNames ?? []),
+      ...derivedPlanningRequirements.requiredEntityNames,
+    ]),
+    availableCharacterNames: dedupeTextList([
+      ...(input.availableCharacterNames ?? []),
+      ...derivedPlanningRequirements.availableCharacterNames,
+    ]),
+    requiredForeshadowTitles: dedupeTextList([
+      ...(input.requiredForeshadowTitles ?? []),
+      ...derivedPlanningRequirements.requiredForeshadowTitles,
+    ]),
+  };
+  const entitySnapshot = buildGenerationEntitySnapshot(input.entities);
 
   await input.onStageChange?.({
     stage: 'plan',
@@ -237,6 +276,11 @@ export async function runGenerationPipeline(
           previousSummary,
           worldState: input.worldState,
           contextBundle: mergedContextBundle,
+          entitySnapshot,
+          relationSnapshot: input.relationSnapshot,
+          requiredEntityNames: planningRequirements.requiredEntityNames,
+          availableCharacterNames: planningRequirements.availableCharacterNames,
+          requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
           foreshadowSnapshot: input.foreshadowSnapshot,
           gateConfigOverride: effectiveGateConfig,
           ...buildModelRequestConfig(input.settings),
@@ -296,6 +340,11 @@ export async function runGenerationPipeline(
         worldState: input.worldState,
         rewriteGuidance: rewriteGuidance || undefined,
         contextBundle: mergedContextBundle,
+        entitySnapshot,
+        relationSnapshot: input.relationSnapshot,
+        requiredEntityNames: planningRequirements.requiredEntityNames,
+        availableCharacterNames: planningRequirements.availableCharacterNames,
+        requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
         foreshadowSnapshot: input.foreshadowSnapshot,
         gateConfigOverride: effectiveGateConfig,
         ...buildModelRequestConfig(input.settings),
@@ -328,6 +377,11 @@ export async function runGenerationPipeline(
         previousSummary,
         worldState: input.worldState,
         contextBundle: mergedContextBundle,
+        entitySnapshot,
+        relationSnapshot: input.relationSnapshot,
+        requiredEntityNames: planningRequirements.requiredEntityNames,
+        availableCharacterNames: planningRequirements.availableCharacterNames,
+        requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
         foreshadowSnapshot: input.foreshadowSnapshot,
         gateConfigOverride: effectiveGateConfig,
         stylePrompt: input.settings.stylePrompt,
@@ -363,6 +417,11 @@ export async function runGenerationPipeline(
       previousSummary,
       worldState: input.worldState,
       contextBundle: mergedContextBundle,
+      entitySnapshot,
+      relationSnapshot: input.relationSnapshot,
+      requiredEntityNames: planningRequirements.requiredEntityNames,
+      availableCharacterNames: planningRequirements.availableCharacterNames,
+      requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
       foreshadowSnapshot: input.foreshadowSnapshot,
       gateConfigOverride: effectiveGateConfig,
       content: generatedText,
@@ -391,6 +450,11 @@ export async function runGenerationPipeline(
       previousSummary,
       worldState: input.worldState,
       contextBundle: mergedContextBundle,
+      entitySnapshot,
+      relationSnapshot: input.relationSnapshot,
+      requiredEntityNames: planningRequirements.requiredEntityNames,
+      availableCharacterNames: planningRequirements.availableCharacterNames,
+      requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
       foreshadowSnapshot: input.foreshadowSnapshot,
       gateConfigOverride: effectiveGateConfig,
       content: generatedText,
@@ -443,6 +507,11 @@ export async function runGenerationPipeline(
       previousSummary,
       worldState: input.worldState,
       contextBundle: mergedContextBundle,
+      entitySnapshot,
+      relationSnapshot: input.relationSnapshot,
+      requiredEntityNames: planningRequirements.requiredEntityNames,
+      availableCharacterNames: planningRequirements.availableCharacterNames,
+      requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
       foreshadowSnapshot: input.foreshadowSnapshot,
       review: reviewResponse.review,
       languageQa: languageQaResponse.languageQa,

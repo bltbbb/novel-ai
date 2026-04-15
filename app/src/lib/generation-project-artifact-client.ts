@@ -1,12 +1,13 @@
 import { db } from '@/lib/db';
 import { richTextToPlainText } from '@/lib/editor-content';
+import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
+import { buildGenerationRelationSnapshot } from '@/lib/generation-relation-snapshot';
 import { rebuildProjectGenerationArtifacts } from '@/lib/generation-debug-client';
 import type {
   Chapter,
   ChapterOutline,
   ChapterOutlineDraft,
-  GenerationEntitySnapshot,
   GenerationProjectArtifactRebuildRequest,
 } from '@/types';
 
@@ -40,19 +41,6 @@ function normalizeOutlineDraft(outline: ChapterOutline | ChapterOutlineDraft): C
   };
 }
 
-function buildEntitySnapshot(entities: GenerationEntitySnapshot[]) {
-  return entities
-    .map((entity) => ({
-      name: entity.name.trim(),
-      type: entity.type,
-      description: entity.description,
-      fields: entity.fields,
-      tags: [...entity.tags],
-      pinned: entity.pinned,
-    }))
-    .filter((entity) => entity.name);
-}
-
 export async function buildProjectArtifactRebuildRequest(
   projectId: string,
 ): Promise<GenerationProjectArtifactRebuildRequest> {
@@ -63,6 +51,7 @@ export async function buildProjectArtifactRebuildRequest(
     stateChanges,
     queueItems,
     entities,
+    entityRelations,
     foreshadows,
   ] = await Promise.all([
     db.chapters.where('projectId').equals(projectId).toArray(),
@@ -71,6 +60,7 @@ export async function buildProjectArtifactRebuildRequest(
     db.stateChanges.where('projectId').equals(projectId).toArray(),
     db.generationQueue.where('projectId').equals(projectId).toArray(),
     db.entities.where('projectId').equals(projectId).toArray(),
+    db.entityRelations.where('projectId').equals(projectId).toArray(),
     db.foreshadows.where('projectId').equals(projectId).toArray(),
   ]);
 
@@ -122,16 +112,8 @@ export async function buildProjectArtifactRebuildRequest(
         languageQa: queueItem?.languageQa ?? null,
       };
     }),
-    entitySnapshot: buildEntitySnapshot(
-      entities.map((entity) => ({
-        name: entity.name,
-        type: entity.type,
-        description: entity.description,
-        fields: entity.fields,
-        tags: entity.tags,
-        pinned: entity.pinned,
-      })),
-    ),
+    entitySnapshot: buildGenerationEntitySnapshot(entities),
+    relationSnapshot: buildGenerationRelationSnapshot(entityRelations),
     foreshadowSnapshot: buildGenerationForeshadowSnapshot(foreshadows, chapters),
   };
 }

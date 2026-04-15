@@ -23,12 +23,40 @@ interface OutlineStoreState {
   getBookOutline: (projectId: Id) => Promise<BookOutline | undefined>;
 }
 
-function normalizeText(value: string) {
-  return value.trim();
+function normalizeText(value: string | undefined | null) {
+  return value?.trim() ?? '';
 }
 
 function normalizeTextList(values: string[]) {
   return values.map((value) => value.trim()).filter(Boolean);
+}
+
+function normalizeOptionalTextList(values: string[] | undefined) {
+  return normalizeTextList(values ?? []);
+}
+
+function normalizeBookCharacterArcs(
+  values: BookOutlineFields['characterArcs'] | undefined,
+): BookOutlineFields['characterArcs'] {
+  return (values ?? [])
+    .map((item) => ({
+      characterId: item.characterId ?? null,
+      characterName: normalizeText(item.characterName),
+      arc: normalizeText(item.arc),
+    }))
+    .filter((item) => item.characterName || item.arc);
+}
+
+function normalizeVolumeInheritedThreads(
+  values: VolumeOutlineFields['inheritedThreads'] | undefined,
+): VolumeOutlineFields['inheritedThreads'] {
+  return (values ?? [])
+    .map((item) => ({
+      threadId: item.threadId ?? null,
+      threadName: normalizeText(item.threadName),
+      note: normalizeText(item.note),
+    }))
+    .filter((item) => item.threadName || item.note);
 }
 
 function normalizePositiveInteger(value: number, fallback = 0) {
@@ -48,10 +76,15 @@ function normalizeVolumeMilestones(milestones: VolumeMilestoneDraft[] | undefine
       phaseConflict: normalizeText(milestone.phaseConflict),
       entryState: normalizeText(milestone.entryState),
       exitState: normalizeText(milestone.exitState),
+      phasePacing: normalizeText(milestone.phasePacing),
+      phaseEmotionShift: normalizeText(milestone.phaseEmotionShift),
+      phasePOV: normalizeText(milestone.phasePOV),
       keyTurns: normalizeTextList(milestone.keyTurns),
       mustPlant: normalizeTextList(milestone.mustPlant),
       mustPayoff: normalizeTextList(milestone.mustPayoff),
       powerCeiling: normalizeText(milestone.powerCeiling),
+      requiredEntities: normalizeOptionalTextList(milestone.requiredEntities),
+      requiredForeshadows: normalizeOptionalTextList(milestone.requiredForeshadows),
     }))
     .filter(
       (milestone) =>
@@ -60,9 +93,14 @@ function normalizeVolumeMilestones(milestones: VolumeMilestoneDraft[] | undefine
         milestone.phaseConflict ||
         milestone.entryState ||
         milestone.exitState ||
+        milestone.phasePacing ||
+        milestone.phaseEmotionShift ||
+        milestone.phasePOV ||
         milestone.keyTurns.length > 0 ||
         milestone.mustPlant.length > 0 ||
         milestone.mustPayoff.length > 0 ||
+        milestone.requiredEntities.length > 0 ||
+        milestone.requiredForeshadows.length > 0 ||
         milestone.powerCeiling ||
         milestone.targetChapterCount > 0,
     );
@@ -74,6 +112,12 @@ function normalizeBookOutlineFields(fields: BookOutlineFields): BookOutlineField
     centralConflict: normalizeText(fields.centralConflict),
     protagonistArc: normalizeText(fields.protagonistArc),
     thematicCore: normalizeText(fields.thematicCore),
+    subPlots: normalizeTextList(fields.subPlots),
+    characterArcs: normalizeBookCharacterArcs(fields.characterArcs),
+    powerSystem: normalizeText(fields.powerSystem),
+    antagonistSystem: normalizeText(fields.antagonistSystem),
+    narrativeArc: normalizeText(fields.narrativeArc),
+    logline: normalizeText(fields.logline),
     worldRules: normalizeTextList(fields.worldRules),
     endgameHint: normalizeText(fields.endgameHint),
     toneGuide: normalizeText(fields.toneGuide),
@@ -87,10 +131,26 @@ function normalizeVolumeOutlineFields(fields: VolumeOutlineFields): VolumeOutlin
     arcSummary: normalizeText(fields.arcSummary),
     entryState: normalizeText(fields.entryState),
     exitState: normalizeText(fields.exitState),
+    antagonist: normalizeText(fields.antagonist),
+    subPlot: normalizeText(fields.subPlot),
+    inheritedThreads: normalizeVolumeInheritedThreads(fields.inheritedThreads),
+    protagonistGrowth: normalizeText(fields.protagonistGrowth),
+    emotionalArc: normalizeText(fields.emotionalArc),
+    estimatedWordCount: normalizePositiveInteger(fields.estimatedWordCount),
+    povPlan: normalizeText(fields.povPlan),
     keyEvents: normalizeTextList(fields.keyEvents),
     foreshadowSeeds: normalizeTextList(fields.foreshadowSeeds),
+    requiredEntities: normalizeOptionalTextList(fields.requiredEntities),
+    requiredForeshadows: normalizeOptionalTextList(fields.requiredForeshadows),
     estimatedChapterCount: normalizePositiveInteger(fields.estimatedChapterCount),
     milestones: normalizeVolumeMilestones(fields.milestones),
+  };
+}
+
+function normalizeBookOutlineRecord(outline: BookOutline): BookOutline {
+  return {
+    ...outline,
+    ...normalizeBookOutlineFields(outline),
   };
 }
 
@@ -116,10 +176,11 @@ export const useOutlineStore = create<OutlineStoreState>((set, get) => ({
       db.bookOutlines.where('projectId').equals(projectId).first(),
       db.volumeOutlines.where('projectId').equals(projectId).toArray(),
     ]);
+    const normalizedBookOutline = bookOutline ? normalizeBookOutlineRecord(bookOutline) : null;
     const volumeOutlines = rawVolumeOutlines.map(normalizeVolumeOutlineRecord);
 
     set({
-      bookOutline: bookOutline ?? null,
+      bookOutline: normalizedBookOutline,
       volumeOutlines: sortVolumeOutlines(volumeOutlines),
       loadedProjectId: projectId,
       isLoaded: true,
@@ -215,6 +276,6 @@ export const useOutlineStore = create<OutlineStoreState>((set, get) => ({
     }
 
     const outline = await db.bookOutlines.where('projectId').equals(projectId).first();
-    return outline ?? undefined;
+    return outline ? normalizeBookOutlineRecord(outline) : undefined;
   },
 }));

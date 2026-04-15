@@ -36,9 +36,12 @@ import {
   LIGHTWEIGHT_RECALL_PRESETS,
   normalizeGenerationGateConfig,
 } from '@/lib/generation-gate-defaults';
+import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
+import { buildGenerationRelationSnapshot } from '@/lib/generation-relation-snapshot';
 import { buildGenerationContextBundle } from '@/lib/generation-context';
 import { buildChapterPromptPayload } from '@/lib/generation-repetition';
+import { buildLoreEntityIdLookup } from '@/lib/lore-entity';
 import {
   approveGenerationJob,
   batchUpdateGenerationJobs,
@@ -68,7 +71,15 @@ import { getProjectStylePrompt } from '@/lib/project-style';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { buildWorldStateSummary, findPreviousChapter, getStrandLabel } from '@/lib/generation-utils';
-import { useEditorStore, useForeshadowStore, useLoreStore, useProjectStore, useSettingsStore, useSnapshotStore } from '@/stores';
+import {
+  useEditorStore,
+  useEntityRelationStore,
+  useForeshadowStore,
+  useLoreStore,
+  useProjectStore,
+  useSettingsStore,
+  useSnapshotStore,
+} from '@/stores';
 import type {
   ChapterOutlineDraft,
   ChapterOutline,
@@ -470,6 +481,8 @@ export function GenerationWorkspace({
   const chapters = useEditorStore((state) => state.chapters);
   const saveChapterContent = useEditorStore((state) => state.saveChapterContent);
   const entities = useLoreStore((state) => state.entities);
+  const entityRelations = useEntityRelationStore((state) => state.entityRelations);
+  const loadEntityRelations = useEntityRelationStore((state) => state.loadEntityRelations);
   const foreshadows = useForeshadowStore((state) => state.foreshadows);
   const foreshadowLoadedProjectId = useForeshadowStore((state) => state.loadedProjectId);
   const isForeshadowLoaded = useForeshadowStore((state) => state.isLoaded);
@@ -581,13 +594,11 @@ export function GenerationWorkspace({
     [chapters],
   );
   const entityIdMap = useMemo(
-    () =>
-      new Map(
-        entities.map((entity) => [entity.name.trim().toLowerCase(), entity.id] as const),
-      ),
+    () => buildLoreEntityIdLookup(entities),
     [entities],
   );
-  const worldState = useMemo(() => buildWorldStateSummary(entities), [entities]);
+  const confirmedEntities = useMemo(() => entities.filter((entity) => !entity.draft), [entities]);
+  const worldState = useMemo(() => buildWorldStateSummary(confirmedEntities), [confirmedEntities]);
 
   async function getOutlinePromptPayload(chapterId: Id) {
     const chapter = chapters.find((item) => item.id === chapterId);
@@ -600,6 +611,16 @@ export function GenerationWorkspace({
         chapterBeat: undefined,
         nextChapterPreview: undefined,
         forbiddenZone: undefined,
+        requiredEntityNames: [],
+        availableCharacterNames: [],
+        requiredForeshadowTitles: [],
+        currentChapterBeat: null,
+        nextChapterBeat: null,
+        automaticForbiddenZone: {
+          phrases: [],
+          actionPatterns: [],
+          scenePatterns: [],
+        },
       };
     }
 
@@ -661,6 +682,14 @@ export function GenerationWorkspace({
           chapters,
         )
       : undefined;
+  const currentRelationSnapshot = useMemo(
+    () => buildGenerationRelationSnapshot(entityRelations.filter((relation) => relation.projectId === projectId)),
+    [entityRelations, projectId],
+  );
+
+  useEffect(() => {
+    void loadEntityRelations(projectId);
+  }, [loadEntityRelations, projectId]);
 
   useEffect(() => {
     if (chapters.length === 0) {
@@ -1162,6 +1191,10 @@ export function GenerationWorkspace({
           previousSummary: previousSummary?.summary ?? '',
           worldState,
           contextBundle: buildTemplateContextBundle(contextBundle.bundle),
+          relationSnapshot: currentRelationSnapshot,
+          requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+          availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+          requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
           foreshadowSnapshot: currentForeshadowSnapshot,
           ...buildModelRequestConfig(settings),
         });
@@ -1228,19 +1261,16 @@ export function GenerationWorkspace({
             previousSummary: previousSummary?.summary ?? '',
             worldState,
             contextBundle: buildTemplateContextBundle(contextBundle.bundle),
+            requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+            availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+            requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
             stylePrompt: effectiveStylePrompt.trim() || undefined,
             ...buildModelRequestConfig(settings),
             priority: orderedChapters.length - index,
             gateConfigOverride: currentProject?.generationGateOverride ?? null,
             outlineOverride: savedOutline ? createOutlineDraft(savedOutline) : null,
-            entitySnapshot: entities.map((entity) => ({
-              name: entity.name,
-              type: entity.type,
-              description: entity.description,
-              fields: entity.fields,
-              tags: entity.tags,
-              pinned: entity.pinned,
-            })),
+            entitySnapshot: buildGenerationEntitySnapshot(entities),
+            relationSnapshot: currentRelationSnapshot,
             foreshadowSnapshot: currentForeshadowSnapshot,
           };
         }),

@@ -3,9 +3,11 @@ import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import type { ServerEnv } from '../config/env.js';
 import { buildWritingRulesPrompt, WRITING_RULES_MARKER } from '../prompts/index.js';
-import type { AIChatRequest, AIRuntimeModelOption, AIReasoningEffort } from '../types/ai.js';
+import type { AIChatRequest, AIRuntimeModelOption, AIProviderPreset, AIReasoningEffort } from '../types/ai.js';
 
 const OPENAI_REQUEST_TIMEOUT_MS = 60 * 60 * 1000;
+const CLAUDE_API_VERSION = '2023-06-01';
+const CLAUDE_MAX_OUTPUT_TOKENS = 4096;
 
 function hasWritingRules(systemPrompt?: string) {
   return Boolean(systemPrompt?.includes(WRITING_RULES_MARKER));
@@ -60,6 +62,32 @@ function buildMessages(env: ServerEnv, request: AIChatRequest): ChatCompletionMe
   }
 
   return messages;
+}
+
+function buildClaudeSystemMessage(env: ServerEnv, request: AIChatRequest) {
+  const parts: string[] = [];
+  const baseSystemMessage = buildSystemMessage(env, request);
+
+  if (baseSystemMessage) {
+    parts.push(baseSystemMessage);
+  }
+
+  for (const message of request.messages) {
+    if (message.role === 'system' && message.content.trim()) {
+      parts.push(message.content.trim());
+    }
+  }
+
+  return parts.join('\n\n').trim();
+}
+
+function buildClaudeMessages(request: AIChatRequest) {
+  return request.messages
+    .filter((message) => message.role !== 'system' && message.content.trim())
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: message.content,
+    }));
 }
 
 function buildMissingChoicesErrorDetails(input: {
@@ -359,6 +387,283 @@ function buildChatCompletionRequest(
   return chatRequest;
 }
 
+function isClaudeCompatibleProvider(env: ServerEnv) {
+  return env.openaiProvider === 'claude_compatible';
+}
+
+function supportsClaudeEffort(model: string) {
+  const normalizedModel = model.trim().toLowerCase();
+
+  return (
+    normalizedModel.includes('claude-mythos') ||
+    normalizedModel.includes('claude-opus-4-6') ||
+    normalizedModel.includes('claude-sonnet-4-6') ||
+    normalizedModel.includes('claude-opus-4-5')
+  );
+}
+
+function resolveClaudeEffort(
+  model: string,
+  reasoningEffort?: AIReasoningEffort,
+) {
+  if (!reasoningEffort || !supportsClaudeEffort(model)) {
+    return undefined;
+  }
+
+  if (
+    reasoningEffort === 'none' ||
+    reasoningEffort === 'minimal' ||
+    reasoningEffort === 'low'
+  ) {
+    return 'low' as const;
+  }
+
+  if (reasoningEffort === 'medium') {
+    return 'medium' as const;
+  }
+
+  if (reasoningEffort === 'xhigh') {
+    return 'max' as const;
+  }
+
+  return 'high' as const;
+}
+
+function buildClaudeMessagesRequest(
+  env: ServerEnv,
+  request: AIChatRequest,
+  resolvedModel: string,
+  stream: boolean,
+) {
+  const system = buildClaudeSystemMessage(env, request);
+  const effort = resolveClaudeEffort(resolvedModel, request.reasoningEffort);
+
+  return {
+    model: resolvedModel,
+    temperature: request.temperature,
+    max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
+    messages: buildClaudeMessages(request),
+    stream,
+    ...(system ? { system } : {}),
+    ...(effort ? { output_config: { effort } } : {}),
+  };
+}
+
+function getClaudeMessagesUrl(env: ServerEnv) {
+  return `${(env.openaiBaseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/u, '')}/messages`;
+}
+
+async function createClaudeMessagesResponse(
+  env: ServerEnv,
+  request: AIChatRequest,
+  resolvedModel: string,
+  stream: boolean,
+) {
+  const response = await fetch(getClaudeMessagesUrl(env), {
+    method: 'POST',
+    headers: {
+      'x-api-key': env.openaiApiKey,
+      'anthropic-version': CLAUDE_API_VERSION,
+      'Content-Type': 'application/json',
+      Accept: stream ? 'text/event-stream' : 'application/json',
+    },
+    body: JSON.stringify(buildClaudeMessagesRequest(env, request, resolvedModel, stream)),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Claude Messages 请求失败：${response.status} ${errorText}`);
+  }
+
+  return response;
+}
+
+async function parseClaudeMessagesResponse(response: Response) {
+  return await response.json() as {
+    content?: unknown;
+    stop_reason?: unknown;
+    error?: {
+      message?: unknown;
+    };
+  };
+}
+
+function extractClaudeErrorMessage(payload: unknown) {
+  if (!payload || typeof payload !== 'object') {
+    return '';
+  }
+
+  const error = (payload as { error?: unknown }).error;
+
+  if (!error || typeof error !== 'object') {
+    return '';
+  }
+
+  return typeof (error as { message?: unknown }).message === 'string'
+    ? (error as { message: string }).message.trim()
+    : '';
+}
+
+function toPseudoOpenAIStreamPart(text: string) {
+  return {
+    choices: [
+      {
+        delta: {
+          content: text,
+        },
+      },
+    ],
+  };
+}
+
+function findSseEventDelimiter(buffer: string) {
+  const crlfIndex = buffer.indexOf('\r\n\r\n');
+
+  if (crlfIndex !== -1) {
+    return {
+      index: crlfIndex,
+      length: 4,
+    };
+  }
+
+  const lfIndex = buffer.indexOf('\n\n');
+
+  if (lfIndex !== -1) {
+    return {
+      index: lfIndex,
+      length: 2,
+    };
+  }
+
+  return null;
+}
+
+function parseClaudeStreamDelta(rawEvent: string) {
+  const dataLines = rawEvent
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter(Boolean);
+
+  if (dataLines.length === 0) {
+    return '';
+  }
+
+  const rawData = dataLines.join('\n');
+
+  if (rawData === '[DONE]') {
+    return '';
+  }
+
+  const payload = JSON.parse(rawData) as Record<string, unknown>;
+
+  if (payload.type === 'error') {
+    throw new Error(extractClaudeErrorMessage(payload) || 'Claude 流式响应返回错误事件');
+  }
+
+  if (payload.type !== 'content_block_delta') {
+    return '';
+  }
+
+  const delta = payload.delta && typeof payload.delta === 'object'
+    ? payload.delta as Record<string, unknown>
+    : null;
+
+  if (delta?.type !== 'text_delta' || typeof delta.text !== 'string') {
+    return '';
+  }
+
+  return delta.text;
+}
+
+async function* streamClaudeMessages(
+  env: ServerEnv,
+  request: AIChatRequest,
+  resolvedModel: string,
+) {
+  const response = await createClaudeMessagesResponse(env, request, resolvedModel, true);
+
+  if (!response.body) {
+    throw new Error('Claude 流式响应缺少响应体');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const delimiter = findSseEventDelimiter(buffer);
+
+        if (!delimiter) {
+          break;
+        }
+
+        const rawEvent = buffer.slice(0, delimiter.index).trim();
+        buffer = buffer.slice(delimiter.index + delimiter.length);
+
+        if (!rawEvent) {
+          continue;
+        }
+
+        const textDelta = parseClaudeStreamDelta(rawEvent);
+
+        if (textDelta) {
+          yield toPseudoOpenAIStreamPart(textDelta);
+        }
+      }
+    }
+
+    const tail = buffer.trim();
+
+    if (tail) {
+      const textDelta = parseClaudeStreamDelta(tail);
+
+      if (textDelta) {
+        yield toPseudoOpenAIStreamPart(textDelta);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function completeClaudeMessages(
+  env: ServerEnv,
+  request: AIChatRequest,
+  resolvedModel: string,
+) {
+  const response = await createClaudeMessagesResponse(env, request, resolvedModel, false);
+  const payload = await parseClaudeMessagesResponse(response);
+  const errorMessage = extractClaudeErrorMessage(payload);
+
+  if (errorMessage) {
+    throw new Error(`Claude Messages 请求失败：${errorMessage}`);
+  }
+
+  const content = extractTextContent(payload.content).trim();
+
+  if (!content) {
+    throw new Error(
+      `Claude Messages 响应未返回可用文本内容。上下文：${JSON.stringify({
+        model: resolvedModel,
+        stopReason: typeof payload.stop_reason === 'string' ? payload.stop_reason : '',
+      })}`,
+    );
+  }
+
+  return content;
+}
+
 function createOpenAIClientByConfig(apiKey: string, baseURL?: string) {
   return new OpenAI({
     apiKey,
@@ -436,8 +741,13 @@ async function createZhipuEmbeddings(
 }
 
 export async function streamChatCompletion(env: ServerEnv, request: AIChatRequest) {
-  const client = createOpenAIClient(env);
   const resolvedModel = request.model || env.defaultModel;
+
+  if (isClaudeCompatibleProvider(env)) {
+    return streamClaudeMessages(env, request, resolvedModel);
+  }
+
+  const client = createOpenAIClient(env);
   const stream = await client.chat.completions.create(
     buildChatCompletionRequest(env, request, resolvedModel, true) as any,
   ) as unknown as AsyncIterable<any>;
@@ -457,8 +767,13 @@ export async function streamChatCompletion(env: ServerEnv, request: AIChatReques
 }
 
 export async function completeChatCompletion(env: ServerEnv, request: AIChatRequest) {
-  const client = createOpenAIClient(env);
   const resolvedModel = request.model || env.defaultModel;
+
+  if (isClaudeCompatibleProvider(env)) {
+    return completeClaudeMessages(env, request, resolvedModel);
+  }
+
+  const client = createOpenAIClient(env);
   const completion = await client.chat.completions.create(
     buildChatCompletionRequest(env, request, resolvedModel, false) as any,
   );
@@ -551,6 +866,7 @@ export async function createEmbeddings(
 }
 
 export async function listAvailableModels(input: {
+  provider?: AIProviderPreset;
   apiKey: string;
   baseUrl?: string;
 }) {
@@ -558,6 +874,14 @@ export async function listAvailableModels(input: {
 
   if (!apiKey) {
     throw new Error('缺少 API Key，无法拉取模型列表');
+  }
+
+  if (input.provider === 'claude_compatible') {
+    const modelIds = await listClaudeCompatibleModels({
+      apiKey,
+      baseUrl: input.baseUrl?.trim() || undefined,
+    });
+    return modelIds.map((id) => ({ id } satisfies AIRuntimeModelOption));
   }
 
   const client = createOpenAIClientByConfig(apiKey, input.baseUrl?.trim() || undefined);
@@ -571,4 +895,38 @@ export async function listAvailableModels(input: {
   ).sort((left, right) => left.localeCompare(right, 'zh-CN'));
 
   return modelIds.map((id) => ({ id } satisfies AIRuntimeModelOption));
+}
+
+async function listClaudeCompatibleModels(input: {
+  apiKey: string;
+  baseUrl?: string;
+}) {
+  const baseUrl = (input.baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/u, '');
+  const response = await fetch(`${baseUrl}/models`, {
+    method: 'GET',
+    headers: {
+      'x-api-key': input.apiKey,
+      'anthropic-version': CLAUDE_API_VERSION,
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Claude 模型列表拉取失败：${response.status} ${errorText}`);
+  }
+
+  const payload = await response.json() as {
+    data?: Array<{
+      id?: unknown;
+    }>;
+  };
+
+  return Array.from(
+    new Set(
+      (Array.isArray(payload.data) ? payload.data : [])
+        .map((item) => (typeof item.id === 'string' ? item.id.trim() : ''))
+        .filter(Boolean),
+    ),
+  ).sort((left, right) => left.localeCompare(right, 'zh-CN'));
 }

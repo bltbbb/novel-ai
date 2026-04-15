@@ -32,6 +32,10 @@ export function ProjectSettingsDialog({ open, projectId, onClose }: ProjectSetti
   }
 
   async function handleSave() {
+    if (!currentProject) {
+      return;
+    }
+
     setIsSaving(true);
 
     try {

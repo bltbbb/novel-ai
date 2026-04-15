@@ -9,6 +9,7 @@ import { rebuildGenerationProjectArtifacts } from '../services/generation-projec
 import type {
   GenerationEntitySnapshot,
   GenerationForeshadowSnapshot,
+  GenerationRelationSnapshot,
   GenerationProjectArtifactRebuildChapterInput,
   GenerationProjectArtifactRebuildRequest,
 } from '../types/ai.js';
@@ -71,6 +72,28 @@ function isGenerationForeshadowSnapshot(value: unknown): value is GenerationFore
   );
 }
 
+function isGenerationRelationSnapshot(value: unknown): value is GenerationRelationSnapshot {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<GenerationRelationSnapshot>;
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.sourceEntityId === 'string' &&
+    typeof candidate.targetEntityId === 'string' &&
+    typeof candidate.sourceEntityName === 'string' &&
+    typeof candidate.targetEntityName === 'string' &&
+    typeof candidate.relationType === 'string' &&
+    typeof candidate.origin === 'string' &&
+    typeof candidate.description === 'string' &&
+    typeof candidate.currentStance === 'string' &&
+    typeof candidate.currentIntensity === 'number' &&
+    typeof candidate.stanceReason === 'string' &&
+    typeof candidate.draft === 'boolean'
+  );
+}
+
 function isGenerationProjectArtifactRebuildChapterInput(
   value: unknown,
 ): value is GenerationProjectArtifactRebuildChapterInput {
@@ -119,6 +142,8 @@ function isGenerationProjectArtifactRebuildRequest(
     candidate.chapters.every(isGenerationProjectArtifactRebuildChapterInput) &&
     Array.isArray(candidate.entitySnapshot) &&
     candidate.entitySnapshot.every(isGenerationEntitySnapshot) &&
+    Array.isArray(candidate.relationSnapshot) &&
+    candidate.relationSnapshot.every(isGenerationRelationSnapshot) &&
     Array.isArray(candidate.foreshadowSnapshot) &&
     candidate.foreshadowSnapshot.every(isGenerationForeshadowSnapshot)
   );

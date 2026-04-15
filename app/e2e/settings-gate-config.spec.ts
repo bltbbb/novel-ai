@@ -65,6 +65,48 @@ test('验证设置页可读取并保存轻量召回权重配置', async ({ page 
       return;
     }
 
+    if (url.pathname === '/api/runtime/ai-config') {
+      if (request.method() === 'PUT') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            config: JSON.parse(request.postData() || '{}'),
+          }),
+        });
+        return;
+      }
+
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          config: {
+            provider: 'openai',
+            apiKey: 'test-key',
+            baseUrl: 'https://api.openai.com/v1',
+            defaultModel: 'gpt-5.4-mini',
+            embeddingModel: '',
+          },
+        }),
+      });
+      return;
+    }
+
+    if (url.pathname === '/api/runtime/ai-models') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          models: [
+            { id: 'gpt-5.4-mini' },
+            { id: 'gpt-5.4' },
+          ],
+        }),
+      });
+      return;
+    }
+
     await route.abort();
   });
 
@@ -76,7 +118,7 @@ test('验证设置页可读取并保存轻量召回权重配置', async ({ page 
     await projectCard.click();
   }
 
-  await page.getByRole('button', { name: '打开设置' }).first().click();
+  await page.getByRole('button', { name: 'AI 设置' }).first().click();
 
   await expect(page.getByText('系统设置')).toBeVisible();
   await expect(page.getByText('已读取后端门控配置')).toBeVisible();

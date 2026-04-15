@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { db, touchProject } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
+import { normalizeLoreEntity, normalizeLoreEntityAliases, normalizeLoreEntityFields } from '@/lib/lore-entity';
 import { useProjectStore } from '@/stores/project-store';
 import type { Id, LoreEntity, LoreEntityFields, LoreEntityType } from '@/types';
 
@@ -11,7 +12,9 @@ interface CreateLoreEntityInput {
   description?: string;
   fields?: LoreEntityFields;
   tags?: string[];
+  aliases?: string[];
   pinned?: boolean;
+  draft?: boolean;
 }
 
 interface UpdateLoreEntityInput {
@@ -19,7 +22,9 @@ interface UpdateLoreEntityInput {
   description?: string;
   fields?: LoreEntityFields;
   tags?: string[];
+  aliases?: string[];
   pinned?: boolean;
+  draft?: boolean;
 }
 
 interface LoreStoreState {
@@ -43,12 +48,15 @@ export const useLoreStore = create<LoreStoreState>((set, get) => ({
   isLoaded: false,
 
   async loadEntities(projectId, type) {
-    const entities = type
+    const rawEntities = type
       ? await db.entities.where('[projectId+type]').equals([projectId, type]).sortBy('name')
       : await db.entities.where('projectId').equals(projectId).sortBy('name');
+    const entities = rawEntities
+      .map(normalizeLoreEntity)
+      .filter((entity): entity is LoreEntity => Boolean(entity));
 
     set({
-      entities,
+      entities: sortEntities(entities),
       loadedProjectId: projectId,
       isLoaded: true,
     });
@@ -56,18 +64,20 @@ export const useLoreStore = create<LoreStoreState>((set, get) => ({
 
   async createEntity(input) {
     const now = createTimestamp();
-    const entity: LoreEntity = {
+    const entity = normalizeLoreEntity({
       id: createId(),
       projectId: input.projectId,
       type: input.type,
       name: input.name.trim() || '未命名设定',
       description: input.description?.trim() || '',
-      fields: input.fields ?? {},
+      fields: normalizeLoreEntityFields(input.fields),
       tags: input.tags ?? [],
+      aliases: normalizeLoreEntityAliases(input.aliases),
       pinned: input.pinned ?? false,
+      draft: Boolean(input.draft),
       createdAt: now,
       updatedAt: now,
-    };
+    }) as LoreEntity;
 
     await db.entities.put(entity);
     await touchProject(input.projectId);
@@ -86,22 +96,26 @@ export const useLoreStore = create<LoreStoreState>((set, get) => ({
   },
 
   async updateEntity(entityId, input) {
-    const current = get().entities.find((entity) => entity.id === entityId) ?? (await db.entities.get(entityId));
+    const current = normalizeLoreEntity(
+      get().entities.find((entity) => entity.id === entityId) ?? (await db.entities.get(entityId)),
+    );
 
     if (!current) {
       return;
     }
 
-    const nextEntity: LoreEntity = {
+    const nextEntity = normalizeLoreEntity({
       ...current,
       ...input,
       name: input.name?.trim() || current.name,
       description: input.description?.trim() ?? current.description,
-      fields: input.fields ?? current.fields,
+      fields: normalizeLoreEntityFields(input.fields ?? current.fields),
       tags: input.tags ?? current.tags,
+      aliases: normalizeLoreEntityAliases(input.aliases ?? current.aliases),
       pinned: input.pinned ?? current.pinned,
+      draft: typeof input.draft === 'boolean' ? input.draft : current.draft,
       updatedAt: createTimestamp(),
-    };
+    }) as LoreEntity;
 
     await db.entities.put(nextEntity);
     await touchProject(nextEntity.projectId);
@@ -115,7 +129,9 @@ export const useLoreStore = create<LoreStoreState>((set, get) => ({
   },
 
   async deleteEntity(entityId) {
-    const current = get().entities.find((entity) => entity.id === entityId) ?? (await db.entities.get(entityId));
+    const current = normalizeLoreEntity(
+      get().entities.find((entity) => entity.id === entityId) ?? (await db.entities.get(entityId)),
+    );
 
     if (!current) {
       return;
@@ -131,17 +147,19 @@ export const useLoreStore = create<LoreStoreState>((set, get) => ({
   },
 
   async togglePin(entityId) {
-    const current = get().entities.find((entity) => entity.id === entityId) ?? (await db.entities.get(entityId));
+    const current = normalizeLoreEntity(
+      get().entities.find((entity) => entity.id === entityId) ?? (await db.entities.get(entityId)),
+    );
 
     if (!current) {
       return;
     }
 
-    const nextEntity: LoreEntity = {
+    const nextEntity = normalizeLoreEntity({
       ...current,
       pinned: !current.pinned,
       updatedAt: createTimestamp(),
-    };
+    }) as LoreEntity;
 
     await db.entities.put(nextEntity);
     await touchProject(nextEntity.projectId);

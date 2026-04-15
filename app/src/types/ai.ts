@@ -4,6 +4,8 @@ import type {
   ChapterBeatFields,
   HookStrength,
   Id,
+  LoreEntityFieldValue,
+  LoreEntityType,
   StrandType,
   TemplateAnalysisMeta,
   TemplateLibraryDraft,
@@ -100,7 +102,15 @@ export interface StateChangeDraft {
 export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low';
 export type ReviewCheckerType = 'consistency' | 'continuity' | 'reader_pull';
 export type AntiAIForceCheck = 'pass' | 'fail';
-export type AIProviderPreset = 'openai' | 'deepseek' | 'siliconflow' | 'openrouter' | 'dashscope' | 'zhipu' | 'custom';
+export type AIProviderPreset =
+  | 'openai'
+  | 'deepseek'
+  | 'siliconflow'
+  | 'openrouter'
+  | 'dashscope'
+  | 'zhipu'
+  | 'claude_compatible'
+  | 'custom';
 
 export interface AIRuntimeConfig {
   provider: AIProviderPreset;
@@ -146,9 +156,26 @@ export interface GenerationEntitySnapshot {
   name: string;
   type: string;
   description: string;
-  fields: Record<string, unknown>;
+  fields: Record<string, LoreEntityFieldValue>;
   tags: string[];
+  aliases?: string[];
   pinned: boolean;
+  draft?: boolean;
+}
+
+export interface GenerationRelationSnapshot {
+  id: Id;
+  sourceEntityId: Id;
+  targetEntityId: Id;
+  sourceEntityName: string;
+  targetEntityName: string;
+  relationType: string;
+  origin: string;
+  description: string;
+  currentStance: string;
+  currentIntensity: number;
+  stanceReason: string;
+  draft: boolean;
 }
 
 export type GenerationForeshadowSnapshotStatus = 'planted' | 'activated' | 'resolved' | 'overdue';
@@ -226,6 +253,11 @@ export interface AIPlanRequest {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   model: string;
@@ -263,6 +295,11 @@ export interface AIWriteRequest {
   rewriteGuidance?: string;
   stylePrompt?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   model: string;
@@ -293,6 +330,11 @@ export interface AIReviewRequest {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   content: string;
@@ -324,6 +366,11 @@ export interface AILanguageQaRequest {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   content: string;
@@ -354,6 +401,11 @@ export interface AIStyleRequest {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   stylePrompt: string;
@@ -385,6 +437,11 @@ export interface AIPolishRequest {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
   review?: ChapterReviewDraft | null;
@@ -418,6 +475,75 @@ export interface AIBookAnalysisRequest {
 export interface AIBookAnalysisResponse {
   template: TemplateLibraryDraft;
   meta: TemplateAnalysisMeta;
+}
+
+export interface AIInspirationCoverage {
+  coreHook: boolean;
+  protagonistDrive: boolean;
+  worldSlice: boolean;
+  endgameConflict: boolean;
+}
+
+export interface AIInspirationSeedForeshadow {
+  title: string;
+  notes: string;
+  linkedEntityNames?: string[];
+}
+
+export interface AIInspirationBlueprint {
+  projectTitle: string;
+  projectDescription: string;
+  genres: string[];
+  projectStylePrompt: string;
+  discussionSummary: string;
+  bookOutlineHint: string;
+  volumePlans: Array<{
+    title: string;
+    summary: string;
+  }>;
+  seedEntities: Array<{
+    type: LoreEntityType;
+    name: string;
+    description: string;
+    fields?: Record<string, LoreEntityFieldValue>;
+    tags: string[];
+    aliases?: string[];
+    pinned?: boolean;
+    draft?: boolean;
+  }>;
+  seedForeshadows: AIInspirationSeedForeshadow[];
+  coverage: AIInspirationCoverage;
+}
+
+export interface AIInspirationBlueprintRequest {
+  transcript: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumePlanReconcileRequest {
+  projectTitle: string;
+  projectDescription: string;
+  volumeTitle: string;
+  volumeOrder: number;
+  bookOutline: string;
+  currentVolumeOutline: string;
+  currentMilestones: string;
+  chapterSummaries: string;
+  loreSummary?: string;
+  foreshadowSummary?: string;
+  hint?: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumePlanReconcileResponse {
+  proposedVolumeOutline: VolumeOutlineFields;
+  proposedMilestones: VolumeMilestoneDraft[];
+  changeSummary: string;
+  riskNotes: string[];
 }
 
 export interface AIEpubExtractRequest {
@@ -483,6 +609,8 @@ export interface AIVolumeOutlineRequest {
   bookOutline: string;
   previousVolumeOutline?: string;
   volumeRecaps?: string;
+  foreshadowPlanBundle?: string;
+  questionPoolBundle?: string;
   volumeTitle: string;
   volumeOrder: number;
   seedOutline?: Partial<VolumeOutlineFields>;
@@ -500,6 +628,8 @@ export interface AIVolumeMilestonesRequest {
   bookOutline: string;
   previousVolumeOutline?: string;
   volumeRecaps?: string;
+  foreshadowPlanBundle?: string;
+  questionPoolBundle?: string;
   volumeTitle: string;
   volumeOrder: number;
   seedOutline?: Partial<VolumeOutlineFields>;
@@ -581,6 +711,9 @@ export interface GenerationJobRequest {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   stylePrompt?: string;
   model: string;
   temperature: number;
@@ -589,6 +722,7 @@ export interface GenerationJobRequest {
   gateConfigOverride?: GenerationGateConfig | null;
   outlineOverride?: ChapterOutlineDraft | null;
   entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
 }
 
@@ -683,6 +817,7 @@ export interface GenerationProjectArtifactRebuildRequest {
   projectId: Id;
   chapters: GenerationProjectArtifactRebuildChapterInput[];
   entitySnapshot: GenerationEntitySnapshot[];
+  relationSnapshot: GenerationRelationSnapshot[];
   foreshadowSnapshot: GenerationForeshadowSnapshot[];
 }
 

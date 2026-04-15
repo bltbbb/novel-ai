@@ -27,6 +27,7 @@ function isAiProviderPreset(value: unknown) {
     value === 'openrouter' ||
     value === 'dashscope' ||
     value === 'zhipu' ||
+    value === 'claude_compatible' ||
     value === 'custom';
 }
 
@@ -126,6 +127,7 @@ export async function registerRuntimeConfigRoutes(app: FastifyInstance, env: Ser
 
       return {
         models: await listAvailableModels({
+          provider: probeConfig.provider,
           apiKey: probeConfig.apiKey,
           baseUrl: probeConfig.baseUrl,
         }),

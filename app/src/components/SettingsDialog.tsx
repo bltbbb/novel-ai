@@ -1,16 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, RotateCcw, Save, Settings2, Wifi, X } from 'lucide-react';
 import { AI_PROVIDER_PRESETS, getProviderDefaultBaseUrl } from '@/lib/ai-provider-presets';
+import {
+  DEFAULT_GENERATION_GATE_CONFIG,
+  findMatchingLightweightRecallPreset,
+  LIGHTWEIGHT_RECALL_PRESETS,
+  normalizeGenerationGateConfig,
+} from '@/lib/generation-gate-defaults';
 import { DEFAULT_SETTINGS, REASONING_EFFORT_OPTIONS } from '@/lib/runtime-config';
 import {
   fetchAiRuntimeConfig,
   fetchAiRuntimeModels,
+  fetchGenerationGateConfig,
   saveAiRuntimeConfig,
+  saveGenerationGateConfig,
 } from '@/lib/server-config-client';
 import { checkServerHealth } from '@/lib/server-health';
 import { useServerStatusStore, useSettingsStore } from '@/stores';
 import { useToast } from '@/components/Toast';
-import type { AIRuntimeConfig, AIProviderPreset, ReasoningEffortSetting } from '@/types';
+import type { AIRuntimeConfig, AIProviderPreset, GenerationGateConfig, ReasoningEffortSetting } from '@/types';
 
 interface SettingsDialogProps {
   open: boolean;
@@ -43,7 +51,9 @@ function normalizeRuntimeConfig(config: AIRuntimeConfig) {
     baseUrl:
       config.provider === 'custom'
         ? config.baseUrl.trim()
-        : getProviderDefaultBaseUrl(config.provider),
+        : config.provider === 'claude_compatible'
+          ? config.baseUrl.trim() || getProviderDefaultBaseUrl(config.provider)
+          : getProviderDefaultBaseUrl(config.provider),
     defaultModel: config.defaultModel.trim(),
     embeddingModel: config.embeddingModel?.trim() || undefined,
   } satisfies AIRuntimeConfig;
@@ -56,7 +66,6 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const [runtimeConfig, setRuntimeConfig] = useState<AIRuntimeConfig>(EMPTY_RUNTIME_CONFIG);
   const [savedRuntimeConfig, setSavedRuntimeConfig] = useState<AIRuntimeConfig | null>(null);
   const [chatModel, setChatModel] = useState(settings.modelName);
-  const [embeddingModel, setEmbeddingModel] = useState('');
   const [temperature, setTemperature] = useState(settings.temperature);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortSetting>(settings.reasoningEffort);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
@@ -66,22 +75,38 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [testStatus, setTestStatus] = useState('');
+  const [gateConfig, setGateConfig] = useState<GenerationGateConfig>(DEFAULT_GENERATION_GATE_CONFIG);
+  const [savedGateConfig, setSavedGateConfig] = useState<GenerationGateConfig | null>(null);
+  const [isGateLoading, setIsGateLoading] = useState(false);
+  const [isGateSaving, setIsGateSaving] = useState(false);
+  const [gateStatus, setGateStatus] = useState('');
+  const isEditableBaseUrlProvider =
+    runtimeConfig.provider === 'custom' || runtimeConfig.provider === 'claude_compatible';
 
   const resolvedBaseUrl = useMemo(() => {
-    return runtimeConfig.provider === 'custom'
-      ? runtimeConfig.baseUrl.trim()
-      : getProviderDefaultBaseUrl(runtimeConfig.provider);
+    if (runtimeConfig.provider === 'custom') {
+      return runtimeConfig.baseUrl.trim();
+    }
+
+    if (runtimeConfig.provider === 'claude_compatible') {
+      return runtimeConfig.baseUrl.trim() || getProviderDefaultBaseUrl(runtimeConfig.provider);
+    }
+
+    return getProviderDefaultBaseUrl(runtimeConfig.provider);
   }, [runtimeConfig.baseUrl, runtimeConfig.provider]);
   const mergedModelOptions = useMemo(() => {
-    return Array.from(new Set([chatModel, embeddingModel, ...modelOptions].map((item) => item.trim()).filter(Boolean)))
+    return Array.from(new Set([chatModel, ...modelOptions].map((item) => item.trim()).filter(Boolean)))
       .sort((left, right) => left.localeCompare(right, 'zh-CN'));
-  }, [chatModel, embeddingModel, modelOptions]);
+  }, [chatModel, modelOptions]);
+  const matchedLightweightRecallPreset = useMemo(
+    () => findMatchingLightweightRecallPreset(gateConfig.lightweightRecall),
+    [gateConfig.lightweightRecall],
+  );
   const hasChanges = useMemo(() => {
     const normalizedRuntimeConfig = normalizeRuntimeConfig({
       ...runtimeConfig,
       baseUrl: resolvedBaseUrl,
       defaultModel: chatModel,
-      embeddingModel,
     });
 
     return (
@@ -89,15 +114,20 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
         ? normalizedRuntimeConfig.provider !== savedRuntimeConfig.provider ||
           normalizedRuntimeConfig.apiKey !== savedRuntimeConfig.apiKey ||
           normalizedRuntimeConfig.baseUrl !== savedRuntimeConfig.baseUrl ||
-          normalizedRuntimeConfig.defaultModel !== savedRuntimeConfig.defaultModel ||
-          (normalizedRuntimeConfig.embeddingModel || '') !== (savedRuntimeConfig.embeddingModel || '')
+          normalizedRuntimeConfig.defaultModel !== savedRuntimeConfig.defaultModel
         : true) ||
       chatModel !== settings.modelName ||
       temperature !== settings.temperature ||
-      reasoningEffort !== settings.reasoningEffort ||
-      embeddingModel !== (runtimeConfig.embeddingModel || '')
+      reasoningEffort !== settings.reasoningEffort
     );
-  }, [chatModel, embeddingModel, reasoningEffort, resolvedBaseUrl, runtimeConfig, savedRuntimeConfig, settings.modelName, settings.reasoningEffort, settings.temperature, temperature]);
+  }, [chatModel, reasoningEffort, resolvedBaseUrl, runtimeConfig, savedRuntimeConfig, settings.modelName, settings.reasoningEffort, settings.temperature, temperature]);
+  const hasGateChanges = useMemo(() => {
+    if (!savedGateConfig) {
+      return false;
+    }
+
+    return JSON.stringify(gateConfig) !== JSON.stringify(savedGateConfig);
+  }, [gateConfig, savedGateConfig]);
 
   useEffect(() => {
     if (!open) {
@@ -110,7 +140,9 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     setModelOptions([]);
     setStatusText('');
     setTestStatus('');
+    setGateStatus('');
     void loadRuntimeConfig();
+    void loadGateConfig();
   }, [open, settings]);
 
   if (!open) {
@@ -124,7 +156,6 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
       const config = normalizeRuntimeConfig(await fetchAiRuntimeConfig(settings.serverUrl));
       setRuntimeConfig(config);
       setSavedRuntimeConfig(config);
-      setEmbeddingModel(config.embeddingModel || '');
       await loadModels(config);
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -141,7 +172,12 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
       const models = await fetchAiRuntimeModels(settings.serverUrl, {
         provider: config.provider,
         apiKey: config.apiKey.trim(),
-        baseUrl: config.provider === 'custom' ? config.baseUrl.trim() : getProviderDefaultBaseUrl(config.provider),
+        baseUrl:
+          config.provider === 'custom'
+            ? config.baseUrl.trim()
+            : config.provider === 'claude_compatible'
+              ? config.baseUrl.trim() || getProviderDefaultBaseUrl(config.provider)
+              : getProviderDefaultBaseUrl(config.provider),
       });
       setModelOptions(models.map((item) => item.id));
       setStatusText(models.length > 0 ? `已拉取 ${models.length} 个模型` : '未返回可用模型');
@@ -154,9 +190,25 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     }
   }
 
+  async function loadGateConfig() {
+    setIsGateLoading(true);
+
+    try {
+      const config = normalizeGenerationGateConfig(await fetchGenerationGateConfig(settings.serverUrl));
+      setGateConfig(config);
+      setSavedGateConfig(config);
+      setGateStatus('已读取后端门控配置');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      setGateStatus(`读取后端门控配置失败：${message}`);
+    } finally {
+      setIsGateLoading(false);
+    }
+  }
+
   async function handleSave() {
     if (!chatModel.trim()) {
-      toast('请先选择聊天模型', 'warning');
+      toast('请先填写聊天模型', 'warning');
       return;
     }
 
@@ -167,7 +219,6 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
         ...runtimeConfig,
         baseUrl: resolvedBaseUrl,
         defaultModel: chatModel,
-        embeddingModel,
       });
       await saveAiRuntimeConfig(settings.serverUrl, savedRuntimeConfig);
       setRuntimeConfig(savedRuntimeConfig);
@@ -218,6 +269,24 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     }
   }
 
+  async function handleSaveGateConfig() {
+    setIsGateSaving(true);
+
+    try {
+      const saved = normalizeGenerationGateConfig(await saveGenerationGateConfig(settings.serverUrl, gateConfig));
+      setGateConfig(saved);
+      setSavedGateConfig(saved);
+      setGateStatus('后端门控配置已保存');
+      toast('后端门控配置已保存', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      setGateStatus(`保存后端门控配置失败：${message}`);
+      toast(`保存后端配置失败：${message}`, 'error');
+    } finally {
+      setIsGateSaving(false);
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-4 py-6 backdrop-blur-sm">
       <div className="w-full max-w-2xl rounded-3xl border border-neutral-800 bg-neutral-900 shadow-2xl shadow-black/40">
@@ -227,7 +296,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
               <Settings2 size={18} />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-neutral-100">全局 AI 设置</h2>
+              <h2 className="text-lg font-semibold text-neutral-100">系统设置</h2>
               <p className="text-sm text-neutral-500">Provider、模型和推理参数统一放到项目列表级管理。</p>
             </div>
           </div>
@@ -255,7 +324,14 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                     setRuntimeConfig((current) => ({
                       ...current,
                       provider: nextProvider,
-                      baseUrl: nextProvider === 'custom' ? current.baseUrl : getProviderDefaultBaseUrl(nextProvider),
+                      baseUrl:
+                        nextProvider === 'custom'
+                          ? current.baseUrl
+                          : nextProvider === 'claude_compatible'
+                            ? current.provider === 'claude_compatible'
+                              ? current.baseUrl
+                              : getProviderDefaultBaseUrl(nextProvider)
+                            : getProviderDefaultBaseUrl(nextProvider),
                     }));
                   }}
                   className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
@@ -272,7 +348,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                 <span className="mb-2 block text-sm font-medium text-neutral-200">Base URL</span>
                 <input
                   value={resolvedBaseUrl}
-                  readOnly={runtimeConfig.provider !== 'custom'}
+                  readOnly={!isEditableBaseUrlProvider}
                   onChange={(event) =>
                     setRuntimeConfig((current) => ({
                       ...current,
@@ -280,7 +356,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                     }))
                   }
                   className={`w-full rounded-2xl border border-neutral-800 px-4 py-3 text-sm outline-none transition-colors ${
-                    runtimeConfig.provider === 'custom'
+                    isEditableBaseUrlProvider
                       ? 'bg-neutral-950/70 text-neutral-100 focus:border-indigo-500'
                       : 'bg-neutral-900 text-neutral-500'
                   }`}
@@ -303,39 +379,24 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                 />
               </label>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-neutral-200">聊天模型</span>
-                  <select
-                    value={chatModel}
-                    onChange={(event) => setChatModel(event.target.value)}
-                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                  >
-                    {!chatModel ? <option value="">请选择模型</option> : null}
-                    {mergedModelOptions.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="block">
-                  <span className="mb-2 block text-sm font-medium text-neutral-200">Embedding 模型</span>
-                  <select
-                    value={embeddingModel}
-                    onChange={(event) => setEmbeddingModel(event.target.value)}
-                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
-                  >
-                    <option value="">关闭向量增强</option>
-                    {mergedModelOptions.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+              <label className="block">
+                <span className="mb-2 block text-sm font-medium text-neutral-200">聊天模型</span>
+                <input
+                  list="chat-model-options"
+                  value={chatModel}
+                  onChange={(event) => setChatModel(event.target.value)}
+                  placeholder="可直接手填模型名，也可先拉取模型后选择"
+                  className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
+                />
+                <datalist id="chat-model-options">
+                  {mergedModelOptions.map((model) => (
+                    <option key={model} value={model} />
+                  ))}
+                </datalist>
+                <span className="mt-2 block text-xs text-neutral-500">
+                  向量模型不在这里设置，服务端会继续使用 `OPENAI_EMBEDDING_MODEL` / `EMBEDDING_*` 配置。
+                </span>
+              </label>
 
               <div className="flex flex-wrap items-center gap-3">
                 <button
@@ -407,6 +468,129 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
                     {testStatus || '尚未测试'}
                   </span>
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+            <p className="text-xs uppercase tracking-[0.18em] text-indigo-300">后端门控配置</p>
+            <p className="mt-2 text-sm text-neutral-500">{gateStatus || '用于控制轻量召回与生成门控。'}</p>
+
+            <div className="mt-5 space-y-5">
+              <div>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium text-neutral-200">轻量召回权重预设</span>
+                  <span className="text-xs text-neutral-500">
+                    当前预设：{matchedLightweightRecallPreset?.label || '自定义'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {LIGHTWEIGHT_RECALL_PRESETS.map((preset) => (
+                    <button
+                      key={preset.key}
+                      type="button"
+                      onClick={() =>
+                        setGateConfig((current) => ({
+                          ...current,
+                          lightweightRecall: {
+                            ...current.lightweightRecall,
+                            phraseWeight: preset.weights.phraseWeight,
+                            entityWeight: preset.weights.entityWeight,
+                            recencyWeight: preset.weights.recencyWeight,
+                          },
+                        }))
+                      }
+                      className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+                        matchedLightweightRecallPreset?.key === preset.key
+                          ? 'bg-indigo-500/15 text-indigo-300'
+                          : 'bg-neutral-950/70 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-neutral-200">轻量召回词命中权重</span>
+                  <input
+                    aria-label="轻量召回词命中权重"
+                    type="number"
+                    min="0"
+                    value={gateConfig.lightweightRecall.phraseWeight}
+                    onChange={(event) =>
+                      setGateConfig((current) => ({
+                        ...current,
+                        lightweightRecall: {
+                          ...current.lightweightRecall,
+                          phraseWeight: Math.max(0, Number(event.target.value || 0)),
+                        },
+                      }))
+                    }
+                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-neutral-200">轻量召回实体命中权重</span>
+                  <input
+                    aria-label="轻量召回实体命中权重"
+                    type="number"
+                    min="0"
+                    value={gateConfig.lightweightRecall.entityWeight}
+                    onChange={(event) =>
+                      setGateConfig((current) => ({
+                        ...current,
+                        lightweightRecall: {
+                          ...current.lightweightRecall,
+                          entityWeight: Math.max(0, Number(event.target.value || 0)),
+                        },
+                      }))
+                    }
+                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-2 block text-sm font-medium text-neutral-200">轻量召回时序权重</span>
+                  <input
+                    aria-label="轻量召回时序权重"
+                    type="number"
+                    min="0"
+                    value={gateConfig.lightweightRecall.recencyWeight}
+                    onChange={(event) =>
+                      setGateConfig((current) => ({
+                        ...current,
+                        lightweightRecall: {
+                          ...current.lightweightRecall,
+                          recencyWeight: Math.max(0, Number(event.target.value || 0)),
+                        },
+                      }))
+                    }
+                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors focus:border-indigo-500"
+                  />
+                </label>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void loadGateConfig()}
+                  disabled={isGateLoading}
+                  className="rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isGateLoading ? '读取中...' : '重新读取'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSaveGateConfig()}
+                  disabled={isGateSaving || !hasGateChanges}
+                  className="rounded-2xl bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isGateSaving ? '保存中...' : '保存后端配置'}
+                </button>
               </div>
             </div>
           </section>

@@ -4,6 +4,7 @@ import { countDocumentCharacters, createParagraphDocument } from '@/lib/editor-c
 import { DEFAULT_GENERATION_GATE_CONFIG, normalizeLightweightRecallConfig } from '@/lib/generation-gate-defaults';
 import { db, DEFAULT_VOLUME_TITLE, deleteProjectCascade } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
+import { normalizeLoreEntity, normalizeLoreEntityAliases, normalizeLoreEntityFields } from '@/lib/lore-entity';
 import { buildProjectArchive, importProjectArchive as importArchiveToDb } from '@/lib/project-archive';
 import { cloneTemplateSubTemplates } from '@/lib/project-template';
 import type {
@@ -35,7 +36,9 @@ interface CreateProjectInput {
     description?: string;
     fields?: LoreEntityFields;
     tags?: string[];
+    aliases?: string[];
     pinned?: boolean;
+    draft?: boolean;
   }>;
 }
 
@@ -154,18 +157,24 @@ export const useProjectStore = create<ProjectStoreState>((set, get) => ({
         updatedAt: now,
       };
     });
-    const entities: LoreEntity[] = (input?.seedEntities ?? []).map((seedEntity) => ({
-      id: createId(),
-      projectId,
-      type: seedEntity.type,
-      name: seedEntity.name.trim() || '未命名设定',
-      description: seedEntity.description?.trim() || '',
-      fields: seedEntity.fields ?? {},
-      tags: seedEntity.tags ?? [],
-      pinned: seedEntity.pinned ?? false,
-      createdAt: now,
-      updatedAt: now,
-    }));
+    const entities: LoreEntity[] = (input?.seedEntities ?? [])
+      .map((seedEntity) =>
+        normalizeLoreEntity({
+          id: createId(),
+          projectId,
+          type: seedEntity.type,
+          name: seedEntity.name.trim() || '未命名设定',
+          description: seedEntity.description?.trim() || '',
+          fields: normalizeLoreEntityFields(seedEntity.fields),
+          tags: seedEntity.tags ?? [],
+          pinned: seedEntity.pinned ?? false,
+          aliases: normalizeLoreEntityAliases(seedEntity.aliases),
+          draft: Boolean(seedEntity.draft),
+          createdAt: now,
+          updatedAt: now,
+        }),
+      )
+      .filter((entity): entity is LoreEntity => Boolean(entity));
     const project: Project = {
       id: projectId,
       title: input?.title?.trim() || '未命名项目',

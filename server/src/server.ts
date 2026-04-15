@@ -4,6 +4,7 @@ import { loadServerEnv } from './config/env.js';
 import { registerGenerationDebugRoutes } from './routes/generation-debug.js';
 import { registerGenerationMaintenanceRoutes } from './routes/generation-maintenance.js';
 import { registerRuntimeConfigRoutes } from './routes/runtime-config.js';
+import { registerStructureMemoryRoutes } from './routes/structure-memory.js';
 import { hydrateAIRuntimeConfig } from './services/ai-runtime-config-store.js';
 import { recoverInterruptedBookAnalysisJobs } from './services/book-analysis-job-runner.js';
 import { startGenerationJobWorker } from './services/generation-job-runner.js';
@@ -12,6 +13,7 @@ import { registerAIRoutes } from './routes/ai.js';
 import { registerGenerationJobRoutes } from './routes/generation-jobs.js';
 import { registerGenerationRoutes } from './routes/generation.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerLocalInspirationTranscriptRoutes } from './routes/local-inspiration-transcript.js';
 import { registerSearchRoutes } from './routes/search.js';
 
 async function bootstrap() {
@@ -34,11 +36,13 @@ async function bootstrap() {
   await registerHealthRoutes(app);
   await registerAIRoutes(app, env);
   await registerGenerationRoutes(app, env);
+  await registerLocalInspirationTranscriptRoutes(app);
   await registerGenerationJobRoutes(app, env);
   await registerRuntimeConfigRoutes(app, env);
   await registerGenerationDebugRoutes(app, env);
   await registerGenerationMaintenanceRoutes(app, env);
   await registerSearchRoutes(app);
+  await registerStructureMemoryRoutes(app, env);
 
   startGenerationJobWorker(env);
 

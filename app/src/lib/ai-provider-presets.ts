@@ -11,6 +11,7 @@ export const AI_PROVIDER_PRESETS: Array<{
   { value: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
   { value: 'dashscope', label: '阿里百炼', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
   { value: 'zhipu', label: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  { value: 'claude_compatible', label: 'Claude 兼容', baseUrl: 'https://api.anthropic.com/v1' },
   { value: 'custom', label: '自定义', baseUrl: '' },
 ];
 

@@ -14,22 +14,35 @@ import {
   X,
 } from 'lucide-react';
 import { useToast } from '@/components/Toast';
+import { AntagonistAgendaPanel } from '@/components/AntagonistAgendaPanel';
+import { ForeshadowPlanPanel } from '@/components/ForeshadowPlanPanel';
+import { PovPermissionPanel } from '@/components/PovPermissionPanel';
+import { QuestionPoolPanel } from '@/components/QuestionPoolPanel';
+import { ResourceContinuityPanel } from '@/components/ResourceContinuityPanel';
+import { ThreadLedgerPanel } from '@/components/ThreadLedgerPanel';
+import { WorldStatePanel } from '@/components/WorldStatePanel';
 import { db } from '@/lib/db';
-import { createBookOutline, createVolumeBeats, createVolumeMilestones, createVolumeOutline } from '@/lib/generation-client';
+import { buildVolumeForeshadowPlanBundle } from '@/lib/foreshadow-plan';
+import { createBookOutline, createVolumeBeats, createVolumeMilestones, createVolumeOutline, reconcileVolumePlan } from '@/lib/generation-client';
 import {
   buildHistorySummaries,
   computeMilestoneEndChapter,
   computeMilestoneStartChapter,
 } from '@/lib/history-summary';
 import { serializeSingleMilestone, serializeBookOutline, serializeVolumeOutline } from '@/lib/outline-serializer';
+import { collectPlanningRequirements } from '@/lib/planning-requirements';
+import { buildVolumeQuestionPoolBundle } from '@/lib/question-pool';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
-import { useChapterBeatStore, useEditorStore, useOutlineStore, useProjectStore, useSettingsStore, useVolumeStore } from '@/stores';
+import { useChapterBeatStore, useEditorStore, useForeshadowPlanStore, useForeshadowStore, useLoreStore, useOutlineStore, useProjectStore, useQuestionPoolStore, useSettingsStore, useVolumeStore } from '@/stores';
 import type {
+  AIVolumePlanReconcileResponse,
+  BookCharacterArcDraft,
   BookOutlineFields,
   ChapterBeat,
   ChapterBeatFields,
   Id,
+  VolumeInheritedThreadDraft,
   VolumeMilestoneDraft,
   VolumeOutlineFields,
 } from '@/types';
@@ -85,6 +98,16 @@ interface ChapterBeatRowModel {
   beat: ChapterBeat | null;
 }
 
+interface VolumePlanReconcilePreview {
+  volumeId: Id;
+  volumeTitle: string;
+  currentOutlineText: string;
+  currentMilestonesText: string;
+  proposedOutlineText: string;
+  proposedMilestonesText: string;
+  response: AIVolumePlanReconcileResponse;
+}
+
 type MilestoneProgressStatus = 'empty' | 'planned' | 'progressed';
 type FissionDialogMode = 'milestone' | 'volume';
 
@@ -94,6 +117,12 @@ function createEmptyBookDraft(): BookOutlineFields {
     centralConflict: '',
     protagonistArc: '',
     thematicCore: '',
+    subPlots: [],
+    characterArcs: [],
+    powerSystem: '',
+    antagonistSystem: '',
+    narrativeArc: '',
+    logline: '',
     worldRules: [],
     endgameHint: '',
     toneGuide: '',
@@ -107,8 +136,17 @@ function createEmptyVolumeDraft(): VolumeOutlineFields {
     arcSummary: '',
     entryState: '',
     exitState: '',
+    antagonist: '',
+    subPlot: '',
+    inheritedThreads: [],
+    protagonistGrowth: '',
+    emotionalArc: '',
+    estimatedWordCount: 0,
+    povPlan: '',
     keyEvents: [],
     foreshadowSeeds: [],
+    requiredEntities: [],
+    requiredForeshadows: [],
     estimatedChapterCount: 0,
     milestones: [],
   };
@@ -117,9 +155,14 @@ function createEmptyVolumeDraft(): VolumeOutlineFields {
 function cloneVolumeMilestoneDraft(milestone: VolumeMilestoneDraft): VolumeMilestoneDraft {
   return {
     ...milestone,
+    phasePacing: milestone.phasePacing,
+    phaseEmotionShift: milestone.phaseEmotionShift,
+    phasePOV: milestone.phasePOV,
     keyTurns: [...milestone.keyTurns],
     mustPlant: [...milestone.mustPlant],
     mustPayoff: [...milestone.mustPayoff],
+    requiredEntities: [...(milestone.requiredEntities ?? [])],
+    requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
   };
 }
 
@@ -128,6 +171,9 @@ function cloneVolumeDraft(draft: VolumeOutlineFields): VolumeOutlineFields {
     ...draft,
     keyEvents: [...draft.keyEvents],
     foreshadowSeeds: [...draft.foreshadowSeeds],
+    inheritedThreads: draft.inheritedThreads.map((item) => ({ ...item })),
+    requiredEntities: [...(draft.requiredEntities ?? [])],
+    requiredForeshadows: [...(draft.requiredForeshadows ?? [])],
     milestones: draft.milestones.map(cloneVolumeMilestoneDraft),
   };
 }
@@ -140,10 +186,15 @@ function createEmptyVolumeMilestoneDraft(): VolumeMilestoneDraft {
     phaseConflict: '',
     entryState: '',
     exitState: '',
+    phasePacing: '',
+    phaseEmotionShift: '',
+    phasePOV: '',
     keyTurns: [],
     mustPlant: [],
     mustPayoff: [],
     powerCeiling: '',
+    requiredEntities: [],
+    requiredForeshadows: [],
   };
 }
 
@@ -153,6 +204,8 @@ function createEmptyChapterBeatDraft(orderInVolume = 1): ChapterBeatFields {
     titleHint: '',
     scenePurpose: '',
     focusCharacter: '',
+    mustAppearCharacters: [],
+    availableCharacters: [],
     mainPlot: '',
     subPlot: '',
     pacing: '',
@@ -176,6 +229,94 @@ function joinMultilineList(values: string[]) {
   return values.join('\n');
 }
 
+function parseNamedDetailLine(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return {
+      name: '',
+      detail: '',
+    };
+  }
+
+  const matched = trimmed.match(/^([^:：]+)[:：]\s*(.+)$/u);
+
+  if (!matched) {
+    return {
+      name: trimmed,
+      detail: '',
+    };
+  }
+
+  return {
+    name: matched[1].trim(),
+    detail: matched[2].trim(),
+  };
+}
+
+function serializeCharacterArcLines(values: BookCharacterArcDraft[]) {
+  return values
+    .map((item) => {
+      const characterName = item.characterName.trim();
+      const arc = item.arc.trim();
+
+      if (!characterName && !arc) {
+        return '';
+      }
+
+      return arc ? `${characterName}：${arc}` : characterName;
+    })
+    .filter(Boolean);
+}
+
+function parseCharacterArcLines(values: string[]): BookCharacterArcDraft[] {
+  return values
+    .map((value) => {
+      const { name, detail } = parseNamedDetailLine(value);
+      return {
+        characterId: null,
+        characterName: name,
+        arc: detail,
+      } satisfies BookCharacterArcDraft;
+    })
+    .filter((item) => item.characterName || item.arc);
+}
+
+function serializeInheritedThreadLines(values: VolumeInheritedThreadDraft[]) {
+  return values
+    .map((item) => {
+      const threadName = item.threadName.trim();
+      const note = item.note.trim();
+
+      if (!threadName && !note) {
+        return '';
+      }
+
+      return note ? `${threadName}：${note}` : threadName;
+    })
+    .filter(Boolean);
+}
+
+function parseInheritedThreadLines(values: string[]): VolumeInheritedThreadDraft[] {
+  return values
+    .map((value) => {
+      const { name, detail } = parseNamedDetailLine(value);
+      return {
+        threadId: null,
+        threadName: name,
+        note: detail,
+      } satisfies VolumeInheritedThreadDraft;
+    })
+    .filter((item) => item.threadName || item.note);
+}
+
+function serializeMilestoneCollection(milestones: VolumeMilestoneDraft[]) {
+  return milestones
+    .map((milestone, index) => serializeSingleMilestone(milestone, index))
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 function hasText(value: string) {
   return value.trim().length > 0;
 }
@@ -186,6 +327,12 @@ function isBookDraftEmpty(draft: BookOutlineFields) {
     !hasText(draft.centralConflict) &&
     !hasText(draft.protagonistArc) &&
     !hasText(draft.thematicCore) &&
+    draft.subPlots.length === 0 &&
+    draft.characterArcs.length === 0 &&
+    !hasText(draft.powerSystem) &&
+    !hasText(draft.antagonistSystem) &&
+    !hasText(draft.narrativeArc) &&
+    !hasText(draft.logline) &&
     draft.worldRules.length === 0 &&
     !hasText(draft.endgameHint) &&
     !hasText(draft.toneGuide)
@@ -199,10 +346,17 @@ function countFilledVolumeFields(draft: VolumeOutlineFields) {
     draft.arcSummary,
     draft.entryState,
     draft.exitState,
+    draft.antagonist,
+    draft.subPlot,
+    draft.protagonistGrowth,
+    draft.emotionalArc,
+    draft.povPlan,
   ].filter(hasText).length +
     (draft.keyEvents.length > 0 ? 1 : 0) +
+    (draft.inheritedThreads.length > 0 ? 1 : 0) +
     (draft.foreshadowSeeds.length > 0 ? 1 : 0) +
     (draft.estimatedChapterCount > 0 ? 1 : 0) +
+    (draft.estimatedWordCount > 0 ? 1 : 0) +
     (draft.milestones.length > 0 ? 1 : 0);
 }
 
@@ -213,7 +367,7 @@ function getVolumeProgressLabel(draft: VolumeOutlineFields) {
     return '未填写 · 点击展开编辑或使用 AI 生成';
   }
 
-  return `已填 ${filledCount}/9 字段`;
+  return `已填 ${filledCount}/16 字段`;
 }
 
 function extractChapterBeatDraft(beat: ChapterBeat): ChapterBeatFields {
@@ -222,6 +376,8 @@ function extractChapterBeatDraft(beat: ChapterBeat): ChapterBeatFields {
     titleHint: beat.titleHint,
     scenePurpose: beat.scenePurpose,
     focusCharacter: beat.focusCharacter,
+    mustAppearCharacters: [...(beat.mustAppearCharacters ?? [])],
+    availableCharacters: [...(beat.availableCharacters ?? [])],
     mainPlot: beat.mainPlot,
     subPlot: beat.subPlot,
     pacing: beat.pacing,
@@ -507,6 +663,14 @@ export function OutlineView({
   const volumes = useVolumeStore((state) => state.volumes);
   const loadVolumes = useVolumeStore((state) => state.loadVolumes);
   const chapterBeats = useChapterBeatStore((state) => state.chapterBeats);
+  const entities = useLoreStore((state) => state.entities);
+  const foreshadows = useForeshadowStore((state) => state.foreshadows);
+  const foreshadowPlans = useForeshadowPlanStore((state) => state.foreshadowPlans);
+  const foreshadowPlanLoadedProjectId = useForeshadowPlanStore((state) => state.loadedProjectId);
+  const loadForeshadowPlans = useForeshadowPlanStore((state) => state.loadForeshadowPlans);
+  const questionPools = useQuestionPoolStore((state) => state.questionPools);
+  const questionPoolLoadedProjectId = useQuestionPoolStore((state) => state.loadedProjectId);
+  const loadQuestionPools = useQuestionPoolStore((state) => state.loadQuestionPools);
   const loadChapterBeats = useChapterBeatStore((state) => state.loadChapterBeats);
   const saveChapterBeat = useChapterBeatStore((state) => state.saveChapterBeat);
   const saveVolumeChapterBeats = useChapterBeatStore((state) => state.saveVolumeChapterBeats);
@@ -549,6 +713,8 @@ export function OutlineView({
   const [fissionDialogOverwriteTitles, setFissionDialogOverwriteTitles] = useState(false);
   const [listFieldModes, setListFieldModes] = useState<Record<string, 'cards' | 'text'>>({});
   const [listFieldInputs, setListFieldInputs] = useState<Record<string, string>>({});
+  const [reconcilingVolumeId, setReconcilingVolumeId] = useState<Id | null>(null);
+  const [volumePlanReconcilePreview, setVolumePlanReconcilePreview] = useState<VolumePlanReconcilePreview | null>(null);
 
   function buildTemplateHint(...sections: Array<string | null | undefined>) {
     return mergePromptSections(...sections);
@@ -698,6 +864,12 @@ export function OutlineView({
       centralConflict: bookOutline.centralConflict,
       protagonistArc: bookOutline.protagonistArc,
       thematicCore: bookOutline.thematicCore,
+      subPlots: [...bookOutline.subPlots],
+      characterArcs: bookOutline.characterArcs.map((item) => ({ ...item })),
+      powerSystem: bookOutline.powerSystem,
+      antagonistSystem: bookOutline.antagonistSystem,
+      narrativeArc: bookOutline.narrativeArc,
+      logline: bookOutline.logline,
       worldRules: [...bookOutline.worldRules],
       endgameHint: bookOutline.endgameHint,
       toneGuide: bookOutline.toneGuide,
@@ -735,14 +907,28 @@ export function OutlineView({
               arcSummary: persisted.arcSummary,
               entryState: persisted.entryState,
               exitState: persisted.exitState,
+              antagonist: persisted.antagonist,
+              subPlot: persisted.subPlot,
+              inheritedThreads: persisted.inheritedThreads.map((item) => ({ ...item })),
+              protagonistGrowth: persisted.protagonistGrowth,
+              emotionalArc: persisted.emotionalArc,
+              estimatedWordCount: persisted.estimatedWordCount,
+              povPlan: persisted.povPlan,
               keyEvents: [...persisted.keyEvents],
               foreshadowSeeds: [...persisted.foreshadowSeeds],
+              requiredEntities: [...(persisted.requiredEntities ?? [])],
+              requiredForeshadows: [...(persisted.requiredForeshadows ?? [])],
               estimatedChapterCount: persisted.estimatedChapterCount,
               milestones: persisted.milestones.map((milestone) => ({
                 ...milestone,
+                phasePacing: milestone.phasePacing,
+                phaseEmotionShift: milestone.phaseEmotionShift,
+                phasePOV: milestone.phasePOV,
                 keyTurns: [...milestone.keyTurns],
                 mustPlant: [...milestone.mustPlant],
                 mustPayoff: [...milestone.mustPayoff],
+                requiredEntities: [...(milestone.requiredEntities ?? [])],
+                requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
               })),
             }
           : previous[volume.id] ?? createEmptyVolumeDraft();
@@ -966,14 +1152,22 @@ export function OutlineView({
     setGeneratingVolumeId(volumeId);
 
     try {
+      const seedOutline = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+      const foreshadowPlanBundle = await resolveVolumeForeshadowPlanBundle(
+        volume.order,
+        seedOutline.requiredForeshadows,
+      );
+      const questionPoolBundle = await resolveVolumeQuestionPoolBundle(volume.order);
       const generated = await createVolumeOutline(settings.serverUrl, {
         projectTitle,
         projectDescription,
         bookOutline: serializedBookOutline,
         previousVolumeOutline: serializedPreviousVolumeOutline,
+        foreshadowPlanBundle: foreshadowPlanBundle || undefined,
+        questionPoolBundle: questionPoolBundle || undefined,
         volumeTitle: volume.title,
         volumeOrder: volume.order,
-        seedOutline: volumeDraftMap[volumeId] ?? createEmptyVolumeDraft(),
+        seedOutline,
         hint:
           buildTemplateHint(
             formatPromptSection('创作模板卷纲约束', currentProject?.templateSnapshot?.promptBundle.volumeOutlinePrompt),
@@ -991,14 +1185,28 @@ export function OutlineView({
           arcSummary: generated.arcSummary,
           entryState: generated.entryState,
           exitState: generated.exitState,
+          antagonist: generated.antagonist,
+          subPlot: generated.subPlot,
+          inheritedThreads: generated.inheritedThreads.map((item) => ({ ...item })),
+          protagonistGrowth: generated.protagonistGrowth,
+          emotionalArc: generated.emotionalArc,
+          estimatedWordCount: generated.estimatedWordCount,
+          povPlan: generated.povPlan,
           keyEvents: [...generated.keyEvents],
           foreshadowSeeds: [...generated.foreshadowSeeds],
+          requiredEntities: [...(generated.requiredEntities ?? [])],
+          requiredForeshadows: [...(generated.requiredForeshadows ?? [])],
           estimatedChapterCount: generated.estimatedChapterCount,
           milestones: generated.milestones.map((milestone) => ({
             ...milestone,
+            phasePacing: milestone.phasePacing,
+            phaseEmotionShift: milestone.phaseEmotionShift,
+            phasePOV: milestone.phasePOV,
             keyTurns: [...milestone.keyTurns],
             mustPlant: [...milestone.mustPlant],
             mustPayoff: [...milestone.mustPayoff],
+            requiredEntities: [...(milestone.requiredEntities ?? [])],
+            requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
           })),
         },
       }));
@@ -1050,11 +1258,18 @@ export function OutlineView({
     setGeneratingMilestonesVolumeId(volumeId);
 
     try {
+      const foreshadowPlanBundle = await resolveVolumeForeshadowPlanBundle(
+        volume.order,
+        currentDraft.requiredForeshadows,
+      );
+      const questionPoolBundle = await resolveVolumeQuestionPoolBundle(volume.order);
       const generated = await createVolumeMilestones(settings.serverUrl, {
         projectTitle,
         projectDescription,
         bookOutline: serializedBookOutline,
         previousVolumeOutline: serializedPreviousVolumeOutline,
+        foreshadowPlanBundle: foreshadowPlanBundle || undefined,
+        questionPoolBundle: questionPoolBundle || undefined,
         volumeTitle: volume.title,
         volumeOrder: volume.order,
         seedOutline: currentDraft,
@@ -1075,6 +1290,8 @@ export function OutlineView({
           keyTurns: [...milestone.keyTurns],
           mustPlant: [...milestone.mustPlant],
           mustPayoff: [...milestone.mustPayoff],
+          requiredEntities: [...(milestone.requiredEntities ?? [])],
+          requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
         })),
       };
 
@@ -1090,6 +1307,194 @@ export function OutlineView({
     } finally {
       setGeneratingMilestonesVolumeId(null);
     }
+  }
+
+  function buildReconcileLoreSummary(draft: VolumeOutlineFields) {
+    const planningRequirements = collectPlanningRequirements({
+      volumeOutline: draft,
+    });
+    const requiredEntitySet = new Set(planningRequirements.requiredEntityNames.map((item) => item.trim().toLowerCase()));
+    const selectedEntities = entities
+      .filter((entity) => entity.pinned || requiredEntitySet.has(entity.name.trim().toLowerCase()))
+      .slice(0, 12);
+
+    return selectedEntities
+      .map((entity) => {
+        const fieldPreview = Object.entries(entity.fields)
+          .slice(0, 4)
+          .map(([key, value]) => `${key}=${String(value)}`)
+          .join('；');
+
+        return [
+          `- ${entity.name}（${entity.type}）`,
+          entity.description ? `描述：${entity.description}` : '',
+          fieldPreview ? `关键状态：${fieldPreview}` : '',
+          entity.tags.length > 0 ? `标签：${entity.tags.join(' / ')}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+      })
+      .join('\n\n');
+  }
+
+  function buildReconcileForeshadowSummary(draft: VolumeOutlineFields) {
+    const planningRequirements = collectPlanningRequirements({
+      volumeOutline: draft,
+    });
+    const requiredForeshadowSet = new Set(
+      planningRequirements.requiredForeshadowTitles.map((item) => item.trim().toLowerCase()),
+    );
+    const selectedForeshadows = foreshadows
+      .filter((foreshadow) => {
+        if (foreshadow.status === 'activated' || foreshadow.status === 'overdue') {
+          return true;
+        }
+
+        return requiredForeshadowSet.has(foreshadow.title.trim().toLowerCase());
+      })
+      .slice(0, 12);
+
+    return selectedForeshadows
+      .map((foreshadow) =>
+        [
+          `- ${foreshadow.title}`,
+          `状态：${foreshadow.status}`,
+          foreshadow.excerpt ? `摘要：${foreshadow.excerpt}` : '',
+          foreshadow.notes ? `备注：${foreshadow.notes}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      )
+      .join('\n\n');
+  }
+
+  async function resolveVolumeForeshadowPlanBundle(
+    volumeOrder: number,
+    requiredForeshadowTitles: string[] | undefined,
+  ) {
+    const latestVolumeOrder = sortedVolumes[sortedVolumes.length - 1]?.order ?? volumeOrder;
+
+    if (foreshadowPlanLoadedProjectId !== projectId) {
+      await loadForeshadowPlans(projectId, {
+        currentVolumeOrder: latestVolumeOrder,
+        overdueVolumeGap: 2,
+      });
+    }
+
+    return buildVolumeForeshadowPlanBundle({
+      foreshadowPlans:
+        foreshadowPlanLoadedProjectId === projectId
+          ? foreshadowPlans
+          : useForeshadowPlanStore.getState().foreshadowPlans,
+      volumeOrder,
+      requiredForeshadowTitles,
+    });
+  }
+
+  async function resolveVolumeQuestionPoolBundle(volumeOrder: number) {
+    if (questionPoolLoadedProjectId !== projectId) {
+      await loadQuestionPools(projectId);
+    }
+
+    return buildVolumeQuestionPoolBundle({
+      questionPools:
+        questionPoolLoadedProjectId === projectId
+          ? questionPools
+          : useQuestionPoolStore.getState().questionPools,
+      volumeOrder,
+    });
+  }
+
+  async function handleReconcileVolumePlan(volumeId: Id) {
+    const volume = sortedVolumes.find((item) => item.id === volumeId);
+
+    if (!volume) {
+      toast('未找到目标卷', 'warning');
+      return;
+    }
+
+    const serializedBookOutline = serializeBookOutline(bookDraft).trim();
+
+    if (!serializedBookOutline) {
+      toast('请先补充全书大纲，再修正当前卷规划', 'warning');
+      return;
+    }
+
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    const currentOutlineText = serializeVolumeOutline(currentDraft).trim();
+    const currentMilestonesText = serializeMilestoneCollection(currentDraft.milestones).trim();
+
+    if (!currentOutlineText) {
+      toast('当前卷还没有卷纲，无法执行修正', 'warning');
+      return;
+    }
+
+    setReconcilingVolumeId(volumeId);
+
+    try {
+      const volumeChapters = (chaptersByVolumeId.get(volumeId) ?? []).slice(0, 30);
+      const chapterIds = new Set(volumeChapters.map((chapter) => chapter.id));
+      const summaryRows = (await db.chapterSummaries.where('projectId').equals(projectId).toArray())
+        .filter((summary) => chapterIds.has(summary.chapterId))
+        .sort((left, right) => {
+          const leftChapter = volumeChapters.find((chapter) => chapter.id === left.chapterId);
+          const rightChapter = volumeChapters.find((chapter) => chapter.id === right.chapterId);
+          return (leftChapter?.order ?? 0) - (rightChapter?.order ?? 0);
+        });
+      const chapterSummariesText = volumeChapters
+        .map((chapter) => {
+          const summary = summaryRows.find((item) => item.chapterId === chapter.id);
+          return `- 第${chapter.order}章《${chapter.title}》：${summary?.summary || '暂无摘要'}`;
+        })
+        .join('\n');
+      const response = await reconcileVolumePlan(settings.serverUrl, {
+        projectTitle,
+        projectDescription,
+        volumeTitle: volume.title,
+        volumeOrder: volume.order,
+        bookOutline: serializedBookOutline,
+        currentVolumeOutline: currentOutlineText,
+        currentMilestones: currentMilestonesText || '暂无里程碑',
+        chapterSummaries: chapterSummariesText || '暂无已生成章节摘要',
+        loreSummary: buildReconcileLoreSummary(currentDraft) || undefined,
+        foreshadowSummary: buildReconcileForeshadowSummary(currentDraft) || undefined,
+        ...buildModelRequestConfig(settings),
+      });
+
+      setVolumePlanReconcilePreview({
+        volumeId,
+        volumeTitle: volume.title,
+        currentOutlineText,
+        currentMilestonesText: currentMilestonesText || '暂无里程碑',
+        proposedOutlineText: serializeVolumeOutline(response.proposedVolumeOutline).trim() || '暂无建议卷纲',
+        proposedMilestonesText: serializeMilestoneCollection(response.proposedMilestones).trim() || '暂无建议里程碑',
+        response,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`修正当前卷规划失败：${message}`, 'error');
+    } finally {
+      setReconcilingVolumeId(null);
+    }
+  }
+
+  async function handleApplyVolumePlanReconcile() {
+    if (!volumePlanReconcilePreview) {
+      return;
+    }
+
+    const nextDraft: VolumeOutlineFields = {
+      ...volumePlanReconcilePreview.response.proposedVolumeOutline,
+      milestones: volumePlanReconcilePreview.response.proposedMilestones,
+    };
+
+    await saveVolumeOutline(projectId, volumePlanReconcilePreview.volumeId, nextDraft);
+    setVolumeDraftMap((previous) => ({
+      ...previous,
+      [volumePlanReconcilePreview.volumeId]: nextDraft,
+    }));
+    toast(`《${volumePlanReconcilePreview.volumeTitle}》卷规划已更新`, 'success');
+    setVolumePlanReconcilePreview(null);
   }
 
   async function handleRenameVolume(volumeId: Id) {
@@ -1870,6 +2275,60 @@ export function OutlineView({
           />
 
           <TextAreaField
+            label="一句话卖点"
+            placeholder="用一句话说清这本书最抓人的卖点"
+            value={bookDraft.logline}
+            rows={2}
+            onChange={(value) =>
+              setBookDraft((previous) => ({
+                ...previous,
+                logline: value,
+              }))
+            }
+            className="md:col-span-2"
+          />
+
+          <TextAreaField
+            label="能力体系"
+            placeholder="这本书的修炼 / 战斗 / 规则体系如何运转？"
+            value={bookDraft.powerSystem}
+            rows={3}
+            onChange={(value) =>
+              setBookDraft((previous) => ({
+                ...previous,
+                powerSystem: value,
+              }))
+            }
+          />
+
+          <TextAreaField
+            label="对抗体系"
+            placeholder="主角长期对抗的敌对系统、秩序或压制机制是什么？"
+            value={bookDraft.antagonistSystem}
+            rows={3}
+            onChange={(value) =>
+              setBookDraft((previous) => ({
+                ...previous,
+                antagonistSystem: value,
+              }))
+            }
+          />
+
+          <TextAreaField
+            label="叙事弧线"
+            placeholder="例如：开篇求生 -> 中段扩张 -> 后段清算 -> 终局重构"
+            value={bookDraft.narrativeArc}
+            rows={2}
+            onChange={(value) =>
+              setBookDraft((previous) => ({
+                ...previous,
+                narrativeArc: value,
+              }))
+            }
+            className="md:col-span-2"
+          />
+
+          <TextAreaField
             label="结局方向"
             placeholder="故事大致朝什么方向收束？不需要详细剧透"
             value={bookDraft.endgameHint}
@@ -1909,6 +2368,46 @@ export function OutlineView({
               }
             />
           </div>
+
+          <div>
+            <ListFieldEditor
+              label="副线规划"
+              values={bookDraft.subPlots}
+              addPlaceholder="输入一条副线 / 暗线，回车直接添加"
+              textModePlaceholder={'每行一条副线，例：\n量天司线\n情感线\n宗门权力线'}
+              emptyText="还没有副线规划。长篇建议至少提前写出 2 到 4 条持续副线。"
+              helperText="这里写的是长期存在的副线，不是单章支线。"
+              mode={listFieldModes['book.subPlots'] ?? 'cards'}
+              inputValue={listFieldInputs['book.subPlots'] ?? ''}
+              onInputChange={(value) => setListFieldInput('book.subPlots', value)}
+              onChange={(values) =>
+                setBookDraft((previous) => ({
+                  ...previous,
+                  subPlots: values,
+                }))
+              }
+              onToggleMode={() =>
+                setListFieldMode(
+                  'book.subPlots',
+                  (listFieldModes['book.subPlots'] ?? 'cards') === 'cards' ? 'text' : 'cards',
+                )
+              }
+            />
+          </div>
+
+          <TextListField
+            label="角色弧线"
+            placeholder={'每行一条，使用“角色名：弧线说明”格式，例如：\n许明：从相信律法到重写律法\n秦小昭：从复仇到底到重新选择归处'}
+            values={serializeCharacterArcLines(bookDraft.characterArcs)}
+            rows={5}
+            onChange={(values) =>
+              setBookDraft((previous) => ({
+                ...previous,
+                characterArcs: parseCharacterArcLines(values),
+              }))
+            }
+            className="md:col-span-2"
+          />
 
           <TextAreaField
             label="整体基调"
@@ -1960,6 +2459,20 @@ export function OutlineView({
           </div>
         </footer>
       </article>
+
+      <ThreadLedgerPanel projectId={projectId} />
+
+      <ForeshadowPlanPanel projectId={projectId} />
+
+      <WorldStatePanel projectId={projectId} />
+
+      <QuestionPoolPanel projectId={projectId} />
+
+      <AntagonistAgendaPanel projectId={projectId} />
+
+      <PovPermissionPanel projectId={projectId} />
+
+      <ResourceContinuityPanel projectId={projectId} />
 
       <section className="space-y-4">
         <header className="flex flex-wrap items-center justify-between gap-3">
@@ -2147,6 +2660,47 @@ export function OutlineView({
                         onChange={(value) => updateVolumeDraft(volume.id, { exitState: value })}
                       />
 
+                      <TextAreaField
+                        label="明面对手"
+                        placeholder="这一卷最直接的对手、势力或压制者是谁？"
+                        value={draft.antagonist}
+                        rows={2}
+                        onChange={(value) => updateVolumeDraft(volume.id, { antagonist: value })}
+                      />
+
+                      <TextAreaField
+                        label="本卷暗线"
+                        placeholder="这一卷主要承接或推进哪条暗线？"
+                        value={draft.subPlot}
+                        rows={2}
+                        onChange={(value) => updateVolumeDraft(volume.id, { subPlot: value })}
+                      />
+
+                      <TextAreaField
+                        label="主角成长"
+                        placeholder="主角在这一卷会完成什么成长、认知升级或能力变化？"
+                        value={draft.protagonistGrowth}
+                        rows={3}
+                        onChange={(value) => updateVolumeDraft(volume.id, { protagonistGrowth: value })}
+                      />
+
+                      <TextAreaField
+                        label="情感推进"
+                        placeholder="这一卷的关系位移、情感张力或情绪主轴是什么？"
+                        value={draft.emotionalArc}
+                        rows={3}
+                        onChange={(value) => updateVolumeDraft(volume.id, { emotionalArc: value })}
+                      />
+
+                      <TextAreaField
+                        label="视角规划"
+                        placeholder="例如：主视角跟许明，个别章切秦小昭，不进入反派内心"
+                        value={draft.povPlan}
+                        rows={3}
+                        onChange={(value) => updateVolumeDraft(volume.id, { povPlan: value })}
+                        className="md:col-span-2"
+                      />
+
                       <label className="space-y-2">
                         <span className="text-sm font-medium text-neutral-200">预估总章数</span>
                         <input
@@ -2160,6 +2714,23 @@ export function OutlineView({
                             })
                           }
                           placeholder="例如：100"
+                          className="h-12 w-full rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-indigo-400"
+                        />
+                      </label>
+
+                      <label className="space-y-2">
+                        <span className="text-sm font-medium text-neutral-200">预估字数</span>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1000}
+                          value={draft.estimatedWordCount > 0 ? String(draft.estimatedWordCount) : ''}
+                          onChange={(event) =>
+                            updateVolumeDraft(volume.id, {
+                              estimatedWordCount: Math.max(0, Math.trunc(Number(event.target.value) || 0)),
+                            })
+                          }
+                          placeholder="例如：300000"
                           className="h-12 w-full rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-indigo-400"
                         />
                       </label>
@@ -2188,6 +2759,19 @@ export function OutlineView({
                         />
                       </div>
 
+                      <TextListField
+                        label="继承线头"
+                        placeholder={'每行一条，使用“线名：承接说明”格式，例如：\n量天司线：上一卷只知道名字，这一卷要查到合法性来源\n秦小昭关系线：从临时合作推进到互相担保'}
+                        values={serializeInheritedThreadLines(draft.inheritedThreads)}
+                        rows={4}
+                        onChange={(values) =>
+                          updateVolumeDraft(volume.id, {
+                            inheritedThreads: parseInheritedThreadLines(values),
+                          })
+                        }
+                        className="md:col-span-2"
+                      />
+
                       <div>
                         <ListFieldEditor
                           label="伏笔安排"
@@ -2207,6 +2791,56 @@ export function OutlineView({
                             setListFieldMode(
                               `volume.${volume.id}.foreshadowSeeds`,
                               (listFieldModes[`volume.${volume.id}.foreshadowSeeds`] ?? 'cards') === 'cards'
+                                ? 'text'
+                                : 'cards',
+                            )
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <ListFieldEditor
+                          label="必需实体"
+                          values={draft.requiredEntities ?? []}
+                          addPlaceholder="输入一个本卷必需重点关注的实体"
+                          textModePlaceholder={'每行一条必需实体，例：\n李四\n谢无咎\n归炉井'}
+                          emptyText="未填写 · 只有必须持续挂在上下文里的实体才需要写。"
+                          helperText="用于把本卷关键角色、势力或地点优先加入上下文。"
+                          mode={listFieldModes[`volume.${volume.id}.requiredEntities`] ?? 'cards'}
+                          inputValue={listFieldInputs[`volume.${volume.id}.requiredEntities`] ?? ''}
+                          onInputChange={(value) =>
+                            setListFieldInput(`volume.${volume.id}.requiredEntities`, value)
+                          }
+                          onChange={(values) => updateVolumeDraft(volume.id, { requiredEntities: values })}
+                          onToggleMode={() =>
+                            setListFieldMode(
+                              `volume.${volume.id}.requiredEntities`,
+                              (listFieldModes[`volume.${volume.id}.requiredEntities`] ?? 'cards') === 'cards'
+                                ? 'text'
+                                : 'cards',
+                            )
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <ListFieldEditor
+                          label="必需伏笔"
+                          values={draft.requiredForeshadows ?? []}
+                          addPlaceholder="输入一个本卷必须持续关注的伏笔"
+                          textModePlaceholder={'每行一条必需伏笔，例：\n黑铁片的真实来历\n谢无咎的真实立场'}
+                          emptyText="未填写 · 只有必须强关注的长线暗线才需要写。"
+                          helperText="用于把本卷关键长线伏笔优先注入 working/retrieval memory。"
+                          mode={listFieldModes[`volume.${volume.id}.requiredForeshadows`] ?? 'cards'}
+                          inputValue={listFieldInputs[`volume.${volume.id}.requiredForeshadows`] ?? ''}
+                          onInputChange={(value) =>
+                            setListFieldInput(`volume.${volume.id}.requiredForeshadows`, value)
+                          }
+                          onChange={(values) => updateVolumeDraft(volume.id, { requiredForeshadows: values })}
+                          onToggleMode={() =>
+                            setListFieldMode(
+                              `volume.${volume.id}.requiredForeshadows`,
+                              (listFieldModes[`volume.${volume.id}.requiredForeshadows`] ?? 'cards') === 'cards'
                                 ? 'text'
                                 : 'cards',
                             )
@@ -2335,6 +2969,37 @@ export function OutlineView({
                                     />
 
                                     <TextAreaField
+                                      label="阶段节奏"
+                                      placeholder="例如：高压 / 蓄力 / 过渡 / 反扑"
+                                      value={milestone.phasePacing}
+                                      rows={2}
+                                      onChange={(value) =>
+                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { phasePacing: value })
+                                      }
+                                    />
+
+                                    <TextAreaField
+                                      label="情感变化"
+                                      placeholder="这一阶段的情绪曲线或关系氛围如何变化？"
+                                      value={milestone.phaseEmotionShift}
+                                      rows={2}
+                                      onChange={(value) =>
+                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { phaseEmotionShift: value })
+                                      }
+                                    />
+
+                                    <TextAreaField
+                                      label="阶段视角"
+                                      placeholder="这一阶段主要跟谁的视角？是否允许辅视角？"
+                                      value={milestone.phasePOV}
+                                      rows={2}
+                                      onChange={(value) =>
+                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { phasePOV: value })
+                                      }
+                                      className="md:col-span-2"
+                                    />
+
+                                    <TextAreaField
                                       label="能力上限"
                                       placeholder="例如：只能站稳脚跟，不能提前无代价击穿终局敌手"
                                       value={milestone.powerCeiling}
@@ -2374,6 +3039,26 @@ export function OutlineView({
                                         updateVolumeMilestoneDraft(volume.id, milestoneIndex, { mustPayoff: values })
                                       }
                                       className="md:col-span-2"
+                                    />
+
+                                    <TextListField
+                                      label="阶段必需实体"
+                                      placeholder="每行一条，这一阶段必须强关注哪些实体"
+                                      values={milestone.requiredEntities ?? []}
+                                      rows={3}
+                                      onChange={(values) =>
+                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { requiredEntities: values })
+                                      }
+                                    />
+
+                                    <TextListField
+                                      label="阶段必需伏笔"
+                                      placeholder="每行一条，这一阶段必须强关注哪些伏笔"
+                                      values={milestone.requiredForeshadows ?? []}
+                                      rows={3}
+                                      onChange={(values) =>
+                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { requiredForeshadows: values })
+                                      }
                                     />
                                   </div>
                                 </article>
@@ -2419,6 +3104,19 @@ export function OutlineView({
                             <Sparkles size={15} />
                           )}
                           AI 补全里程碑
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleReconcileVolumePlan(volume.id)}
+                          disabled={isSavingCurrent || isGeneratingCurrent || isGeneratingMilestonesCurrent || isGeneratingBook || reconcilingVolumeId === volume.id}
+                          className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 text-sm font-medium text-amber-100 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {reconcilingVolumeId === volume.id ? (
+                            <LoaderCircle size={15} className="animate-spin" />
+                          ) : (
+                            <Sparkles size={15} />
+                          )}
+                          修正规划
                         </button>
                         <button
                           type="button"
@@ -2735,6 +3433,26 @@ export function OutlineView({
                                     rows={2}
                                     onChange={(value) =>
                                       updateChapterBeatDraft(row.key, { focusCharacter: value })
+                                    }
+                                  />
+
+                                  <TextListField
+                                    label="必须出场"
+                                    placeholder="每行一条，例如：许明、秦小昭"
+                                    values={beatDraft.mustAppearCharacters ?? []}
+                                    rows={3}
+                                    onChange={(values) =>
+                                      updateChapterBeatDraft(row.key, { mustAppearCharacters: values })
+                                    }
+                                  />
+
+                                  <TextListField
+                                    label="可出场候选"
+                                    placeholder="每行一条，例如：绳、余化及、茶铺老板"
+                                    values={beatDraft.availableCharacters ?? []}
+                                    rows={3}
+                                    onChange={(values) =>
+                                      updateChapterBeatDraft(row.key, { availableCharacters: values })
                                     }
                                   />
 
@@ -3075,6 +3793,93 @@ export function OutlineView({
                 {fissionDialogMode === 'milestone' && fissionDialogOverwriteChapterCount > 0
                   ? '确认覆盖并裂变'
                   : '开始裂变'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {volumePlanReconcilePreview ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/55 px-4 py-6 backdrop-blur-sm">
+          <div className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-900 shadow-2xl shadow-black/40">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-6 py-5">
+              <div>
+                <h3 className="text-lg font-semibold text-neutral-100">卷规划修正建议</h3>
+                <p className="mt-1 text-sm text-neutral-500">《{volumePlanReconcilePreview.volumeTitle}》已根据最新正文与设定生成修正稿。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setVolumePlanReconcilePreview(null)}
+                className="rounded-2xl p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="max-h-[72vh] overflow-y-auto px-6 py-6">
+              <section className="mb-5 rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+                <p className="text-sm font-medium text-neutral-200">修正说明</p>
+                <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-neutral-400">
+                  {volumePlanReconcilePreview.response.changeSummary}
+                </p>
+                {volumePlanReconcilePreview.response.riskNotes.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">风险提示</p>
+                    {volumePlanReconcilePreview.response.riskNotes.map((note) => (
+                      <div key={note} className="rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm leading-6 text-neutral-400">
+                        {note}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="grid gap-5 xl:grid-cols-2">
+                <div className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+                  <p className="text-sm font-medium text-neutral-200">当前规划</p>
+                  <div className="mt-4 grid gap-4">
+                    <div>
+                      <p className="mb-2 text-xs uppercase tracking-[0.18em] text-neutral-500">卷纲</p>
+                      <pre className="whitespace-pre-wrap rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-4 text-sm leading-7 text-neutral-400">{volumePlanReconcilePreview.currentOutlineText}</pre>
+                    </div>
+                    <div>
+                      <p className="mb-2 text-xs uppercase tracking-[0.18em] text-neutral-500">里程碑</p>
+                      <pre className="whitespace-pre-wrap rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-4 text-sm leading-7 text-neutral-400">{volumePlanReconcilePreview.currentMilestonesText}</pre>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-emerald-500/30 bg-emerald-500/10 p-5">
+                  <p className="text-sm font-medium text-emerald-100">建议规划</p>
+                  <div className="mt-4 grid gap-4">
+                    <div>
+                      <p className="mb-2 text-xs uppercase tracking-[0.18em] text-emerald-200/70">卷纲</p>
+                      <pre className="whitespace-pre-wrap rounded-2xl border border-emerald-500/20 bg-neutral-950/80 px-4 py-4 text-sm leading-7 text-emerald-50">{volumePlanReconcilePreview.proposedOutlineText}</pre>
+                    </div>
+                    <div>
+                      <p className="mb-2 text-xs uppercase tracking-[0.18em] text-emerald-200/70">里程碑</p>
+                      <pre className="whitespace-pre-wrap rounded-2xl border border-emerald-500/20 bg-neutral-950/80 px-4 py-4 text-sm leading-7 text-emerald-50">{volumePlanReconcilePreview.proposedMilestonesText}</pre>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-neutral-800 px-6 py-5">
+              <button
+                type="button"
+                onClick={() => setVolumePlanReconcilePreview(null)}
+                className="rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-300 transition hover:border-neutral-500 hover:bg-neutral-800"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleApplyVolumePlanReconcile()}
+                className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-2.5 text-sm font-medium text-neutral-950 transition hover:bg-emerald-300"
+              >
+                <CheckCircle2 size={15} />
+                一键覆盖当前卷规划
               </button>
             </div>
           </div>

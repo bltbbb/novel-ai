@@ -339,6 +339,75 @@
 
 > 滚动规划裂变功能已实现到“可进入验证”的状态，下一步不再是补功能，而是验证与小修。
 
+### 2.14 长篇生成前置能力补强（已实现并完成基础验证）
+
+围绕“书纲 -> 卷纲 -> 里程碑 -> 章节拍”这条时间轴，当前已补完第一版前置能力增强，目标是让立项、实体轴与长线暗线能更稳定地进入后续自动化生成。
+
+当前已落地：
+
+- 已增强现有 `InspirationDialog`，不是新造第二套入口
+- 项目列表当前同时保留：
+  - 直接创建项目
+  - 灵感入口
+- 已新增服务端结构化提炼接口：
+  - `POST /api/ai/inspiration-blueprint`
+- 灵感入口当前已支持：
+  - 多轮讨论
+  - `coverage` 四项 checklist
+  - 一键生成项目
+  - 初始 `Lore / Foreshadow` 落库
+  - 书纲生成
+  - 第一卷卷纲与里程碑生成
+- 卷纲与里程碑当前已新增：
+  - `requiredEntities`
+  - `requiredForeshadows`
+- 以上新字段当前已贯通：
+  - 前后端类型
+  - 前端本地保存
+  - 序列化
+  - 归档导入导出
+  - 服务端 `volume-outline / volume-milestones` 归一化
+- 运行时上下文当前已开始消费：
+  - `requiredEntityNames`
+  - `requiredForeshadowTitles`
+- 当前策略是：
+  - `requiredEntities` 合并进服务端 `focusEntityNames`
+  - `requiredForeshadows` 同时影响 active foreshadow 注入与 dormant foreshadow recall
+- 若灵感入口或卷纲/里程碑引用了尚未存在的实体，当前会自动创建带 `#placeholder` 标签的占位 `Lore`
+- 已新增当前卷规划修正接口：
+  - `POST /api/ai/volume-plan-reconcile`
+- 前端 `OutlineView` 当前已支持：
+  - 修正规划按钮
+  - 新旧两栏建议稿对比
+  - 一键覆盖当前卷规划
+- `GenerationView` 当前已补轻量入口：
+  - 可直接跳回大纲页修正规划
+
+本轮已实际验证：
+
+- 前端构建通过：`app/npm run build`
+- 后端构建通过：`server/npm run build`
+- 已通过 e2e：
+  - `records-foreshadow.spec.ts`
+  - `settings-gate-config.spec.ts`
+  - `archive-import.spec.ts`
+  - `inspiration-entry.spec.ts`
+  - `volume-plan-reconcile.spec.ts`
+- 常用回归脚本当前已更新：
+  - `test:e2e:records` 已纳入 `inspiration-entry.spec.ts`
+  - `test:e2e:generation` 已纳入 `volume-plan-reconcile.spec.ts`
+
+当前专项文档：
+
+- `长篇生成前置能力补强方案.md`
+
+当前口径要保持准确：
+
+- 这一轮可以视为“代码实现完成 + 基础验证已通过”
+- 不等价于已完成所有灵感入口产品化细节
+- 不等价于 Drift Correction 已进入自动修正阶段
+- 当前更适合转入后续真实使用观察与小修，而不是继续大改架构
+
 ---
 
 ## 3. 当前配置流转

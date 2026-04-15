@@ -1,6 +1,14 @@
 import { richTextToPlainText } from '@/lib/editor-content';
+import { CHARACTER_CARD_FIELD_TOTAL, getCharacterCardFilledCount, getLoreEntityMatchTerms } from '@/lib/lore-entity';
 import { getLoreEntityTypeLabel } from '@/lib/lore-meta';
-import type { LoreEntity, RichTextDocument, SearchResult } from '@/types';
+import type {
+  EntityRelation,
+  GenerationDebugChapterRecord,
+  GenerationDebugRelationshipRecord,
+  LoreEntity,
+  RichTextDocument,
+  SearchResult,
+} from '@/types';
 
 export interface ConsistencyHint {
   id: string;
@@ -8,6 +16,8 @@ export interface ConsistencyHint {
   title: string;
   description: string;
   entityId?: string;
+  relationId?: string;
+  chapterId?: string;
 }
 
 interface AnalyzeLoreConsistencyInput {
@@ -78,13 +88,19 @@ function createSparseEntityHints(matchedEntities: LoreEntity[]) {
       ];
     }
 
-    if (entity.type === 'character' && fieldCount < 2) {
+    if (entity.type === 'character') {
+      const filledCount = getCharacterCardFilledCount(entity.fields);
+
+      if (filledCount >= CHARACTER_CARD_FIELD_TOTAL) {
+        return [];
+      }
+
       return [
         {
           id: `character-fields:${entity.id}`,
           level: 'info' as const,
           title: `${entity.name} 的人物字段偏少`,
-          description: '建议补充身份、立场、状态等字段，能更稳定地约束人物表现。',
+          description: `当前已填写 ${filledCount}/${CHARACTER_CARD_FIELD_TOTAL} 项人物卡字段，建议继续补充人格内核与当前阶段状态。`,
           entityId: entity.id,
         },
       ];
@@ -130,9 +146,11 @@ function createFieldConflictHints(matchedEntities: LoreEntity[], allEntities: Lo
   const normalizedContent = normalizeText(plainText);
 
   for (const entity of matchedEntities) {
-    const contentWindow = normalizeText(getContentWindow(plainText, entity.name));
+    const matchedAnchor =
+      [entity.name, ...(entity.aliases ?? [])].find((anchor) => plainText.includes(anchor)) ?? entity.name;
+    const contentWindow = normalizeText(getContentWindow(plainText, matchedAnchor));
 
-    if (!contentWindow && !normalizedContent.includes(normalizeText(entity.name))) {
+    if (!contentWindow && !getLoreEntityMatchTerms(entity).some((term) => normalizedContent.includes(term))) {
       continue;
     }
 
@@ -181,6 +199,90 @@ function deduplicateHints(hints: ConsistencyHint[]) {
     seen.add(hint.id);
     return true;
   });
+}
+
+function buildRelationPairKey(left: string, right: string) {
+  return [normalizeText(left), normalizeText(right)].sort().join('::');
+}
+
+function isExplicitSnapshotRelationship(item: GenerationDebugRelationshipRecord) {
+  return item.sourceKind === 'explicit_manual' || item.sourceKind === 'explicit_manual_draft';
+}
+
+export function analyzeExplicitRelationCoverage(input: {
+  relations: EntityRelation[];
+  chapterRecords: Pick<GenerationDebugChapterRecord, 'chapterId' | 'chapterTitle' | 'chapterOrder' | 'entitiesAppeared'>[];
+  runtimeRelationships: GenerationDebugRelationshipRecord[];
+}) {
+  const runtimePairMap = new Map<string, GenerationDebugRelationshipRecord[]>();
+
+  for (const item of input.runtimeRelationships) {
+    if (isExplicitSnapshotRelationship(item)) {
+      continue;
+    }
+
+    const sourceEntityName = item.sourceEntityName?.trim() ?? '';
+    const targetEntityName = item.targetEntityName?.trim() ?? '';
+
+    if (!sourceEntityName || !targetEntityName || !item.chapterId) {
+      continue;
+    }
+
+    const pairKey = `${item.chapterId}::${buildRelationPairKey(sourceEntityName, targetEntityName)}`;
+    const bucket = runtimePairMap.get(pairKey) ?? [];
+
+    bucket.push(item);
+    runtimePairMap.set(pairKey, bucket);
+  }
+
+  const hints = input.relations.flatMap((relation) => {
+    if (relation.draft) {
+      return [];
+    }
+
+    const sourceEntityName = relation.sourceEntityName.trim();
+    const targetEntityName = relation.targetEntityName.trim();
+
+    if (!sourceEntityName || !targetEntityName) {
+      return [];
+    }
+
+    const coAppearedChapters = input.chapterRecords
+      .filter((chapter) => {
+        const normalizedEntitySet = new Set((chapter.entitiesAppeared ?? []).map((item) => normalizeText(item)));
+        return normalizedEntitySet.has(normalizeText(sourceEntityName)) && normalizedEntitySet.has(normalizeText(targetEntityName));
+      })
+      .sort((left, right) => right.chapterOrder - left.chapterOrder);
+
+    if (coAppearedChapters.length === 0) {
+      return [];
+    }
+
+    const uncoveredChapters = coAppearedChapters.filter((chapter) => {
+      const pairKey = `${chapter.chapterId}::${buildRelationPairKey(sourceEntityName, targetEntityName)}`;
+      return (runtimePairMap.get(pairKey) ?? []).length === 0;
+    });
+
+    if (uncoveredChapters.length === 0) {
+      return [];
+    }
+
+    const firstChapter = uncoveredChapters[0];
+
+    return [
+      {
+        id: `relation-coverage:${relation.id}:${firstChapter.chapterId}`,
+        level: 'warning' as const,
+        title: `${sourceEntityName} 与 ${targetEntityName} 已同场，但关系未沉淀`,
+        description: `在《${firstChapter.chapterTitle}》等 ${uncoveredChapters.length} 章里，两人已经同时出场，但运行态还没有记录到这对角色的关系变化。显式关系「${relation.relationType}」可能没有真正落到正文。`,
+        entityId: relation.sourceEntityId,
+        relationId: relation.id,
+        chapterId: firstChapter.chapterId,
+      },
+    ];
+  });
+
+  return deduplicateHints(hints).slice(0, 5);
 }
 
 export function analyzeLoreConsistency(input: AnalyzeLoreConsistencyInput) {

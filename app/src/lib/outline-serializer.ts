@@ -1,6 +1,8 @@
 import type {
   BookOutline,
   BookOutlineFields,
+  BookCharacterArcDraft,
+  VolumeInheritedThreadDraft,
   VolumeMilestoneDraft,
   VolumeOutline,
   VolumeOutlineFields,
@@ -16,6 +18,52 @@ function formatList(title: string, values: string[]) {
   return [title, ...sanitized.map((item) => `- ${item}`)].join('\n');
 }
 
+function formatOptionalList(title: string, values?: string[]) {
+  return formatList(title, values ?? []);
+}
+
+function formatCharacterArcs(title: string, values: BookCharacterArcDraft[]) {
+  const sanitized = values
+    .map((item) => {
+      const characterName = item.characterName.trim();
+      const arc = item.arc.trim();
+
+      if (!characterName && !arc) {
+        return '';
+      }
+
+      if (!characterName) {
+        return arc;
+      }
+
+      return arc ? `${characterName}：${arc}` : characterName;
+    })
+    .filter(Boolean);
+
+  return formatList(title, sanitized);
+}
+
+function formatInheritedThreads(title: string, values: VolumeInheritedThreadDraft[]) {
+  const sanitized = values
+    .map((item) => {
+      const threadName = item.threadName.trim();
+      const note = item.note.trim();
+
+      if (!threadName && !note) {
+        return '';
+      }
+
+      if (!threadName) {
+        return note;
+      }
+
+      return note ? `${threadName}：${note}` : threadName;
+    })
+    .filter(Boolean);
+
+  return formatList(title, sanitized);
+}
+
 function formatMilestones(milestones: VolumeMilestoneDraft[]) {
   const sanitized = milestones.filter(
     (milestone) =>
@@ -24,9 +72,14 @@ function formatMilestones(milestones: VolumeMilestoneDraft[]) {
       milestone.phaseConflict.trim() ||
       milestone.entryState.trim() ||
       milestone.exitState.trim() ||
+      milestone.phasePacing.trim() ||
+      milestone.phaseEmotionShift.trim() ||
+      milestone.phasePOV.trim() ||
       milestone.keyTurns.length > 0 ||
       milestone.mustPlant.length > 0 ||
       milestone.mustPayoff.length > 0 ||
+      (milestone.requiredEntities?.length ?? 0) > 0 ||
+      (milestone.requiredForeshadows?.length ?? 0) > 0 ||
       milestone.powerCeiling.trim() ||
       milestone.targetChapterCount > 0,
   );
@@ -45,10 +98,19 @@ function formatMilestones(milestones: VolumeMilestoneDraft[]) {
         milestone.phaseConflict.trim() ? `  - 阶段冲突：${milestone.phaseConflict.trim()}` : '',
         milestone.entryState.trim() ? `  - 进入状态：${milestone.entryState.trim()}` : '',
         milestone.exitState.trim() ? `  - 结束状态：${milestone.exitState.trim()}` : '',
+        milestone.phasePacing.trim() ? `  - 阶段节奏：${milestone.phasePacing.trim()}` : '',
+        milestone.phaseEmotionShift.trim() ? `  - 情感变化：${milestone.phaseEmotionShift.trim()}` : '',
+        milestone.phasePOV.trim() ? `  - 阶段视角：${milestone.phasePOV.trim()}` : '',
         milestone.powerCeiling.trim() ? `  - 能力上限：${milestone.powerCeiling.trim()}` : '',
         milestone.keyTurns.length > 0 ? `  - 关键转折：${milestone.keyTurns.join('；')}` : '',
         milestone.mustPlant.length > 0 ? `  - 必埋伏笔：${milestone.mustPlant.join('；')}` : '',
         milestone.mustPayoff.length > 0 ? `  - 必回收：${milestone.mustPayoff.join('；')}` : '',
+        milestone.requiredEntities && milestone.requiredEntities.length > 0
+          ? `  - 必需实体：${milestone.requiredEntities.join('；')}`
+          : '',
+        milestone.requiredForeshadows && milestone.requiredForeshadows.length > 0
+          ? `  - 必需伏笔：${milestone.requiredForeshadows.join('；')}`
+          : '',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -66,10 +128,15 @@ export function serializeSingleMilestone(milestone: VolumeMilestoneDraft, index?
     milestone.phaseConflict.trim() ? `阶段冲突：${milestone.phaseConflict.trim()}` : '',
     milestone.entryState.trim() ? `进入状态：${milestone.entryState.trim()}` : '',
     milestone.exitState.trim() ? `结束状态：${milestone.exitState.trim()}` : '',
+    milestone.phasePacing.trim() ? `阶段节奏：${milestone.phasePacing.trim()}` : '',
+    milestone.phaseEmotionShift.trim() ? `情感变化：${milestone.phaseEmotionShift.trim()}` : '',
+    milestone.phasePOV.trim() ? `阶段视角：${milestone.phasePOV.trim()}` : '',
     milestone.powerCeiling.trim() ? `能力上限：${milestone.powerCeiling.trim()}` : '',
     milestone.keyTurns.length > 0 ? `关键转折：${milestone.keyTurns.join('；')}` : '',
     milestone.mustPlant.length > 0 ? `必埋伏笔：${milestone.mustPlant.join('；')}` : '',
     milestone.mustPayoff.length > 0 ? `必回收：${milestone.mustPayoff.join('；')}` : '',
+    formatOptionalList('必需实体：', milestone.requiredEntities),
+    formatOptionalList('必需伏笔：', milestone.requiredForeshadows),
   ]
     .filter(Boolean)
     .join('\n');
@@ -81,6 +148,12 @@ export function serializeBookOutline(outline: BookOutline | BookOutlineFields) {
     outline.centralConflict.trim() ? `主冲突：${outline.centralConflict.trim()}` : '',
     outline.protagonistArc.trim() ? `主角弧线：${outline.protagonistArc.trim()}` : '',
     outline.thematicCore.trim() ? `主题内核：${outline.thematicCore.trim()}` : '',
+    formatList('副线规划：', outline.subPlots),
+    formatCharacterArcs('角色弧线：', outline.characterArcs),
+    outline.powerSystem.trim() ? `能力体系：${outline.powerSystem.trim()}` : '',
+    outline.antagonistSystem.trim() ? `对抗体系：${outline.antagonistSystem.trim()}` : '',
+    outline.narrativeArc.trim() ? `叙事弧线：${outline.narrativeArc.trim()}` : '',
+    outline.logline.trim() ? `一句话卖点：${outline.logline.trim()}` : '',
     formatList('世界规则：', outline.worldRules),
     outline.endgameHint.trim() ? `结局方向：${outline.endgameHint.trim()}` : '',
     outline.toneGuide.trim() ? `整体基调：${outline.toneGuide.trim()}` : '',
@@ -96,9 +169,18 @@ export function serializeVolumeOutline(outline: VolumeOutline | VolumeOutlineFie
     outline.arcSummary.trim() ? `弧线概述：${outline.arcSummary.trim()}` : '',
     outline.entryState.trim() ? `卷初状态：${outline.entryState.trim()}` : '',
     outline.exitState.trim() ? `卷末状态：${outline.exitState.trim()}` : '',
+    outline.antagonist.trim() ? `明面对手：${outline.antagonist.trim()}` : '',
+    outline.subPlot.trim() ? `本卷暗线：${outline.subPlot.trim()}` : '',
+    formatInheritedThreads('继承线头：', outline.inheritedThreads),
+    outline.protagonistGrowth.trim() ? `主角成长：${outline.protagonistGrowth.trim()}` : '',
+    outline.emotionalArc.trim() ? `情感推进：${outline.emotionalArc.trim()}` : '',
     outline.estimatedChapterCount > 0 ? `预估总章数：${outline.estimatedChapterCount}` : '',
+    outline.estimatedWordCount > 0 ? `预估字数：${outline.estimatedWordCount}` : '',
+    outline.povPlan.trim() ? `视角规划：${outline.povPlan.trim()}` : '',
     formatList('关键事件：', outline.keyEvents),
     formatList('伏笔安排：', outline.foreshadowSeeds),
+    formatOptionalList('必需实体：', outline.requiredEntities),
+    formatOptionalList('必需伏笔：', outline.requiredForeshadows),
     formatMilestones(outline.milestones ?? []),
   ]
     .filter(Boolean)

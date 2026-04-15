@@ -1,11 +1,16 @@
-import { buildWritingRulesPrompt } from '../prompts/index.js';
+import { buildWritingRulesPrompt, WRITING_RULES_MARKER } from '../prompts/index.js';
 import { completeChatCompletion } from './openai.js';
 import { buildGenerationContextBundle } from './generation-context.js';
 import { replaceGenerationForeshadows } from './generation-foreshadow-store.js';
+import { upsertGenerationEntitiesSnapshot } from './generation-knowledge-store.js';
 import {
   detectResourceContinuityIssue,
   loadResourceStateRows,
 } from './generation-resource-continuity.js';
+import {
+  detectStructuredResourceContinuityIssue,
+  listResourceContinuities,
+} from './structured-resource-continuity-store.js';
 import {
   buildItemStateCandidateBlock,
   detectItemContinuityIssue,
@@ -13,6 +18,8 @@ import {
 } from './generation-item-continuity.js';
 import { buildCurrentStateTableBlock, foldCurrentStateTable } from './generation-state-table.js';
 import type {
+  AIInspirationBlueprint,
+  AIInspirationBlueprintRequest,
   AIBookOutlineRequest,
   AIBookOutlineResponse,
   AIChatRequest,
@@ -34,6 +41,8 @@ import type {
   AIVolumeMilestonesResponse,
   AIVolumeOutlineRequest,
   AIVolumeOutlineResponse,
+  AIVolumePlanReconcileRequest,
+  AIVolumePlanReconcileResponse,
   AIWriteRequest,
   AIWriteResponse,
   BookOutlineFields,
@@ -42,10 +51,13 @@ import type {
   ChapterReviewDraft,
   ChapterStyleDraft,
   GenerationGateConfig,
+  GenerationEntitySnapshot,
+  GenerationRelationSnapshot,
   GenerationForeshadowSnapshot,
   ChapterOutlineDraft,
   ChapterSummaryDraft,
   HookStrength,
+  LoreEntityType,
   ReviewCheckerResult,
   ReviewCheckerType,
   ReviewIssue,
@@ -70,10 +82,19 @@ type ContextAwareRequest = {
   previousSummary?: string;
   worldState?: string;
   contextBundle?: string;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
   outline?: ChapterOutlineDraft | null;
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   gateConfigOverride?: GenerationGateConfig | null;
 };
+
+const GENERATION_PROMPT_LIMITS = {
+  completedTextTailChars: 2200,
+} as const;
 
 function stripMarkdownCodeFence(text: string) {
   return text
@@ -282,6 +303,93 @@ function sanitizeStringList(value: unknown) {
     .filter(Boolean);
 }
 
+function sanitizeOptionalStringList(value: unknown) {
+  return sanitizeStringList(value).slice(0, 12);
+}
+
+function sanitizeCharacterArcs(value: unknown): BookOutlineFields['characterArcs'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      const candidate =
+        item && typeof item === 'object'
+          ? (item as { characterId?: unknown; characterName?: unknown; arc?: unknown })
+          : {};
+
+      return {
+        characterId: typeof candidate.characterId === 'string' ? candidate.characterId : null,
+        characterName: sanitizeString(candidate.characterName),
+        arc: sanitizeString(candidate.arc),
+      };
+    })
+    .filter((item) => item.characterName || item.arc)
+    .slice(0, 12);
+}
+
+function sanitizeInheritedThreads(value: unknown): VolumeOutlineFields['inheritedThreads'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      const candidate =
+        item && typeof item === 'object'
+          ? (item as { threadId?: unknown; threadName?: unknown; note?: unknown })
+          : {};
+
+      return {
+        threadId: typeof candidate.threadId === 'string' ? candidate.threadId : null,
+        threadName: sanitizeString(candidate.threadName),
+        note: sanitizeString(candidate.note),
+      };
+    })
+    .filter((item) => item.threadName || item.note)
+    .slice(0, 12);
+}
+
+function sanitizeLoreEntityFields(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {} as Record<string, string | number | boolean | null>;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, fieldValue]) => {
+      return fieldValue === null || ['string', 'number', 'boolean'].includes(typeof fieldValue);
+    })
+    .map(([field, fieldValue]) => {
+      if (typeof fieldValue === 'string') {
+        return [field.trim(), fieldValue.trim()] as const;
+      }
+
+      return [field.trim(), fieldValue as string | number | boolean | null] as const;
+    })
+    .filter(([field, fieldValue]) => {
+      if (!field) {
+        return false;
+      }
+
+      return fieldValue === null || typeof fieldValue !== 'string' || fieldValue.length > 0;
+    })
+    .slice(0, 16);
+
+  return Object.fromEntries(entries);
+}
+
+function sanitizeLoreEntityType(value: unknown): LoreEntityType {
+  return value === 'character' ||
+    value === 'faction' ||
+    value === 'location' ||
+    value === 'magic_system' ||
+    value === 'item' ||
+    value === 'event'
+    ? value
+    : 'character';
+}
+
 function sanitizePositiveInteger(value: unknown, fallback = 0) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return fallback;
@@ -306,10 +414,15 @@ function normalizeVolumeMilestones(value: unknown): VolumeMilestoneDraft[] {
         phaseConflict: sanitizeString(candidate.phaseConflict),
         entryState: sanitizeString(candidate.entryState),
         exitState: sanitizeString(candidate.exitState),
+        phasePacing: sanitizeString(candidate.phasePacing),
+        phaseEmotionShift: sanitizeString(candidate.phaseEmotionShift),
+        phasePOV: sanitizeString(candidate.phasePOV),
         keyTurns: sanitizeStringList(candidate.keyTurns).slice(0, 8),
         mustPlant: sanitizeStringList(candidate.mustPlant).slice(0, 8),
         mustPayoff: sanitizeStringList(candidate.mustPayoff).slice(0, 8),
         powerCeiling: sanitizeString(candidate.powerCeiling),
+        requiredEntities: sanitizeOptionalStringList(candidate.requiredEntities),
+        requiredForeshadows: sanitizeOptionalStringList(candidate.requiredForeshadows),
       };
     })
     .filter(
@@ -319,9 +432,14 @@ function normalizeVolumeMilestones(value: unknown): VolumeMilestoneDraft[] {
         milestone.phaseConflict ||
         milestone.entryState ||
         milestone.exitState ||
+        milestone.phasePacing ||
+        milestone.phaseEmotionShift ||
+        milestone.phasePOV ||
         milestone.keyTurns.length > 0 ||
         milestone.mustPlant.length > 0 ||
         milestone.mustPayoff.length > 0 ||
+        milestone.requiredEntities.length > 0 ||
+        milestone.requiredForeshadows.length > 0 ||
         milestone.powerCeiling ||
         milestone.targetChapterCount > 0,
     )
@@ -381,6 +499,12 @@ function normalizeBookOutline(raw: unknown): BookOutlineFields {
     centralConflict: sanitizeString(candidate.centralConflict, '主角目标与世界阻力之间的长期对抗。'),
     protagonistArc: sanitizeString(candidate.protagonistArc, '主角将从被动应对成长为能够主动改写局势的人。'),
     thematicCore: sanitizeString(candidate.thematicCore, '代价、选择与成长。'),
+    subPlots: sanitizeStringList(candidate.subPlots).slice(0, 8),
+    characterArcs: sanitizeCharacterArcs(candidate.characterArcs),
+    powerSystem: sanitizeString(candidate.powerSystem, '能力体系需要有明确边界、代价与阶段提升逻辑。'),
+    antagonistSystem: sanitizeString(candidate.antagonistSystem, '主角将长期面对一套稳定存在的敌对秩序或压制体系。'),
+    narrativeArc: sanitizeString(candidate.narrativeArc, '故事节奏应从建立问题、扩大冲突到最终收束形成完整弧线。'),
+    logline: sanitizeString(candidate.logline, '一句话概括主角、冲突和独特卖点。'),
     worldRules: sanitizeStringList(candidate.worldRules).slice(0, 8),
     endgameHint: sanitizeString(candidate.endgameHint, '最终会回到全书最初埋下的核心问题。'),
     toneGuide: sanitizeString(candidate.toneGuide, '保持故事感、冲突感与持续追读动力。'),
@@ -398,10 +522,128 @@ function normalizeVolumeOutline(raw: unknown): VolumeOutlineFields {
     arcSummary: sanitizeString(candidate.arcSummary, '本卷将完成一段相对完整的阶段弧线。'),
     entryState: sanitizeString(candidate.entryState, '主角带着上卷遗留问题进入本卷。'),
     exitState: sanitizeString(candidate.exitState, '主角在付出代价后进入下一阶段。'),
+    antagonist: sanitizeString(candidate.antagonist, '本卷会有明确的阻力方或明面对手。'),
+    subPlot: sanitizeString(candidate.subPlot, '本卷至少会并行推进一条副线或暗线。'),
+    inheritedThreads: sanitizeInheritedThreads(candidate.inheritedThreads),
+    protagonistGrowth: sanitizeString(candidate.protagonistGrowth, '主角会在本卷完成明确的能力、认知或立场变化。'),
+    emotionalArc: sanitizeString(candidate.emotionalArc, '本卷关系位移与情绪主轴需要持续推进。'),
+    estimatedWordCount: sanitizePositiveInteger(candidate.estimatedWordCount),
+    povPlan: sanitizeString(candidate.povPlan, '本卷需要明确主视角与可切换的辅视角边界。'),
     keyEvents: sanitizeStringList(candidate.keyEvents).slice(0, 8),
     foreshadowSeeds: sanitizeStringList(candidate.foreshadowSeeds).slice(0, 8),
+    requiredEntities: sanitizeOptionalStringList(candidate.requiredEntities),
+    requiredForeshadows: sanitizeOptionalStringList(candidate.requiredForeshadows),
     estimatedChapterCount: sanitizePositiveInteger(candidate.estimatedChapterCount, milestoneChapterCount),
     milestones,
+  };
+}
+
+function normalizeInspirationCoverage(raw: unknown): AIInspirationBlueprint['coverage'] {
+  const candidate = (raw && typeof raw === 'object' ? raw : {}) as Partial<AIInspirationBlueprint['coverage']>;
+
+  return {
+    coreHook: Boolean(candidate.coreHook),
+    protagonistDrive: Boolean(candidate.protagonistDrive),
+    worldSlice: Boolean(candidate.worldSlice),
+    endgameConflict: Boolean(candidate.endgameConflict),
+  };
+}
+
+function normalizeInspirationBlueprint(raw: unknown): AIInspirationBlueprint {
+  const candidate = (raw && typeof raw === 'object' ? raw : {}) as Partial<AIInspirationBlueprint>;
+  const volumePlans = Array.isArray(candidate.volumePlans)
+    ? candidate.volumePlans
+      .map((item) => {
+        const plan = (item && typeof item === 'object' ? item : {}) as { title?: unknown; summary?: unknown };
+        return {
+          title: sanitizeString(plan.title),
+          summary: sanitizeString(plan.summary),
+        };
+      })
+      .filter((plan) => plan.title || plan.summary)
+      .slice(0, 4)
+    : [];
+  const seedEntities = Array.isArray(candidate.seedEntities)
+    ? candidate.seedEntities
+      .map((item) => {
+        const entity = (item && typeof item === 'object' ? item : {}) as {
+          type?: unknown;
+          name?: unknown;
+          description?: unknown;
+          fields?: unknown;
+          tags?: unknown;
+          aliases?: unknown;
+          pinned?: unknown;
+          draft?: unknown;
+        };
+
+        return {
+          type: sanitizeLoreEntityType(entity.type),
+          name: sanitizeString(entity.name),
+          description: sanitizeString(entity.description),
+          fields: sanitizeLoreEntityFields(entity.fields),
+          tags: sanitizeOptionalStringList(entity.tags),
+          aliases: sanitizeOptionalStringList(entity.aliases),
+          pinned: typeof entity.pinned === 'boolean' ? entity.pinned : undefined,
+          draft: typeof entity.draft === 'boolean' ? entity.draft : true,
+        };
+      })
+      .filter((entity) => entity.name)
+      .slice(0, 8)
+    : [];
+  const seedForeshadows = Array.isArray(candidate.seedForeshadows)
+    ? candidate.seedForeshadows
+      .map((item) => {
+        const foreshadow = (item && typeof item === 'object' ? item : {}) as {
+          title?: unknown;
+          notes?: unknown;
+          linkedEntityNames?: unknown;
+        };
+
+        return {
+          title: sanitizeString(foreshadow.title),
+          notes: sanitizeString(foreshadow.notes),
+          linkedEntityNames: sanitizeOptionalStringList(foreshadow.linkedEntityNames),
+        };
+      })
+      .filter((foreshadow) => foreshadow.title)
+      .slice(0, 8)
+    : [];
+
+  return {
+    projectTitle: sanitizeString(candidate.projectTitle, '未命名项目'),
+    projectDescription: sanitizeString(candidate.projectDescription),
+    genres: sanitizeOptionalStringList(candidate.genres).slice(0, 3),
+    projectStylePrompt: sanitizeString(candidate.projectStylePrompt),
+    discussionSummary: sanitizeString(candidate.discussionSummary),
+    bookOutlineHint: sanitizeString(candidate.bookOutlineHint),
+    volumePlans: volumePlans.length > 0 ? volumePlans : [{ title: '第一卷', summary: '' }],
+    seedEntities,
+    seedForeshadows,
+    coverage: normalizeInspirationCoverage(candidate.coverage),
+  };
+}
+
+function normalizeVolumePlanReconcileResponse(raw: unknown): AIVolumePlanReconcileResponse {
+  const candidate = (raw && typeof raw === 'object' ? raw : {}) as {
+    proposedVolumeOutline?: unknown;
+    proposedMilestones?: unknown;
+    changeSummary?: unknown;
+    riskNotes?: unknown;
+  };
+  const proposedVolumeOutline = normalizeVolumeOutline(candidate.proposedVolumeOutline);
+  const proposedMilestones = Array.isArray(candidate.proposedMilestones)
+    ? normalizeVolumeMilestones(candidate.proposedMilestones)
+    : proposedVolumeOutline.milestones;
+
+  return {
+    proposedVolumeOutline: {
+      ...proposedVolumeOutline,
+      milestones: proposedMilestones,
+    },
+    proposedMilestones,
+    changeSummary: sanitizeString(candidate.changeSummary, '已根据最新正文与设定生成卷规划修正建议。'),
+    riskNotes: sanitizeOptionalStringList(candidate.riskNotes).slice(0, 8),
   };
 }
 
@@ -417,6 +659,8 @@ function normalizeVolumeBeatDraft(raw: unknown, slot: VolumeBeatChapterSlot): Vo
     titleHint: sanitizeString(candidate.titleHint),
     scenePurpose: sanitizeString(candidate.scenePurpose, `第${slot.chapterNumber}章需要承担新的场景功能。`),
     focusCharacter: sanitizeString(candidate.focusCharacter, '主角'),
+    mustAppearCharacters: sanitizeOptionalStringList(candidate.mustAppearCharacters),
+    availableCharacters: sanitizeOptionalStringList(candidate.availableCharacters),
     mainPlot: sanitizeString(candidate.mainPlot, '推进当前卷主线并制造新的局势变化。'),
     subPlot: sanitizeString(candidate.subPlot),
     pacing: sanitizeString(candidate.pacing, '中速推进'),
@@ -1160,6 +1404,160 @@ function detectRepeatedDirectiveDialogueIssue(content: string): ReviewIssue | nu
   return null;
 }
 
+function normalizeLightCheckText(text: string) {
+  return text.replace(/\s+/gu, '').toLowerCase();
+}
+
+function buildLightCheckKeywords(text: string) {
+  return Array.from(
+    new Set(
+      (text.match(/[A-Za-z0-9\u4e00-\u9fa5]{2,8}/gu) ?? [])
+        .map((item) => item.trim())
+        .filter((item) =>
+          item.length >= 2
+          && !/^(关系|当前|状态|原因|强度|建立|态度|本质|锚点|显式|已确认|草案)$/u.test(item),
+        ),
+    ),
+  );
+}
+
+function detectRepeatedDialoguePatternIssue(content: string): ReviewIssue | null {
+  const quotePattern = /“([^”]{6,60})”/gu;
+  const quotes: Array<{ text: string; normalized: string; index: number }> = [];
+  let matched: RegExpExecArray | null = quotePattern.exec(content);
+
+  while (matched) {
+    const text = matched[1].trim();
+    const normalized = normalizeLightCheckText(text).replace(/[，。！？、；：,.!?;:]/gu, '');
+
+    if (normalized.length >= 8) {
+      quotes.push({
+        text,
+        normalized,
+        index: matched.index,
+      });
+    }
+
+    matched = quotePattern.exec(content);
+  }
+
+  for (let index = 0; index < quotes.length - 1; index += 1) {
+    const current = quotes[index];
+    const next = quotes[index + 1];
+
+    if (next.index - current.index > 420) {
+      continue;
+    }
+
+    const samePrefix = current.normalized.slice(0, 6) === next.normalized.slice(0, 6);
+    const sameSuffix = current.normalized.slice(-6) === next.normalized.slice(-6);
+
+    if (!samePrefix && !sameSuffix) {
+      continue;
+    }
+
+    return {
+      severity: 'medium',
+      title: '对白句式重复',
+      description: '短距离内连续对白复用了几乎相同的句式骨架，容易让人物说话像在原地兜圈。',
+      suggestion: '保留核心立场后，让下一句切去动作、分工、威胁升级或结果反馈，不要继续沿用同一开头或同一尾句收束。',
+      evidence: `“${current.text.slice(0, 24)}” / “${next.text.slice(0, 24)}”`,
+    };
+  }
+
+  return null;
+}
+
+function detectRequiredCharacterOmissionIssue(input: {
+  content: string;
+  requiredEntityNames?: string[];
+  previousSummary?: string;
+}): ReviewIssue | null {
+  const requiredNames = Array.from(
+    new Set(
+      (input.requiredEntityNames ?? [])
+        .map((item) => item.trim())
+        .filter((item) => item.length >= 2),
+    ),
+  );
+
+  if (requiredNames.length === 0) {
+    return null;
+  }
+
+  const missingNames = requiredNames.filter((name) => !input.content.includes(name));
+
+  if (missingNames.length === 0) {
+    return null;
+  }
+
+  const consecutiveMissing = missingNames.filter((name) => (input.previousSummary ?? '').includes(name));
+
+  return {
+    severity: consecutiveMissing.length > 0 ? 'high' : 'medium',
+    title: consecutiveMissing.length > 0 ? '核心人物连续缺席' : '章节拍人物未按规划进场',
+    description:
+      consecutiveMissing.length > 0
+        ? `上章仍在承接的人物 ${consecutiveMissing.join('、')} 本章继续缺席，章节主功能可能没有真正落到对应人物身上。`
+        : `章节规划要求 ${missingNames.join('、')} 出场，但正文没有明确写到，人物进场闭环不完整。`,
+    suggestion: '优先把缺席人物拉回到动作、对话、决策或结果链里；若确实不该出场，就同步调整章节拍与关系规划，避免计划与正文分离。',
+    evidence: `未出现人物：${missingNames.join('、')}`,
+  };
+}
+
+function detectExplicitRelationCoverageIssue(input: {
+  content: string;
+  relationSnapshot?: GenerationRelationSnapshot[];
+}): ReviewIssue | null {
+  const normalizedContent = normalizeLightCheckText(input.content);
+
+  for (const relation of input.relationSnapshot ?? []) {
+    if (relation.draft) {
+      continue;
+    }
+
+    const sourceEntityName = relation.sourceEntityName.trim();
+    const targetEntityName = relation.targetEntityName.trim();
+    const relationType = relation.relationType.trim();
+
+    if (
+      sourceEntityName.length < 2
+      || targetEntityName.length < 2
+      || relationType.length < 2
+      || !input.content.includes(sourceEntityName)
+      || !input.content.includes(targetEntityName)
+    ) {
+      continue;
+    }
+
+    const keywords = Array.from(
+      new Set([
+        relationType,
+        relation.currentStance.trim(),
+        ...buildLightCheckKeywords(relationType),
+        ...buildLightCheckKeywords(relation.currentStance),
+        ...buildLightCheckKeywords(relation.stanceReason),
+        ...buildLightCheckKeywords(relation.origin),
+      ].filter((item) => item.trim().length >= 2)),
+    );
+    const isCovered = keywords.some((keyword) => normalizedContent.includes(normalizeLightCheckText(keyword)));
+
+    if (isCovered) {
+      continue;
+    }
+
+    return {
+      severity: 'medium',
+      title: '显式关系同场未落地',
+      description: `本章让 ${sourceEntityName} 与 ${targetEntityName} 同时在场，但正文没有明显体现规划中的关系“${relationType}${relation.currentStance.trim() ? ` / ${relation.currentStance.trim()}` : ''}”。`,
+      suggestion: '至少用一次对话走向、动作站位、选择偏向、保护/对抗反应或利益交换，把这条显式关系真正落到正文里。',
+      evidence: `${sourceEntityName}、${targetEntityName} 同场；规划关系：${relationType}${relation.currentStance.trim() ? ` / ${relation.currentStance.trim()}` : ''}`,
+    };
+  }
+
+  return null;
+}
+
 function detectCharacterAnchorDriftIssue(content: string, knownNames: string[]): ReviewIssue | null {
   if (knownNames.length < 2) {
     return null;
@@ -1360,6 +1758,36 @@ function formatSeedOutlineBlock(
   return [title, ...lines].join('\n');
 }
 
+function formatCharacterArcSeedValues(values: BookOutlineFields['characterArcs'] | undefined) {
+  return (values ?? [])
+    .map((item) => {
+      const characterName = item.characterName.trim();
+      const arc = item.arc.trim();
+
+      if (!characterName && !arc) {
+        return '';
+      }
+
+      return arc ? `${characterName}：${arc}` : characterName;
+    })
+    .filter(Boolean);
+}
+
+function formatInheritedThreadSeedValues(values: VolumeOutlineFields['inheritedThreads'] | undefined) {
+  return (values ?? [])
+    .map((item) => {
+      const threadName = item.threadName.trim();
+      const note = item.note.trim();
+
+      if (!threadName && !note) {
+        return '';
+      }
+
+      return note ? `${threadName}：${note}` : threadName;
+    })
+    .filter(Boolean);
+}
+
 function formatMilestoneSeedBlock(title: string, milestones: VolumeMilestoneDraft[] | undefined) {
   const sanitized = (milestones ?? []).filter(
     (milestone) =>
@@ -1368,9 +1796,14 @@ function formatMilestoneSeedBlock(title: string, milestones: VolumeMilestoneDraf
       milestone.phaseConflict.trim() ||
       milestone.entryState.trim() ||
       milestone.exitState.trim() ||
+      milestone.phasePacing.trim() ||
+      milestone.phaseEmotionShift.trim() ||
+      milestone.phasePOV.trim() ||
       milestone.keyTurns.length > 0 ||
       milestone.mustPlant.length > 0 ||
       milestone.mustPayoff.length > 0 ||
+      (milestone.requiredEntities?.length ?? 0) > 0 ||
+      (milestone.requiredForeshadows?.length ?? 0) > 0 ||
       milestone.powerCeiling.trim() ||
       milestone.targetChapterCount > 0,
   );
@@ -1389,10 +1822,19 @@ function formatMilestoneSeedBlock(title: string, milestones: VolumeMilestoneDraf
         milestone.phaseConflict.trim() ? `  阶段冲突：${milestone.phaseConflict.trim()}` : '',
         milestone.entryState.trim() ? `  进入状态：${milestone.entryState.trim()}` : '',
         milestone.exitState.trim() ? `  结束状态：${milestone.exitState.trim()}` : '',
+        milestone.phasePacing.trim() ? `  阶段节奏：${milestone.phasePacing.trim()}` : '',
+        milestone.phaseEmotionShift.trim() ? `  情感变化：${milestone.phaseEmotionShift.trim()}` : '',
+        milestone.phasePOV.trim() ? `  阶段视角：${milestone.phasePOV.trim()}` : '',
         milestone.powerCeiling.trim() ? `  能力上限：${milestone.powerCeiling.trim()}` : '',
         milestone.keyTurns.length > 0 ? `  关键转折：${milestone.keyTurns.join('；')}` : '',
         milestone.mustPlant.length > 0 ? `  必埋伏笔：${milestone.mustPlant.join('；')}` : '',
         milestone.mustPayoff.length > 0 ? `  必回收：${milestone.mustPayoff.join('；')}` : '',
+        milestone.requiredEntities && milestone.requiredEntities.length > 0
+          ? `  必需实体：${milestone.requiredEntities.join('；')}`
+          : '',
+        milestone.requiredForeshadows && milestone.requiredForeshadows.length > 0
+          ? `  必需伏笔：${milestone.requiredForeshadows.join('；')}`
+          : '',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -1419,6 +1861,12 @@ function buildBookOutlinePrompt(request: AIBookOutlineRequest) {
     ['主冲突', request.seedOutline?.centralConflict],
     ['主角弧线', request.seedOutline?.protagonistArc],
     ['主题内核', request.seedOutline?.thematicCore],
+    ['副线规划', request.seedOutline?.subPlots],
+    ['角色弧线', formatCharacterArcSeedValues(request.seedOutline?.characterArcs)],
+    ['能力体系', request.seedOutline?.powerSystem],
+    ['对抗体系', request.seedOutline?.antagonistSystem],
+    ['叙事弧线', request.seedOutline?.narrativeArc],
+    ['一句话卖点', request.seedOutline?.logline],
     ['世界规则', request.seedOutline?.worldRules],
     ['结局方向', request.seedOutline?.endgameHint],
     ['整体基调', request.seedOutline?.toneGuide],
@@ -1431,11 +1879,17 @@ function buildBookOutlinePrompt(request: AIBookOutlineRequest) {
     request.hint?.trim() ? `补充灵感：${request.hint.trim()}` : '',
     '',
     '请输出严格 JSON，不要输出 Markdown，不要解释。',
-    '字段要求：premise, centralConflict, protagonistArc, thematicCore, worldRules, endgameHint, toneGuide。',
+    '字段要求：premise, centralConflict, protagonistArc, thematicCore, subPlots, characterArcs, powerSystem, antagonistSystem, narrativeArc, logline, worldRules, endgameHint, toneGuide。',
     '- premise 用 1 到 2 句话概括全书核心前提',
     '- centralConflict 说明贯穿全书的主冲突',
     '- protagonistArc 说明主角成长弧线',
     '- thematicCore 说明主题内核',
+    '- subPlots 为 2 到 5 条持续副线 / 暗线',
+    '- characterArcs 为 2 到 6 条关键角色弧线，每项包含 characterName, arc，可选 characterId',
+    '- powerSystem 说明能力体系的边界、代价与成长逻辑',
+    '- antagonistSystem 说明长期对抗的敌对系统、秩序或压制机制',
+    '- narrativeArc 说明全书的节奏与阶段推进弧线',
+    '- logline 用一句话概括主角、冲突和独特卖点',
     '- worldRules 为 3 到 6 条不可违反的世界规则',
     '- endgameHint 描述结局方向，但不要把结局写死',
     '- toneGuide 概括整体文风、节奏和情绪基调',
@@ -1452,9 +1906,18 @@ function buildVolumeOutlinePrompt(request: AIVolumeOutlineRequest) {
     ['弧线概述', request.seedOutline?.arcSummary],
     ['卷初状态', request.seedOutline?.entryState],
     ['卷末状态', request.seedOutline?.exitState],
+    ['明面对手', request.seedOutline?.antagonist],
+    ['本卷暗线', request.seedOutline?.subPlot],
+    ['继承线头', formatInheritedThreadSeedValues(request.seedOutline?.inheritedThreads)],
+    ['主角成长', request.seedOutline?.protagonistGrowth],
+    ['情感推进', request.seedOutline?.emotionalArc],
     ['预估总章数', request.seedOutline?.estimatedChapterCount ? String(request.seedOutline.estimatedChapterCount) : ''],
+    ['预估字数', request.seedOutline?.estimatedWordCount ? String(request.seedOutline.estimatedWordCount) : ''],
+    ['视角规划', request.seedOutline?.povPlan],
     ['关键事件', request.seedOutline?.keyEvents],
     ['伏笔安排', request.seedOutline?.foreshadowSeeds],
+    ['必需实体', request.seedOutline?.requiredEntities],
+    ['必需伏笔', request.seedOutline?.requiredForeshadows],
   ]);
   const milestoneSeedBlock = formatMilestoneSeedBlock('当前卷已提供的阶段里程碑：', request.seedOutline?.milestones);
   const sections = [
@@ -1464,22 +1927,34 @@ function buildVolumeOutlinePrompt(request: AIVolumeOutlineRequest) {
     `全书大纲：\n${request.bookOutline}`,
     request.previousVolumeOutline ? `上一卷大纲：\n${request.previousVolumeOutline}` : '',
     request.volumeRecaps ? `已有卷级摘要池：\n${request.volumeRecaps}` : '',
+    request.foreshadowPlanBundle ? request.foreshadowPlanBundle : '',
+    request.questionPoolBundle ? request.questionPoolBundle : '',
     seedBlock,
     milestoneSeedBlock,
     request.hint?.trim() ? `补充灵感：${request.hint.trim()}` : '',
     '',
     '请输出严格 JSON，不要输出 Markdown，不要解释。',
-    '字段要求：goal, keyConflict, arcSummary, entryState, exitState, estimatedChapterCount, keyEvents, foreshadowSeeds, milestones。',
+    '字段要求：goal, keyConflict, arcSummary, entryState, exitState, antagonist, subPlot, inheritedThreads, protagonistGrowth, emotionalArc, estimatedChapterCount, estimatedWordCount, povPlan, keyEvents, foreshadowSeeds, requiredEntities, requiredForeshadows, milestones。',
     '- goal 概括本卷阶段目标',
     '- keyConflict 说明本卷最核心的对抗或矛盾',
     '- arcSummary 说明本卷完整弧线，强调开端、推进与收束',
     '- entryState / exitState 分别描述卷初与卷末的主角和局势状态',
+    '- antagonist 说明本卷明面对手或主要阻力方',
+    '- subPlot 说明本卷主要暗线',
+    '- inheritedThreads 为 1 到 4 条从前卷继承的线头，每项包含 threadName, note，可选 threadId',
+    '- protagonistGrowth 说明主角在本卷的成长或认知升级',
+    '- emotionalArc 说明本卷关系位移与情感主轴',
     '- estimatedChapterCount 为本卷预估总章数，长卷建议给出一个明确范围中心值',
+    '- estimatedWordCount 为本卷预估字数，可按长篇规模给出量级',
+    '- povPlan 说明本卷主视角与辅视角的使用边界',
     '- keyEvents 为 4 到 8 个关键事件',
     '- foreshadowSeeds 为本卷要埋设或回收的伏笔',
-    '- milestones 为 3 到 5 个阶段里程碑数组；每项字段包含 title, targetChapterCount, phaseGoal, phaseConflict, entryState, exitState, keyTurns, mustPlant, mustPayoff, powerCeiling',
+    '- requiredEntities 为本卷必须稳定存在于上下文中的核心实体名数组，控制在 0 到 8 条',
+    '- requiredForeshadows 为本卷必须持续关注或优先回收的伏笔标题数组，控制在 0 到 8 条',
+    '- milestones 为 3 到 5 个阶段里程碑数组；每项字段包含 title, targetChapterCount, phaseGoal, phaseConflict, entryState, exitState, phasePacing, phaseEmotionShift, phasePOV, keyTurns, mustPlant, mustPayoff, powerCeiling',
+    '- 每个 milestone 还应包含 requiredEntities, requiredForeshadows 两个数组；只填当前阶段必须强关注的角色/伏笔，没有则返回空数组',
     '- milestones 的 targetChapterCount 总和应尽量接近 estimatedChapterCount',
-    '- 每个里程碑都要体现阶段目标、阶段冲突、进入/结束状态和阶段能力上限，便于后续做滚动规划',
+    '- 每个里程碑都要体现阶段目标、阶段冲突、进入/结束状态、阶段节奏、情感变化、视角安排和阶段能力上限，便于后续做滚动规划',
     '- 如果种子信息已给出，请优先保留其方向并补齐空白',
   ].filter(Boolean);
 
@@ -1493,9 +1968,18 @@ function buildVolumeMilestonesPrompt(request: AIVolumeMilestonesRequest) {
     ['弧线概述', request.seedOutline?.arcSummary],
     ['卷初状态', request.seedOutline?.entryState],
     ['卷末状态', request.seedOutline?.exitState],
+    ['明面对手', request.seedOutline?.antagonist],
+    ['本卷暗线', request.seedOutline?.subPlot],
+    ['继承线头', formatInheritedThreadSeedValues(request.seedOutline?.inheritedThreads)],
+    ['主角成长', request.seedOutline?.protagonistGrowth],
+    ['情感推进', request.seedOutline?.emotionalArc],
     ['预估总章数', request.seedOutline?.estimatedChapterCount ? String(request.seedOutline.estimatedChapterCount) : ''],
+    ['预估字数', request.seedOutline?.estimatedWordCount ? String(request.seedOutline.estimatedWordCount) : ''],
+    ['视角规划', request.seedOutline?.povPlan],
     ['关键事件', request.seedOutline?.keyEvents],
     ['伏笔安排', request.seedOutline?.foreshadowSeeds],
+    ['必需实体', request.seedOutline?.requiredEntities],
+    ['必需伏笔', request.seedOutline?.requiredForeshadows],
   ]);
   const existingMilestoneBlock = formatMilestoneSeedBlock(
     '当前已手填的阶段里程碑（可参考、可补全）：',
@@ -1508,6 +1992,8 @@ function buildVolumeMilestonesPrompt(request: AIVolumeMilestonesRequest) {
     `全书大纲：\n${request.bookOutline}`,
     request.previousVolumeOutline ? `上一卷大纲：\n${request.previousVolumeOutline}` : '',
     request.volumeRecaps ? `已有卷级摘要池：\n${request.volumeRecaps}` : '',
+    request.foreshadowPlanBundle ? request.foreshadowPlanBundle : '',
+    request.questionPoolBundle ? request.questionPoolBundle : '',
     seedBlock,
     existingMilestoneBlock,
     request.hint?.trim() ? `补充灵感：${request.hint.trim()}` : '',
@@ -1519,12 +2005,15 @@ function buildVolumeMilestonesPrompt(request: AIVolumeMilestonesRequest) {
     '- 细拆里程碑的目标是提升阶段粒度，不是主动缩卷；除非卷纲本身明显过空或种子章数严重失衡，否则不要把 100 章量级直接压成 60 章量级',
     '- 若确实需要调整 estimatedChapterCount，也应以小幅校准为主；长卷一般控制在原设想上下浮动 10% 到 20%，不要无依据腰斩',
     '- milestones 为 3 到 5 个阶段里程碑数组',
-    '- milestones 每项字段必须包含：title, targetChapterCount, phaseGoal, phaseConflict, entryState, exitState, keyTurns, mustPlant, mustPayoff, powerCeiling',
+    '- milestones 每项字段必须包含：title, targetChapterCount, phaseGoal, phaseConflict, entryState, exitState, phasePacing, phaseEmotionShift, phasePOV, keyTurns, mustPlant, mustPayoff, powerCeiling, requiredEntities, requiredForeshadows',
     '- milestones 的 targetChapterCount 总和应尽量接近 estimatedChapterCount',
     '- 即使是 100 章以上的长卷，开篇前 30 章也必须细拆，不要把“得宝、试探、立规矩、初入门”合并成一个过宽的大阶段',
     '- 开篇阶段的单个里程碑建议控制在 8 到 15 章；除非明确是中后期扩张、战争或大地图阶段，否则不要超过 18 章',
     '- 每个里程碑至少包含 2 到 3 个可验证的硬事件，不能只用“接触、试探、适应、建立信任、逐步推进”撑满整个阶段',
     '- keyTurns 必须写成可直接裂变为章节节点的结果型事件，优先使用“暴露、见血、突破、拜入、反杀、转移、结盟、失守、夺得、开启”等表达',
+    '- phasePacing 必须明确该阶段是高压、蓄力、过渡还是反扑，不要留空',
+    '- phaseEmotionShift 必须说明这一阶段的情绪或关系位移',
+    '- phasePOV 必须说明该阶段的视角主从关系，避免长篇中段失去视角控制',
     '- 如果某阶段主要承担过渡功能，也必须写清该阶段结束前已经完成的软推进，以及下一阶段会被迫面对的外压',
     '- 开篇阶段必须尽早把外部压力抬进场，不能长期停留在家内试探、秘密磨合、规则说明和低风险试修',
     '- 中后段虽然允许比开篇更长，但仍必须按“事件簇”拆阶段：地盘整合、资源获取、妖物猎杀、宗门博弈、阵法落成、势力定势等通常不应全部塞进同一个阶段',
@@ -1536,6 +2025,55 @@ function buildVolumeMilestonesPrompt(request: AIVolumeMilestonesRequest) {
   ].filter(Boolean);
 
   return sections.join('\n');
+}
+
+function buildInspirationBlueprintPrompt(request: AIInspirationBlueprintRequest) {
+  return [
+    '请把下面这段中文新书立项讨论整理为严格 JSON，不要输出 Markdown，不要输出解释。',
+    '字段要求：projectTitle, projectDescription, genres, projectStylePrompt, discussionSummary, bookOutlineHint, volumePlans, seedEntities, seedForeshadows, coverage。',
+    '- projectTitle 为项目标题',
+    '- projectDescription 为 80 到 160 字项目简介',
+    '- genres 为 1 到 3 个题材标签数组',
+    '- projectStylePrompt 为可直接给写作模型使用的中文文风约束；若讨论不足可返回空字符串',
+    '- discussionSummary 为 300 字内立项总结，概括世界观、主角、目标、冲突、卖点与升级线',
+    '- bookOutlineHint 为后续书纲生成的结构化提示',
+    '- volumePlans 为 1 到 4 卷数组，每项字段包含 title, summary',
+    '- seedEntities 为 0 到 8 条核心设定数组，每项字段包含 type, name, description, fields, tags, aliases, pinned, draft；type 只能是 character/faction/location/magic_system/item/event',
+    '- 若 seedEntities 的 type 为 character，fields 请尽量填写人物卡字段：static_desire, static_fear, static_values, static_trueNature, static_speechStyle, static_decisionStyle, static_conflictResponse, static_taboos, current_stance, current_wound, current_goal, current_disguise',
+    '- 人物 fields 只写已经讨论明确或高度稳定的信息；没有把握就留空，不要硬编',
+    '- aliases 为可选别名数组；draft 对 seedEntities 默认填写 true',
+    '- seedForeshadows 为 0 到 8 条核心伏笔数组，每项字段包含 title, notes, linkedEntityNames',
+    '- coverage 为对象，字段包含 coreHook, protagonistDrive, worldSlice, endgameConflict，按当前讨论是否已经覆盖填写 true/false',
+    '- 只保留讨论中已明确或高度稳定的内容，不要虚构没被讨论到的硬设定',
+    '',
+    '讨论记录如下：',
+    request.transcript.trim(),
+  ].filter(Boolean).join('\n');
+}
+
+function buildVolumePlanReconcilePrompt(request: AIVolumePlanReconcileRequest) {
+  return [
+    `项目标题：${request.projectTitle || '未命名项目'}`,
+    request.projectDescription ? `项目简介：${request.projectDescription}` : '',
+    `当前卷：第${request.volumeOrder}卷《${request.volumeTitle || '未命名卷'}》`,
+    `全书大纲：\n${request.bookOutline}`,
+    `当前卷纲：\n${request.currentVolumeOutline}`,
+    `当前里程碑：\n${request.currentMilestones}`,
+    `已生成章节摘要：\n${request.chapterSummaries}`,
+    request.loreSummary?.trim() ? `Lore 摘要：\n${request.loreSummary.trim()}` : '',
+    request.foreshadowSummary?.trim() ? `Foreshadow 摘要：\n${request.foreshadowSummary.trim()}` : '',
+    request.hint?.trim() ? `补充要求：${request.hint.trim()}` : '',
+    '',
+    '请根据最新正文进展，输出当前卷的规划修正建议，使用严格 JSON，不要输出 Markdown，不要解释。',
+    '字段要求：proposedVolumeOutline, proposedMilestones, changeSummary, riskNotes。',
+    '- proposedVolumeOutline 字段结构与卷纲一致：goal, keyConflict, arcSummary, entryState, exitState, antagonist, subPlot, inheritedThreads, protagonistGrowth, emotionalArc, estimatedChapterCount, estimatedWordCount, povPlan, keyEvents, foreshadowSeeds, requiredEntities, requiredForeshadows, milestones',
+    '- proposedMilestones 为阶段里程碑数组；每项字段包含 title, targetChapterCount, phaseGoal, phaseConflict, entryState, exitState, phasePacing, phaseEmotionShift, phasePOV, keyTurns, mustPlant, mustPayoff, powerCeiling, requiredEntities, requiredForeshadows',
+    '- changeSummary 用 3 到 6 句总结为什么需要修正',
+    '- riskNotes 为 0 到 8 条风险提示数组',
+    '- 目标是让“规划”追上“已生成正文”，不要抹掉已经发生的事实',
+    '- 不要自动大改全卷方向，除非正文已经形成明显偏移',
+    '- 若当前卷整体方向仍成立，应只做局部修正而非重写整卷',
+  ].filter(Boolean).join('\n');
 }
 
 function buildVolumeBeatsPrompt(
@@ -1746,6 +2284,9 @@ function buildWritePrompt(request: AIWriteRequest) {
     request.worldState ? `当前世界状态：${request.worldState}` : '',
     request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
     knownCharacterBlock,
+    request.availableCharacterNames && request.availableCharacterNames.length > 0
+      ? `可出场候选：${request.availableCharacterNames.join('、')}`
+      : '',
     request.rewriteGuidance
       ? ['上一轮审查打回反馈：', request.rewriteGuidance, '本轮重写必须优先修复以上问题，不能重复犯错。'].join('\n')
       : '',
@@ -1754,7 +2295,10 @@ function buildWritePrompt(request: AIWriteRequest) {
     `本章 beats 全列表：${outline.beats.join(' | ')}`,
     '',
     completedText
-      ? ['以下是本章已完成正文，请自然承接，不要重复信息：', completedText.slice(-2200)].join('\n')
+      ? [
+          '以下是本章已完成正文，请自然承接，不要重复信息：',
+          completedText.slice(-GENERATION_PROMPT_LIMITS.completedTextTailChars),
+        ].join('\n')
       : '当前是本章开头，请直接进入场景与冲突。',
     '',
     '请输出这一段正文片段本身，不要解释，不要使用 Markdown，不要输出标题。',
@@ -1769,6 +2313,9 @@ function buildWritePrompt(request: AIWriteRequest) {
     knownCharacterNames.length > 0
       ? `- 已知人物锚点如下：${knownCharacterNames.join('、')}。正文优先复用这些名字，不得无故改名、换名、拆人或临时造出承担同一功能的新角色`
       : '- 若当前上下文尚无固定人物名，新增具名人物时必须同步交代身份、关系与当下意图',
+    request.availableCharacterNames && request.availableCharacterNames.length > 0
+      ? `- 若本章提供了可出场候选 ${request.availableCharacterNames.join('、')}，不要让焦点角色独自承担全部信息揭示、对话冲突和动作执行；可让候选人物分担场面功能，但不得挤掉必须出场人物`
+      : '',
     '- 同一角色在短距离内不要重复表达同一层命令、禁令、判断或立场；一句话说明后，下一句应推进动作、代价、分工或外部反应',
     '- 一个结果一旦已经落地，下一段直接写连锁变化，不要再用大段旁白或心理活动重复解释“这意味着什么”',
     '- 心理活动只负责给动作加一层压力或动机，不要连续两段都停在“他明白了 / 他知道了 / 他心里一沉 / 他终于意识到”这类解释性内心上',
@@ -1810,6 +2357,19 @@ function buildReviewPrompt(request: AIReviewRequest) {
     request.worldState ? `当前世界状态：${request.worldState}` : '',
     request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
     knownCharacterBlock,
+    request.requiredEntityNames && request.requiredEntityNames.length > 0
+      ? `本章应重点落地人物：${request.requiredEntityNames.join('、')}`
+      : '',
+    request.availableCharacterNames && request.availableCharacterNames.length > 0
+      ? `可出场候选：${request.availableCharacterNames.join('、')}`
+      : '',
+    request.relationSnapshot && request.relationSnapshot.some((relation) => !relation.draft)
+      ? `已确认显式关系：${request.relationSnapshot
+          .filter((relation) => !relation.draft)
+          .slice(0, 4)
+          .map((relation) => `${relation.sourceEntityName}-${relation.targetEntityName}（${relation.relationType}${relation.currentStance ? ` / ${relation.currentStance}` : ''}）`)
+          .join('；')}`
+      : '',
     request.outline
       ? [
           '章节契约：',
@@ -1855,6 +2415,12 @@ function buildReviewPrompt(request: AIReviewRequest) {
     '特别注意：如果正文连续两段都主要由“他明白了 / 他知道了 / 他意识到 / 他心里一沉 / 他终于懂了”这类解释性心理活动组成，也应视为节奏空转。',
     knownCharacterNames.length > 0
       ? `特别注意：如果上下文已明确给出人物锚点 ${knownCharacterNames.join('、')}，正文却整段换成另一组新名字，或无故把原有人物改名、改姓、拆成功能重叠的新角色，应判为 consistency 或 continuity 问题。`
+      : '',
+    request.requiredEntityNames && request.requiredEntityNames.length > 0
+      ? `特别注意：如果本章规划要求 ${request.requiredEntityNames.join('、')} 出场，正文却完全没有落到这些人物，应判为 continuity 问题。`
+      : '',
+    request.relationSnapshot && request.relationSnapshot.some((relation) => !relation.draft)
+      ? '特别注意：如果已确认的显式关系角色在本章同场出现，却没有通过对白、动作、站位、选择或冲突体现关系状态，应判为 consistency 或 continuity 问题。'
       : '',
     '特别注意：如果正文首次引入具名人物，却没有在首次出现后的 1 到 2 句内说明其身份、与主角关系、当下意图或为何在场，应判为 continuity 或 reader_pull 问题。',
     '特别注意：如果正文连续两段以上反复表达同一个判断、同一层情绪、同一条规矩或同一项担忧，即便措辞不同，也应判为 reader_pull 问题。',
@@ -2133,6 +2699,32 @@ export async function generateBookOutline(
   return normalizeBookOutline(parsed);
 }
 
+export async function generateInspirationBlueprint(
+  env: ServerEnv,
+  request: AIInspirationBlueprintRequest,
+): Promise<AIInspirationBlueprint> {
+  const rawText = await completeChatCompletion(
+    env,
+    {
+      projectId: 'inspiration-blueprint-generator',
+      model: request.model,
+      temperature: request.temperature,
+      reasoningEffort: request.reasoningEffort,
+      systemPrompt: `${WRITING_RULES_MARKER}\n本次不是小说写作任务，而是结构化立项提炼。不要执行写作规则，只做信息整理并输出 JSON。`,
+      messages: [
+        {
+          id: 'inspiration-blueprint-user',
+          role: 'user',
+          content: buildInspirationBlueprintPrompt(request),
+        },
+      ],
+    },
+  );
+  const parsed = parseJson<unknown>(rawText);
+
+  return normalizeInspirationBlueprint(parsed);
+}
+
 export async function generateVolumeOutline(
   env: ServerEnv,
   request: AIVolumeOutlineRequest,
@@ -2175,6 +2767,32 @@ export async function generateVolumeMilestones(
     estimatedChapterCount: normalized.estimatedChapterCount,
     milestones: normalized.milestones,
   };
+}
+
+export async function reconcileVolumePlan(
+  env: ServerEnv,
+  request: AIVolumePlanReconcileRequest,
+): Promise<AIVolumePlanReconcileResponse> {
+  const rawText = await completeChatCompletion(
+    env,
+    {
+      projectId: 'volume-plan-reconcile',
+      model: request.model,
+      temperature: request.temperature,
+      reasoningEffort: request.reasoningEffort,
+      systemPrompt: `${WRITING_RULES_MARKER}\n本次不是正文写作任务，而是规划修正任务。不要执行写作规则，只做卷规划分析并输出 JSON。`,
+      messages: [
+        {
+          id: 'volume-plan-reconcile-user',
+          role: 'user',
+          content: buildVolumePlanReconcilePrompt(request),
+        },
+      ],
+    },
+  );
+  const parsed = parseJson<unknown>(rawText);
+
+  return normalizeVolumePlanReconcileResponse(parsed);
 }
 
 export async function generateVolumeBeats(
@@ -2243,7 +2861,22 @@ export async function generateVolumeBeats(
   throw new Error('章节拍裂变失败：未获得有效结果');
 }
 
-async function resolveRequestContextBundle(env: ServerEnv, request: ContextAwareRequest) {
+async function resolveRequestContextBundle(
+  env: ServerEnv,
+  request: ContextAwareRequest,
+  options?: {
+    allowDraftContext?: boolean;
+  },
+) {
+  if (Array.isArray(request.entitySnapshot) && request.chapterId) {
+    upsertGenerationEntitiesSnapshot(env, {
+      projectId: request.projectId,
+      chapterId: request.chapterId,
+      chapterTitle: request.chapterTitle,
+      entities: request.entitySnapshot,
+    });
+  }
+
   if (Array.isArray(request.foreshadowSnapshot)) {
     replaceGenerationForeshadows(env, {
       projectId: request.projectId,
@@ -2253,19 +2886,24 @@ async function resolveRequestContextBundle(env: ServerEnv, request: ContextAware
 
   return (
     await buildGenerationContextBundle(env, {
-    projectId: request.projectId,
-    chapterId: request.chapterId,
-    chapterTitle: request.chapterTitle,
-    chapterOrder: request.chapterOrder,
-    volumeTitle: request.volumeTitle,
-    previousChapterId: request.previousChapterId,
-    previousChapterTitle: request.previousChapterTitle,
-    previousSummary: request.previousSummary,
-    worldState: request.worldState,
-    outline: request.outline,
-    fallbackContextBundle: request.contextBundle,
-    preferStoredForeshadows: Array.isArray(request.foreshadowSnapshot),
-    lightweightRecallConfig: request.gateConfigOverride?.lightweightRecall,
+      projectId: request.projectId,
+      chapterId: request.chapterId,
+      chapterTitle: request.chapterTitle,
+      chapterOrder: request.chapterOrder,
+      volumeTitle: request.volumeTitle,
+      previousChapterId: request.previousChapterId,
+      previousChapterTitle: request.previousChapterTitle,
+      previousSummary: request.previousSummary,
+      worldState: request.worldState,
+      outline: request.outline,
+      fallbackContextBundle: request.contextBundle,
+      preferStoredForeshadows: Array.isArray(request.foreshadowSnapshot),
+      relationSnapshot: request.relationSnapshot,
+      allowDraftContext: Boolean(options?.allowDraftContext),
+      lightweightRecallConfig: request.gateConfigOverride?.lightweightRecall,
+      requiredEntityNames: request.requiredEntityNames,
+      availableCharacterNames: request.availableCharacterNames,
+      requiredForeshadowTitles: request.requiredForeshadowTitles,
     })
   ).bundle;
 }
@@ -2273,7 +2911,9 @@ async function resolveRequestContextBundle(env: ServerEnv, request: ContextAware
 export async function generateChapterOutline(env: ServerEnv, request: AIPlanRequest): Promise<AIPlanResponse> {
   const resolvedRequest: AIPlanRequest = {
     ...request,
-    contextBundle: await resolveRequestContextBundle(env, request),
+    contextBundle: await resolveRequestContextBundle(env, request, {
+      allowDraftContext: true,
+    }),
   };
   const rawText = await completeChatCompletion(
     env,
@@ -2408,6 +3048,12 @@ export async function reviewChapterDraft(env: ServerEnv, request: AIReviewReques
     chapterOrder: resolvedRequest.chapterOrder,
     resourceRows: loadResourceStateRows(env, resolvedRequest.projectId),
   });
+  const structuredResourceIssue = detectStructuredResourceContinuityIssue({
+    content: resolvedRequest.content,
+    rows: listResourceContinuities(env, {
+      projectId: resolvedRequest.projectId,
+    }),
+  });
   const itemIssue = detectItemContinuityIssue({
     content: resolvedRequest.content,
     stateEntries: currentStateEntries,
@@ -2415,25 +3061,47 @@ export async function reviewChapterDraft(env: ServerEnv, request: AIReviewReques
   const openingTemplateIssue = detectGenericOpeningIssue(resolvedRequest.content);
   const explanatoryEchoIssue = detectExplanatoryEchoIssue(resolvedRequest.content);
   const repeatedDirectiveDialogueIssue = detectRepeatedDirectiveDialogueIssue(resolvedRequest.content);
+  const repeatedDialoguePatternIssue = detectRepeatedDialoguePatternIssue(resolvedRequest.content);
   const characterAnchorDriftIssue = detectCharacterAnchorDriftIssue(
     resolvedRequest.content,
     knownCharacterNames,
   );
+  const requiredCharacterOmissionIssue = detectRequiredCharacterOmissionIssue({
+    content: resolvedRequest.content,
+    requiredEntityNames: resolvedRequest.requiredEntityNames,
+    previousSummary: resolvedRequest.previousSummary,
+  });
+  const explicitRelationCoverageIssue = detectExplicitRelationCoverageIssue({
+    content: resolvedRequest.content,
+    relationSnapshot: resolvedRequest.relationSnapshot,
+  });
   const reviewWithResourceIssue = resourceIssue
     ? injectDeterministicReviewIssue(normalizedReview, 'consistency', resourceIssue)
     : normalizedReview;
-  const reviewWithOpeningIssue = openingTemplateIssue
-    ? injectDeterministicReviewIssue(reviewWithResourceIssue, 'continuity', openingTemplateIssue)
+  const reviewWithStructuredResourceIssue = structuredResourceIssue
+    ? injectDeterministicReviewIssue(reviewWithResourceIssue, 'consistency', structuredResourceIssue)
     : reviewWithResourceIssue;
+  const reviewWithOpeningIssue = openingTemplateIssue
+    ? injectDeterministicReviewIssue(reviewWithStructuredResourceIssue, 'continuity', openingTemplateIssue)
+    : reviewWithStructuredResourceIssue;
   const reviewWithNameIssue = characterAnchorDriftIssue
     ? injectDeterministicReviewIssue(reviewWithOpeningIssue, 'consistency', characterAnchorDriftIssue)
     : reviewWithOpeningIssue;
   const reviewWithDialogueIssue = repeatedDirectiveDialogueIssue
     ? injectDeterministicReviewIssue(reviewWithNameIssue, 'continuity', repeatedDirectiveDialogueIssue)
     : reviewWithNameIssue;
-  const reviewWithExplanationIssue = explanatoryEchoIssue
-    ? injectDeterministicReviewIssue(reviewWithDialogueIssue, 'reader_pull', explanatoryEchoIssue)
+  const reviewWithDialoguePatternIssue = repeatedDialoguePatternIssue
+    ? injectDeterministicReviewIssue(reviewWithDialogueIssue, 'continuity', repeatedDialoguePatternIssue)
     : reviewWithDialogueIssue;
+  const reviewWithRequiredCharacterIssue = requiredCharacterOmissionIssue
+    ? injectDeterministicReviewIssue(reviewWithDialoguePatternIssue, 'continuity', requiredCharacterOmissionIssue)
+    : reviewWithDialoguePatternIssue;
+  const reviewWithRelationCoverageIssue = explicitRelationCoverageIssue
+    ? injectDeterministicReviewIssue(reviewWithRequiredCharacterIssue, 'consistency', explicitRelationCoverageIssue)
+    : reviewWithRequiredCharacterIssue;
+  const reviewWithExplanationIssue = explanatoryEchoIssue
+    ? injectDeterministicReviewIssue(reviewWithRelationCoverageIssue, 'reader_pull', explanatoryEchoIssue)
+    : reviewWithRelationCoverageIssue;
 
   return {
     review: itemIssue

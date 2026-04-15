@@ -3,18 +3,26 @@ import { BookOpen, LibraryBig, LoaderCircle, Settings2, Share2, Sparkles, Target
 import { useToast } from '@/components/Toast';
 import { seedDemoData } from '@/lib/db';
 import {
+  useAntagonistAgendaStore,
   useEditorStore,
+  useForeshadowPlanStore,
   useForeshadowStore,
   useLoreStore,
+  usePovPermissionStore,
   useProjectStore,
+  useQuestionPoolStore,
+  useResourceContinuityStore,
   useServerStatusStore,
   useSettingsStore,
+  useThreadLedgerStore,
+  useWorldStateStore,
 } from '@/stores';
 
-type AppView = 'workspace' | 'lore' | 'foreshadow' | 'graph';
+type AppView = 'workspace' | 'structure' | 'lore' | 'foreshadow' | 'graph';
 
 const navItems = [
   { key: 'workspace' as const, label: '创作工作台', icon: BookOpen },
+  { key: 'structure' as const, label: '结构记忆', icon: Sparkles },
   { key: 'lore' as const, label: '设定库', icon: LibraryBig },
   { key: 'foreshadow' as const, label: '伏笔追踪', icon: Target },
   { key: 'graph' as const, label: '关系图谱', icon: Share2 },
@@ -22,6 +30,7 @@ const navItems = [
 
 const viewLabels: Record<AppView, string> = {
   workspace: '创作工作台',
+  structure: '结构记忆',
   lore: '设定库',
   foreshadow: '伏笔追踪',
   graph: '关系图谱',
@@ -40,6 +49,11 @@ const TemplateLibraryPage = lazy(async () => {
 const WorkspaceLayout = lazy(async () => {
   const module = await import('@/components/WorkspaceLayout');
   return { default: module.WorkspaceLayout };
+});
+
+const StructureWorkspace = lazy(async () => {
+  const module = await import('@/components/StructureWorkspace');
+  return { default: module.StructureWorkspace };
 });
 
 const LoreWorkspace = lazy(async () => {
@@ -94,6 +108,13 @@ export function AppShell() {
   const { projects, activeProjectId, loadProjects, setActiveProject } = useProjectStore();
   const { loadChapters, setActiveChapter } = useEditorStore();
   const { loadForeshadows } = useForeshadowStore();
+  const { loadForeshadowPlans } = useForeshadowPlanStore();
+  const { loadThreadLedgers } = useThreadLedgerStore();
+  const { loadWorldStateEntries } = useWorldStateStore();
+  const { loadQuestionPools } = useQuestionPoolStore();
+  const { loadAntagonistAgendas } = useAntagonistAgendaStore();
+  const { loadPovPermissions } = usePovPermissionStore();
+  const { loadResourceContinuities } = useResourceContinuityStore();
   const { loadEntities } = useLoreStore();
   const settings = useSettingsStore((state) => state.settings);
   const { loadSettings } = useSettingsStore();
@@ -147,10 +168,34 @@ export function AppShell() {
       return;
     }
 
-    void Promise.all([loadChapters(activeProjectId), loadEntities(activeProjectId), loadForeshadows(activeProjectId)]).catch(() => {
+    void Promise.all([
+      loadChapters(activeProjectId),
+      loadEntities(activeProjectId),
+      loadForeshadows(activeProjectId),
+      loadForeshadowPlans(activeProjectId),
+      loadThreadLedgers(activeProjectId),
+      loadWorldStateEntries(activeProjectId),
+      loadQuestionPools(activeProjectId),
+      loadAntagonistAgendas(activeProjectId),
+      loadPovPermissions(activeProjectId),
+      loadResourceContinuities(activeProjectId),
+    ]).catch(() => {
       toast('加载项目数据失败', 'error');
     });
-  }, [activeProjectId, loadChapters, loadEntities, loadForeshadows, toast]);
+  }, [
+    activeProjectId,
+    loadAntagonistAgendas,
+    loadChapters,
+    loadEntities,
+    loadForeshadows,
+    loadForeshadowPlans,
+    loadPovPermissions,
+    loadQuestionPools,
+    loadResourceContinuities,
+    loadThreadLedgers,
+    loadWorldStateEntries,
+    toast,
+  ]);
 
   useEffect(() => {
     if (activeProjectId) {
@@ -427,6 +472,8 @@ export function AppShell() {
                 onOpenForeshadow={() => setActiveView('foreshadow')}
                 onOpenAdvancedGeneration={() => setShowCompatibilityConsole(true)}
               />
+            ) : activeView === 'structure' ? (
+              <StructureWorkspace projectId={activeProject.id} />
             ) : activeView === 'lore' ? (
               <LoreWorkspace projectId={activeProject.id} />
             ) : activeView === 'foreshadow' ? (

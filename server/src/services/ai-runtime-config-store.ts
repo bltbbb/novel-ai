@@ -11,6 +11,7 @@ const PROVIDER_BASE_URLS: Record<Exclude<AIProviderPreset, 'custom'>, string> = 
   openrouter: 'https://openrouter.ai/api/v1',
   dashscope: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   zhipu: 'https://open.bigmodel.cn/api/paas/v4',
+  claude_compatible: 'https://api.anthropic.com/v1',
 };
 
 let configLock = Promise.resolve();
@@ -43,6 +44,7 @@ function normalizeProvider(value: unknown, fallback: AIProviderPreset): AIProvid
     value === 'openrouter' ||
     value === 'dashscope' ||
     value === 'zhipu' ||
+    value === 'claude_compatible' ||
     value === 'custom'
     ? value
     : fallback;
@@ -67,7 +69,7 @@ function inferProviderFromBaseUrl(baseUrl?: string) {
 }
 
 function resolveBaseUrl(provider: AIProviderPreset, rawBaseUrl: unknown, fallbackBaseUrl: string) {
-  if (provider === 'custom') {
+  if (provider === 'custom' || provider === 'claude_compatible') {
     return normalizeBaseUrl(rawBaseUrl) || fallbackBaseUrl;
   }
 
@@ -101,11 +103,7 @@ function normalizeConfig(raw: unknown, fallback: AIRuntimeConfig): AIRuntimeConf
     candidate && typeof candidate === 'object' && hasOwnProperty(candidate, 'apiKey')
       ? normalizeText(candidate.apiKey)
       : fallback.apiKey;
-  let embeddingModel = fallback.embeddingModel;
-
-  if (candidate && typeof candidate === 'object' && hasOwnProperty(candidate, 'embeddingModel')) {
-    embeddingModel = normalizeText(candidate.embeddingModel) || undefined;
-  }
+  const embeddingModel = fallback.embeddingModel;
 
   return {
     provider,
@@ -117,10 +115,10 @@ function normalizeConfig(raw: unknown, fallback: AIRuntimeConfig): AIRuntimeConf
 }
 
 function applyConfigToEnv(env: ServerEnv, config: AIRuntimeConfig) {
+  env.openaiProvider = config.provider;
   env.openaiApiKey = config.apiKey;
   env.openaiBaseUrl = config.baseUrl || undefined;
   env.defaultModel = config.defaultModel;
-  env.openaiEmbeddingModel = config.embeddingModel?.trim() || undefined;
 }
 
 function readConfigRow(env: ServerEnv) {

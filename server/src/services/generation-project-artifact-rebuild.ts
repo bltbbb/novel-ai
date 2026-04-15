@@ -14,6 +14,7 @@ import { backfillGenerationMemoryEmbeddings } from './generation-backfill.js';
 import { replaceGenerationForeshadows } from './generation-foreshadow-store.js';
 import {
   replaceGenerationEntitiesSnapshot,
+  replaceGenerationRelationshipsSnapshot,
   replaceGenerationRelationshipsFromStateChanges,
   upsertGenerationChapterIndex,
   upsertGenerationEntitiesFromStateChanges,
@@ -187,6 +188,10 @@ export async function rebuildGenerationProjectArtifacts(
   replaceGenerationForeshadows(env, {
     projectId: request.projectId,
     foreshadows: request.foreshadowSnapshot,
+  });
+  replaceGenerationRelationshipsSnapshot(env, {
+    projectId: request.projectId,
+    relationships: request.relationSnapshot,
   });
 
   const chapters = sortRebuildChapters(request.chapters);

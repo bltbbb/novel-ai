@@ -9,6 +9,7 @@ import type {
   ChapterBeat,
   ChapterOutline,
   ChapterSummary,
+  EntityRelation,
   Foreshadow,
   GenerationQueueItem,
   IdeaCard,
@@ -26,6 +27,30 @@ import type {
 export interface SettingsRecord {
   key: string;
   value: AppSettings;
+  updatedAt: string;
+}
+
+export type StructureMemoryMirrorSystem =
+  | 'thread_ledger'
+  | 'foreshadow_plan'
+  | 'world_state'
+  | 'question_pool'
+  | 'antagonist_agenda'
+  | 'pov_permission'
+  | 'resource_continuity';
+
+export interface StructureMemoryMirrorRecord {
+  id: string;
+  projectId: Id;
+  system: StructureMemoryMirrorSystem;
+  entityId: Id;
+  payloadJson: string;
+  syncStatus: 'synced' | 'pending_push' | 'sync_error';
+  isDeleted: boolean;
+  localUpdatedAt: string;
+  serverUpdatedAt: string;
+  lastSyncedAt: string;
+  errorMessage: string;
   updatedAt: string;
 }
 
@@ -50,6 +75,7 @@ class NovelDatabase extends Dexie {
   volumeOutlines!: Table<VolumeOutline, Id>;
   chapterBeats!: Table<ChapterBeat, Id>;
   entities!: Table<LoreEntity, Id>;
+  entityRelations!: Table<EntityRelation, Id>;
   foreshadows!: Table<Foreshadow, Id>;
   snapshots!: Table<Snapshot, Id>;
   ideaCards!: Table<IdeaCard, Id>;
@@ -59,6 +85,7 @@ class NovelDatabase extends Dexie {
   strandTrackers!: Table<StrandTracker, Id>;
   generationQueue!: Table<GenerationQueueItem, Id>;
   templateLibrary!: Table<TemplateLibraryItem, Id>;
+  structureMemoryMirrors!: Table<StructureMemoryMirrorRecord, string>;
   settings!: Table<SettingsRecord, string>;
 
   constructor() {
@@ -234,6 +261,54 @@ class NovelDatabase extends Dexie {
       templateLibrary: 'id, updatedAt, createdAt, name, sourceTitle',
       settings: 'key, updatedAt',
     });
+
+    this.version(9).stores({
+      projects: 'id, updatedAt, createdAt',
+      chapters: 'id, projectId, volumeId, [projectId+order], updatedAt',
+      volumes: 'id, projectId, [projectId+order], title, updatedAt',
+      bookOutlines: 'id, projectId, updatedAt',
+      volumeOutlines: 'id, projectId, volumeId, [projectId+volumeId], updatedAt',
+      chapterBeats:
+        'id, projectId, volumeId, chapterId, orderInVolume, [volumeId+orderInVolume], [projectId+volumeId], updatedAt',
+      entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      entityRelations:
+        'id, projectId, sourceEntityId, targetEntityId, [projectId+sourceEntityId], [projectId+targetEntityId], draft, updatedAt',
+      foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+      snapshots: 'id, projectId, chapterId, [projectId+chapterId], source, createdAt, updatedAt',
+      ideaCards: 'id, projectId, sourceChapterId, source, updatedAt, createdAt',
+      chapterOutlines: 'id, projectId, chapterId, [projectId+chapterId], strand, updatedAt',
+      chapterSummaries: 'id, projectId, chapterId, [projectId+chapterId], updatedAt',
+      stateChanges: 'id, projectId, chapterId, entityId, updatedAt',
+      strandTrackers: 'projectId, updatedAt',
+      generationQueue: 'id, projectId, chapterId, [projectId+chapterId], status, updatedAt',
+      templateLibrary: 'id, updatedAt, createdAt, name, sourceTitle',
+      settings: 'key, updatedAt',
+    });
+
+    this.version(10).stores({
+      projects: 'id, updatedAt, createdAt',
+      chapters: 'id, projectId, volumeId, [projectId+order], updatedAt',
+      volumes: 'id, projectId, [projectId+order], title, updatedAt',
+      bookOutlines: 'id, projectId, updatedAt',
+      volumeOutlines: 'id, projectId, volumeId, [projectId+volumeId], updatedAt',
+      chapterBeats:
+        'id, projectId, volumeId, chapterId, orderInVolume, [volumeId+orderInVolume], [projectId+volumeId], updatedAt',
+      entities: 'id, projectId, [projectId+type], name, pinned, updatedAt',
+      entityRelations:
+        'id, projectId, sourceEntityId, targetEntityId, [projectId+sourceEntityId], [projectId+targetEntityId], draft, updatedAt',
+      foreshadows: 'id, projectId, sourceChapterId, resolvedChapterId, [projectId+status], updatedAt',
+      snapshots: 'id, projectId, chapterId, [projectId+chapterId], source, createdAt, updatedAt',
+      ideaCards: 'id, projectId, sourceChapterId, source, updatedAt, createdAt',
+      chapterOutlines: 'id, projectId, chapterId, [projectId+chapterId], strand, updatedAt',
+      chapterSummaries: 'id, projectId, chapterId, [projectId+chapterId], updatedAt',
+      stateChanges: 'id, projectId, chapterId, entityId, updatedAt',
+      strandTrackers: 'projectId, updatedAt',
+      generationQueue: 'id, projectId, chapterId, [projectId+chapterId], status, updatedAt',
+      templateLibrary: 'id, updatedAt, createdAt, name, sourceTitle',
+      structureMemoryMirrors:
+        'id, projectId, system, entityId, syncStatus, updatedAt, [projectId+system], [projectId+system+entityId]',
+      settings: 'key, updatedAt',
+    });
   }
 }
 
@@ -305,6 +380,7 @@ export async function deleteProjectCascade(projectId: Id) {
     db.volumeOutlines,
     db.chapterBeats,
     db.entities,
+    db.entityRelations,
     db.foreshadows,
     db.snapshots,
     db.ideaCards,
@@ -313,6 +389,7 @@ export async function deleteProjectCascade(projectId: Id) {
     db.stateChanges,
     db.strandTrackers,
     db.generationQueue,
+    db.structureMemoryMirrors,
   ];
 
   await db.transaction(
@@ -326,6 +403,7 @@ export async function deleteProjectCascade(projectId: Id) {
       await db.volumeOutlines.where('projectId').equals(projectId).delete();
       await db.chapterBeats.where('projectId').equals(projectId).delete();
       await db.entities.where('projectId').equals(projectId).delete();
+      await db.entityRelations.where('projectId').equals(projectId).delete();
       await db.foreshadows.where('projectId').equals(projectId).delete();
       await db.snapshots.where('projectId').equals(projectId).delete();
       await db.ideaCards.where('projectId').equals(projectId).delete();
@@ -334,6 +412,7 @@ export async function deleteProjectCascade(projectId: Id) {
       await db.stateChanges.where('projectId').equals(projectId).delete();
       await db.strandTrackers.where('projectId').equals(projectId).delete();
       await db.generationQueue.where('projectId').equals(projectId).delete();
+      await db.structureMemoryMirrors.where('projectId').equals(projectId).delete();
     },
   );
 }
@@ -658,6 +737,23 @@ export async function seedDemoData() {
     centralConflict: '林冲必须在旧势力争夺前，找到归炉井并掌握钥印真相。',
     protagonistArc: '林冲从被动求生转向主动布局，逐步成为新秩序的制定者。',
     thematicCore: '传承与断代之间，个人选择如何改写时代命运。',
+    subPlots: ['谢无咎立场线', '旧盐路税印旧账线'],
+    characterArcs: [
+      {
+        characterId: entityIds.linChong,
+        characterName: '林冲',
+        arc: '从被动求生转向主动布局，逐步学会以新秩序回应旧时代遗产。',
+      },
+      {
+        characterId: entityIds.xieWuJiu,
+        characterName: '谢无咎',
+        arc: '从灰色线人走向被迫站队，其真实立场会持续摇摆并反过来考验主角判断。',
+      },
+    ],
+    powerSystem: '末法时代灵气稀薄，炼器遗产、钥印同频与仪轨代价决定修行与战斗上限。',
+    antagonistSystem: '旧势力、守秘者与抢夺钥印的人共同构成长期压制，谁掌控仪轨谁就掌控主动权。',
+    narrativeArc: '开篇求生探线，中段扩张摸井，后段回收钥印并抛出更深层遗迹主谜团。',
+    logline: '末法废土中，最后一名修仙者沿着一枚黑铁钥印，追索失落炼器文明与新秩序的入口。',
     worldRules: ['末法时代灵气稀薄', '归炉井仪轨需要同频钥印', '越级施礼会触发反噬'],
     endgameHint: '黑铁片只是第一枚钥印，真正终局在更深层遗迹。',
     toneGuide: '废土仙侠+悬疑推进，节奏偏紧，情绪克制但有爆点。',
@@ -674,6 +770,13 @@ export async function seedDemoData() {
       arcSummary: '从废墟苏醒到钥印底纹确认，完成“线索期”主弧。',
       entryState: '林冲刚苏醒，黑铁片来历未知。',
       exitState: '确认黑铁片是钥印，进入开井前夜准备阶段。',
+      antagonist: '提前布局归炉井入口的人',
+      subPlot: '谢无咎的真实立场与旧盐路线索同步升温。',
+      inheritedThreads: [],
+      protagonistGrowth: '林冲从只会追着线索跑，逐步学会判断谁在布置局。',
+      emotionalArc: '从孤绝试探转向谨慎合作，但始终不敢真正交底。',
+      estimatedWordCount: 300000,
+      povPlan: '以林冲主视角为主，偶尔通过侧面信息显出谢无咎与外围势力动作。',
       keyEvents: ['古井铭纹共鸣', '谢无咎提出钥印说', '钥印底纹抄录曝光'],
       foreshadowSeeds: ['开井礼反噬条件', '第二枚钥印回声'],
       estimatedChapterCount: 100,
@@ -685,6 +788,9 @@ export async function seedDemoData() {
           phaseConflict: '信息残缺，谢无咎等人试探不断，主角始终处于信息劣势。',
           entryState: '林冲刚苏醒，黑铁片来历未知。',
           exitState: '林冲确认钥印体系存在，开始主动追线。',
+          phasePacing: '蓄力',
+          phaseEmotionShift: '从冷硬求生过渡到对遗迹产生主动执念。',
+          phasePOV: '纯林冲视角，外部信息只通过接触和传闻显出。',
           keyTurns: ['古井铭纹第一次共鸣', '谢无咎提出钥印说'],
           mustPlant: ['开井礼反噬条件', '第二枚钥印回声'],
           mustPayoff: [],
@@ -697,6 +803,9 @@ export async function seedDemoData() {
           phaseConflict: '各方势力逐步下场，主角必须在暴露与隐藏之间找平衡。',
           entryState: '钥印体系被初步确认。',
           exitState: '进入开井前夜，局势明显收紧。',
+          phasePacing: '高压',
+          phaseEmotionShift: '合作与怀疑交替拉扯，信任感始终无法落稳。',
+          phasePOV: '林冲主视角，允许通过谢无咎相关场面制造信息错位。',
           keyTurns: ['钥印底纹抄录曝光', '前夜仪轨条件逐渐完整'],
           mustPlant: ['谁提前开启入口', '谢无咎真实立场'],
           mustPayoff: ['第二枚钥印回声'],
@@ -709,6 +818,9 @@ export async function seedDemoData() {
           phaseConflict: '未知对手先手布置，入口异常开启带来新的威胁。',
           entryState: '开井前夜准备完成。',
           exitState: '黑铁片钥印身份确认，第二枚钥印成为新主问题。',
+          phasePacing: '反扑',
+          phaseEmotionShift: '从谨慎压抑抬升到卷末确认与更大危机并存。',
+          phasePOV: '仍以林冲视角收束，不直接进入幕后对手内心。',
           keyTurns: ['归炉井外围侦查', '第二枚钥印回声出现'],
           mustPlant: ['更深层遗迹', '旧时代炼器文明真空'],
           mustPayoff: ['开井礼反噬条件'],
@@ -727,6 +839,24 @@ export async function seedDemoData() {
       arcSummary: '完成场景切换并回收主伏笔，同时抛出更深层悬念。',
       entryState: '林冲抵达归炉井外围，入口已有异常开启痕迹。',
       exitState: '黑铁片钥印身份确认，第二枚钥印成为新主问题。',
+      antagonist: '提前完成开井礼节的幕后对手',
+      subPlot: '谢无咎站队摇摆与第二枚钥印持有者线索并行推进。',
+      inheritedThreads: [
+        {
+          threadId: null,
+          threadName: '谁提前开启入口',
+          note: '上一卷只确认入口会动，这一卷必须锁定是谁先手布置。',
+        },
+        {
+          threadId: null,
+          threadName: '谢无咎真实立场',
+          note: '上一卷埋下灰色合作基础，这一卷要让其立场开始摇摆失衡。',
+        },
+      ],
+      protagonistGrowth: '林冲从追索真相升级为要主动决定何时开井、如何承担代价。',
+      emotionalArc: '与盟友之间从试探合作进入互相试底，信任与背刺并存。',
+      estimatedWordCount: 360000,
+      povPlan: '林冲主视角推进，关键节点允许通过旁观场面呈现势力洗牌，不直接泄露幕后核心答案。',
       keyEvents: ['归炉井外围侦查', '前夜仪轨触发', '第二枚钥印回声出现'],
       foreshadowSeeds: ['谁提前开启入口', '谢无咎真实立场'],
       estimatedChapterCount: 120,
@@ -738,6 +868,9 @@ export async function seedDemoData() {
           phaseConflict: '对手隐藏在暗处，主角每推进一步都可能暴露底牌。',
           entryState: '林冲抵达归炉井外围。',
           exitState: '入口异动背后的敌意被初步锁定。',
+          phasePacing: '蓄压',
+          phaseEmotionShift: '从谨慎观察过渡到确认敌意已经落在自己头上。',
+          phasePOV: '林冲主视角，保持对幕后信息的遮蔽。',
           keyTurns: ['外围侦查', '异常开启痕迹被确认'],
           mustPlant: ['谁提前开启入口'],
           mustPayoff: [],
@@ -750,6 +883,9 @@ export async function seedDemoData() {
           phaseConflict: '仪轨触发条件苛刻，局势在合作与背刺之间反复摇摆。',
           entryState: '敌意来源初步浮出水面。',
           exitState: '主角完成关键前夜布置，但代价明显。',
+          phasePacing: '高压',
+          phaseEmotionShift: '信任短暂升高后迅速回落，合作关系被逼到临界点。',
+          phasePOV: '主视角仍跟林冲，允许少量旁观段落体现阵营洗牌效果。',
           keyTurns: ['前夜仪轨触发', '谢无咎立场摇摆'],
           mustPlant: ['更深层遗迹线索'],
           mustPayoff: ['谁提前开启入口'],
@@ -762,6 +898,9 @@ export async function seedDemoData() {
           phaseConflict: '真相越清晰，真正的争夺者越逼近。',
           entryState: '前夜布置完成。',
           exitState: '第二枚钥印成为下一卷核心问题。',
+          phasePacing: '爆发',
+          phaseEmotionShift: '从答案落地转入更大未知，形成“得到真相但失去安全感”的收束。',
+          phasePOV: '以林冲视角完成确认，不直接暴露更深层对手全貌。',
           keyTurns: ['第二枚钥印回声出现', '黑铁片身份确认'],
           mustPlant: ['第二枚钥印真正持有者'],
           mustPayoff: ['谢无咎真实立场'],

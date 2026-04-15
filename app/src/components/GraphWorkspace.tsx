@@ -8,9 +8,10 @@ import {
   fetchGenerationDebugRelationships,
 } from '@/lib/generation-debug-client';
 import { buildProjectGraph, type GraphEdge, type GraphNode, type GraphNodeKind } from '@/lib/project-graph';
-import { useForeshadowStore, useLoreStore, useEditorStore, useSettingsStore } from '@/stores';
+import { useEntityRelationStore, useForeshadowStore, useLoreStore, useEditorStore, useSettingsStore } from '@/stores';
 import { useToast } from '@/components/Toast';
 import type {
+  EntityRelation,
   GenerationDebugEntityRecord,
   GenerationDebugForeshadowRecord,
   GenerationDebugRelationshipRecord,
@@ -25,6 +26,26 @@ interface GraphWorkspaceProps {
 }
 
 type GraphFilter = 'all' | GraphNodeKind;
+type GraphViewMode = 'overview' | 'relations';
+
+interface RelationGraphEdge {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  label: string;
+  meta: string;
+  kind: 'explicit' | 'automatic';
+  draft?: boolean;
+}
+
+interface CharacterRelationGraph {
+  nodes: GraphNode[];
+  edges: RelationGraphEdge[];
+  width: number;
+  height: number;
+  explicitEdgeCount: number;
+  automaticEdgeCount: number;
+}
 
 const filterOptions: Array<{ key: GraphFilter; label: string }> = [
   { key: 'all', label: '全部' },
@@ -76,6 +97,113 @@ function createEdgePath(source: GraphNode, target: GraphNode) {
   return `M ${startX} ${startY} C ${startX + controlOffset} ${startY}, ${endX - controlOffset} ${endY}, ${endX} ${endY}`;
 }
 
+function normalizeText(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function createRelationNodeId(entityId: string) {
+  return `relation:entity:${entityId}`;
+}
+
+function buildRelationPairKey(left: string, right: string) {
+  return [normalizeText(left), normalizeText(right)].sort().join('::');
+}
+
+function isExplicitSnapshotSourceKind(value: string) {
+  return value === 'explicit_manual' || value === 'explicit_manual_draft';
+}
+
+function layoutRelationNodes(characters: Array<{ id: string; name: string; meta: string }>) {
+  const columnCount = Math.max(2, Math.ceil(Math.sqrt(Math.max(characters.length, 1))));
+  const rowGap = 112;
+  const columnGap = 260;
+  const originX = 96;
+  const originY = 88;
+
+  const nodes = characters.map((character, index) => {
+    const rowIndex = Math.floor(index / columnCount);
+    const columnIndex = index % columnCount;
+
+    return {
+      id: createRelationNodeId(character.id),
+      entityId: character.id,
+      kind: 'entity' as const,
+      label: character.name,
+      meta: character.meta,
+      x: originX + columnIndex * columnGap,
+      y: originY + rowIndex * rowGap,
+    } satisfies GraphNode;
+  });
+
+  const rowCount = Math.max(1, Math.ceil(characters.length / columnCount));
+
+  return {
+    nodes,
+    width: Math.max(1120, originX * 2 + columnCount * columnGap),
+    height: Math.max(520, originY * 2 + rowCount * rowGap),
+  };
+}
+
+function buildCharacterRelationGraph(input: {
+  entities: Array<{ id: string; name: string; meta: string }>;
+  explicitRelations: EntityRelation[];
+  runtimeRelationships: GenerationDebugRelationshipRecord[];
+}) {
+  const sortedCharacters = [...input.entities].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
+  const { nodes, width, height } = layoutRelationNodes(sortedCharacters);
+  const entityIdSet = new Set(sortedCharacters.map((item) => item.id));
+  const nameToEntity = new Map(sortedCharacters.map((item) => [normalizeText(item.name), item] as const));
+  const explicitEdges = input.explicitRelations
+    .filter((relation) => entityIdSet.has(relation.sourceEntityId) && entityIdSet.has(relation.targetEntityId))
+    .map((relation) => ({
+      id: `explicit:${relation.id}`,
+      sourceId: createRelationNodeId(relation.sourceEntityId),
+      targetId: createRelationNodeId(relation.targetEntityId),
+      label: [relation.relationType.trim(), relation.currentStance.trim()].filter(Boolean).join(' / ') || '未命名关系',
+      meta: relation.draft ? '显式关系草案' : '显式关系',
+      kind: 'explicit' as const,
+      draft: relation.draft,
+    }));
+  const automaticEdgeMap = new Map<string, RelationGraphEdge>();
+
+  for (const item of input.runtimeRelationships) {
+    if (isExplicitSnapshotSourceKind(item.sourceKind)) {
+      continue;
+    }
+
+    const sourceEntity = nameToEntity.get(normalizeText(item.sourceEntityName || ''));
+    const targetEntity = nameToEntity.get(normalizeText(item.targetEntityName || ''));
+
+    if (!sourceEntity || !targetEntity || sourceEntity.id === targetEntity.id) {
+      continue;
+    }
+
+    const dedupeKey = `${buildRelationPairKey(sourceEntity.name, targetEntity.name)}::${normalizeText(item.relationshipType || '关系')}`;
+
+    if (automaticEdgeMap.has(dedupeKey)) {
+      continue;
+    }
+
+    automaticEdgeMap.set(dedupeKey, {
+      id: `automatic:${item.id}`,
+      sourceId: createRelationNodeId(sourceEntity.id),
+      targetId: createRelationNodeId(targetEntity.id),
+      label: item.relationshipType || '关系',
+      meta: [item.sourceKind, item.chapterTitle].filter(Boolean).join(' / '),
+      kind: 'automatic',
+    });
+  }
+
+  return {
+    nodes,
+    edges: [...explicitEdges, ...automaticEdgeMap.values()],
+    width,
+    height,
+    explicitEdgeCount: explicitEdges.length,
+    automaticEdgeCount: automaticEdgeMap.size,
+  } satisfies CharacterRelationGraph;
+}
+
 export function GraphWorkspace({
   projectId,
   onOpenChapter,
@@ -84,6 +212,8 @@ export function GraphWorkspace({
 }: GraphWorkspaceProps) {
   const chapters = useEditorStore((state) => state.chapters);
   const entities = useLoreStore((state) => state.entities);
+  const entityRelations = useEntityRelationStore((state) => state.entityRelations);
+  const loadEntityRelations = useEntityRelationStore((state) => state.loadEntityRelations);
   const settings = useSettingsStore((state) => state.settings);
   const {
     foreshadows,
@@ -92,6 +222,7 @@ export function GraphWorkspace({
     setActiveForeshadow,
   } = useForeshadowStore();
   const { toast } = useToast();
+  const [viewMode, setViewMode] = useState<GraphViewMode>('overview');
   const [activeFilter, setActiveFilter] = useState<GraphFilter>('all');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [runtimeEntities, setRuntimeEntities] = useState<GenerationDebugEntityRecord[]>([]);
@@ -107,6 +238,12 @@ export function GraphWorkspace({
       toast('加载图谱数据失败', 'error');
     });
   }, [loadForeshadows, loadedProjectId, projectId, toast]);
+
+  useEffect(() => {
+    void loadEntityRelations(projectId).catch(() => {
+      toast('加载人物关系失败', 'error');
+    });
+  }, [loadEntityRelations, projectId, toast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -137,6 +274,20 @@ export function GraphWorkspace({
       entities,
     });
   }, [chapters, entities, foreshadows]);
+  const relationGraph = useMemo(() => {
+    return buildCharacterRelationGraph({
+      entities: entities
+        .filter((entity) => entity.projectId === projectId && entity.type === 'character')
+        .map((entity) => ({
+          id: entity.id,
+          name: entity.name,
+          meta: entity.draft ? '人物 / 草案' : '人物 / 正式',
+        })),
+      explicitRelations: entityRelations.filter((relation) => relation.projectId === projectId),
+      runtimeRelationships,
+    });
+  }, [entities, entityRelations, projectId, runtimeRelationships]);
+  const isRelationView = viewMode === 'relations';
 
   const visibleNodeIds = useMemo(() => {
     const ids = new Set<string>();
@@ -157,18 +308,35 @@ export function GraphWorkspace({
   const visibleNodes = useMemo(() => {
     return graph.nodes.filter((node) => visibleNodeIds.has(node.id));
   }, [graph.nodes, visibleNodeIds]);
+  const activeNodes = useMemo(() => {
+    return isRelationView ? relationGraph.nodes : visibleNodes;
+  }, [isRelationView, relationGraph.nodes, visibleNodes]);
+  const activeEdges = useMemo(() => {
+    return isRelationView ? relationGraph.edges : visibleEdges;
+  }, [isRelationView, relationGraph.edges, visibleEdges]);
+  const activeNodeMap = useMemo(
+    () => new Map(activeNodes.map((node) => [node.id, node] as const)),
+    [activeNodes],
+  );
+  const activeCanvasSize = useMemo(
+    () => ({
+      width: isRelationView ? relationGraph.width : graph.width,
+      height: isRelationView ? relationGraph.height : graph.height,
+    }),
+    [graph.height, graph.width, isRelationView, relationGraph.height, relationGraph.width],
+  );
 
   const selectedNode = useMemo(() => {
-    return visibleNodes.find((node) => node.id === selectedNodeId) ?? visibleNodes[0] ?? null;
-  }, [selectedNodeId, visibleNodes]);
+    return activeNodes.find((node) => node.id === selectedNodeId) ?? activeNodes[0] ?? null;
+  }, [activeNodes, selectedNodeId]);
 
   const selectedEdges = useMemo(() => {
     if (!selectedNode) {
       return [];
     }
 
-    return visibleEdges.filter((edge) => edge.sourceId === selectedNode.id || edge.targetId === selectedNode.id);
-  }, [selectedNode, visibleEdges]);
+    return activeEdges.filter((edge) => edge.sourceId === selectedNode.id || edge.targetId === selectedNode.id);
+  }, [activeEdges, selectedNode]);
 
   const relatedNodeIds = useMemo(() => {
     const ids = new Set<string>();
@@ -188,15 +356,15 @@ export function GraphWorkspace({
   }, [selectedEdges, selectedNode]);
 
   useEffect(() => {
-    if (visibleNodes.length === 0) {
+    if (activeNodes.length === 0) {
       setSelectedNodeId(null);
       return;
     }
 
-    if (!selectedNode || !visibleNodes.some((node) => node.id === selectedNode.id)) {
-      setSelectedNodeId(visibleNodes[0].id);
+    if (!selectedNode || !activeNodes.some((node) => node.id === selectedNode.id)) {
+      setSelectedNodeId(activeNodes[0].id);
     }
-  }, [selectedNode, visibleNodes]);
+  }, [activeNodes, selectedNode]);
 
   async function handleOpenSelectedNode() {
     if (!selectedNode) {
@@ -221,6 +389,7 @@ export function GraphWorkspace({
 
   if (
     graph.nodes.length === 0 &&
+    relationGraph.nodes.length === 0 &&
     runtimeEntities.length === 0 &&
     runtimeForeshadows.length === 0 &&
     runtimeRelationships.length === 0
@@ -254,54 +423,119 @@ export function GraphWorkspace({
             <div>
               <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">关系图谱</p>
               <p className="mt-1 text-sm text-neutral-400">
-                当前共 {graph.nodes.length} 个节点，{graph.edges.length} 条关系。
+                {isRelationView
+                  ? `当前共 ${relationGraph.nodes.length} 位人物，${relationGraph.explicitEdgeCount} 条显式关系，${relationGraph.automaticEdgeCount} 条运行态关系。`
+                  : `当前共 ${graph.nodes.length} 个节点，${graph.edges.length} 条关系。`}
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {filterOptions.map((option) => (
+            <div className="flex flex-col items-start gap-2 lg:items-end">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
-                  key={option.key}
                   type="button"
-                  onClick={() => setActiveFilter(option.key)}
+                  onClick={() => setViewMode('overview')}
                   className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
-                    activeFilter === option.key
+                    viewMode === 'overview'
                       ? 'bg-indigo-500/15 text-indigo-300'
                       : 'bg-neutral-950/70 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
                   }`}
                 >
-                  {option.label}
+                  综合图谱
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={() => setViewMode('relations')}
+                  className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
+                    viewMode === 'relations'
+                      ? 'bg-indigo-500/15 text-indigo-300'
+                      : 'bg-neutral-950/70 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+                  }`}
+                >
+                  关系视图
+                </button>
+              </div>
+              {viewMode === 'overview' ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  {filterOptions.map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setActiveFilter(option.key)}
+                      className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
+                        activeFilter === option.key
+                          ? 'bg-indigo-500/15 text-indigo-300'
+                          : 'bg-neutral-950/70 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1">显式关系</span>
+                  <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1">运行态关系</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto p-5">
           <div className="min-w-[1120px] rounded-3xl border border-neutral-800 bg-neutral-950/40 p-4">
-            <div className="relative" style={{ width: graph.width, height: graph.height }}>
-              <svg className="absolute inset-0 h-full w-full" viewBox={`0 0 ${graph.width} ${graph.height}`} fill="none">
-                {visibleEdges.map((edge) => {
-                  const source = graph.nodes.find((node) => node.id === edge.sourceId);
-                  const target = graph.nodes.find((node) => node.id === edge.targetId);
+            <div className="relative" style={{ width: activeCanvasSize.width, height: activeCanvasSize.height }}>
+              <svg
+                className="absolute inset-0 h-full w-full"
+                viewBox={`0 0 ${activeCanvasSize.width} ${activeCanvasSize.height}`}
+                fill="none"
+              >
+                {activeEdges.map((edge) => {
+                  const source = activeNodeMap.get(edge.sourceId);
+                  const target = activeNodeMap.get(edge.targetId);
 
                   if (!source || !target) {
                     return null;
                   }
 
                   const isHighlighted = selectedNode ? selectedEdges.some((selectedEdge) => selectedEdge.id === edge.id) : true;
+                  const relationEdge = isRelationView ? (edge as RelationGraphEdge) : null;
+                  const stroke = relationEdge
+                    ? relationEdge.kind === 'explicit'
+                      ? relationEdge.draft
+                        ? 'rgba(245, 158, 11, 0.65)'
+                        : 'rgba(16, 185, 129, 0.75)'
+                      : 'rgba(56, 189, 248, 0.7)'
+                    : isHighlighted
+                      ? 'rgba(129, 140, 248, 0.6)'
+                      : 'rgba(82, 82, 91, 0.45)';
+                  const strokeWidth = relationEdge
+                    ? isHighlighted
+                      ? 2.4
+                      : 1.5
+                    : isHighlighted
+                      ? 2.2
+                      : 1.2;
+                  const strokeDasharray = relationEdge
+                    ? relationEdge.kind === 'automatic'
+                      ? '8 6'
+                      : relationEdge.draft
+                        ? '5 5'
+                        : undefined
+                    : undefined;
 
                   return (
                     <path
                       key={edge.id}
                       d={createEdgePath(source, target)}
-                      stroke={isHighlighted ? 'rgba(129, 140, 248, 0.6)' : 'rgba(82, 82, 91, 0.45)'}
-                      strokeWidth={isHighlighted ? 2.2 : 1.2}
+                      stroke={stroke}
+                      strokeWidth={strokeWidth}
+                      strokeDasharray={strokeDasharray}
+                      opacity={isHighlighted ? 1 : 0.38}
                     />
                   );
                 })}
               </svg>
 
-              {visibleNodes.map((node) => {
+              {activeNodes.map((node) => {
                 const palette = nodeColorMap[node.kind];
                 const Icon = getNodeIcon(node.kind);
                 const isActive = selectedNode?.id === node.id;
@@ -342,7 +576,11 @@ export function GraphWorkspace({
       <aside className="hidden w-96 flex-shrink-0 flex-col bg-neutral-950/60 xl:flex">
         <div className="border-b border-neutral-800 px-5 py-4">
           <p className="text-sm font-medium text-neutral-100">节点详情</p>
-          <p className="mt-2 text-xs leading-6 text-neutral-500">当前图谱会自动推导章节、伏笔和设定之间的关系，帮助你快速回看结构。 </p>
+          <p className="mt-2 text-xs leading-6 text-neutral-500">
+            {isRelationView
+              ? '关系视图会把人物作为主节点，并把显式关系与运行态关系拆开显示，方便直接检查人物关系层。'
+              : '当前图谱会自动推导章节、伏笔和设定之间的关系，帮助你快速回看结构。'}
+          </p>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-5">
@@ -384,17 +622,23 @@ export function GraphWorkspace({
                   ) : (
                     selectedEdges.map((edge) => {
                       const relatedNodeId = edge.sourceId === selectedNode.id ? edge.targetId : edge.sourceId;
-                      const relatedNode = graph.nodes.find((node) => node.id === relatedNodeId);
+                      const relatedNode = activeNodeMap.get(relatedNodeId);
 
                       if (!relatedNode) {
                         return null;
                       }
 
+                      const relationEdge = isRelationView ? (edge as RelationGraphEdge) : null;
+
                       return (
                         <div key={edge.id} className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-3 py-3">
                           <p className="text-sm text-neutral-200">{relatedNode.label}</p>
-                          <p className="mt-1 text-xs text-neutral-500">{edge.label || edgeLabelMap[edge.kind]}</p>
-                          <p className="mt-2 text-xs text-neutral-500">{relatedNode.meta}</p>
+                          <p className="mt-1 text-xs text-neutral-500">
+                            {relationEdge ? relationEdge.label : (edge as GraphEdge).label || edgeLabelMap[(edge as GraphEdge).kind]}
+                          </p>
+                          <p className="mt-2 text-xs text-neutral-500">
+                            {relationEdge ? relationEdge.meta : relatedNode.meta}
+                          </p>
                         </div>
                       );
                     })
@@ -405,9 +649,19 @@ export function GraphWorkspace({
               <section className="rounded-3xl border border-neutral-800 bg-neutral-900/70 p-4">
                 <p className="text-sm text-neutral-200">当前推导规则</p>
                 <div className="mt-3 space-y-2 text-xs leading-6 text-neutral-500">
-                  <p>1. 章节命中设定名称或字段值，会连接章节与设定。</p>
-                  <p>2. 伏笔会连接来源章节、回收章节以及提到的设定。</p>
-                  <p>3. 设定之间若共享标签或互相提及，会自动建立关联。</p>
+                  {isRelationView ? (
+                    <>
+                      <p>1. 人物节点只保留 `character` 条目，避免综合图谱的章节与伏笔噪音干扰人物关系判断。</p>
+                      <p>2. 显式关系使用实体关系表直连，边标签显示“关系类型 / 当前态度”。</p>
+                      <p>3. 运行态关系来自服务端已沉淀的章节关系抽取，用虚线与显式关系区分。</p>
+                    </>
+                  ) : (
+                    <>
+                      <p>1. 章节命中设定名称或字段值，会连接章节与设定。</p>
+                      <p>2. 伏笔会连接来源章节、回收章节以及提到的设定。</p>
+                      <p>3. 设定之间若共享标签或互相提及，会自动建立关联。</p>
+                    </>
+                  )}
                 </div>
               </section>
 
@@ -421,12 +675,15 @@ export function GraphWorkspace({
                   {runtimeRelationships.length > 0 ? (
                     <div className="mt-4 space-y-2">
                       <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">运行态关系</p>
-                      {runtimeRelationships.slice(0, 6).map((item) => (
+                      {runtimeRelationships
+                        .filter((item) => !isExplicitSnapshotSourceKind(item.sourceKind))
+                        .slice(0, 6)
+                        .map((item) => (
                         <div key={item.id} className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-3 py-3 text-sm text-neutral-300">
                           <p className="text-neutral-100">
                             {item.sourceEntityName} {item.relationshipType} {item.targetEntityName || '未知对象'}
                           </p>
-                          <p className="mt-1 text-xs text-neutral-500">{item.chapterTitle}</p>
+                          <p className="mt-1 text-xs text-neutral-500">{[item.sourceKind, item.chapterTitle].filter(Boolean).join(' / ')}</p>
                         </div>
                       ))}
                     </div>

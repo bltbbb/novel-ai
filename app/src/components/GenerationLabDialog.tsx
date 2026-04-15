@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { FlaskConical, Layers3, Play, Save, Sparkles, WandSparkles, X } from 'lucide-react';
 import { buildGenerationContextBundle } from '@/lib/generation-context';
+import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
+import { buildGenerationRelationSnapshot } from '@/lib/generation-relation-snapshot';
+import { buildLoreEntityIdLookup } from '@/lib/lore-entity';
 import { buildChapterPromptPayload } from '@/lib/generation-repetition';
 import { getProjectStylePrompt } from '@/lib/project-style';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
@@ -30,7 +33,7 @@ import {
 import { createParagraphDocument, richTextToPlainText } from '@/lib/editor-content';
 import { buildWorldStateSummary, findPreviousChapter, getStrandLabel } from '@/lib/generation-utils';
 import { useToast } from '@/components/Toast';
-import { useForeshadowStore, useProjectStore } from '@/stores';
+import { useEntityRelationStore, useForeshadowStore, useOutlineStore, useProjectStore } from '@/stores';
 import type {
   AppSettings,
   Chapter,
@@ -93,7 +96,10 @@ export function GenerationLabDialog({
   const foreshadows = useForeshadowStore((state) => state.foreshadows);
   const foreshadowLoadedProjectId = useForeshadowStore((state) => state.loadedProjectId);
   const isForeshadowLoaded = useForeshadowStore((state) => state.isLoaded);
+  const entityRelations = useEntityRelationStore((state) => state.entityRelations);
+  const loadEntityRelations = useEntityRelationStore((state) => state.loadEntityRelations);
   const currentProject = useProjectStore((state) => state.projects.find((project) => project.id === projectId) ?? null);
+  const volumeOutlines = useOutlineStore((state) => state.volumeOutlines);
   const [outline, setOutline] = useState<ChapterOutline | null>(null);
   const [summary, setSummary] = useState<ChapterSummary | null>(null);
   const [stateChanges, setStateChanges] = useState<StateChange[]>([]);
@@ -110,7 +116,20 @@ export function GenerationLabDialog({
   const [polishResult, setPolishResult] = useState<ChapterPolishDraft | null>(null);
 
   const previousChapter = useMemo(() => findPreviousChapter(chapters, chapter?.id), [chapter?.id, chapters]);
-  const worldState = useMemo(() => buildWorldStateSummary(entities), [entities]);
+  const chapterVolumeOutline = useMemo(
+    () =>
+      chapter?.volumeId
+        ? volumeOutlines.find((outline) => outline.volumeId === chapter.volumeId) ?? null
+        : null,
+    [chapter?.volumeId, volumeOutlines],
+  );
+  const confirmedEntities = useMemo(() => entities.filter((entity) => !entity.draft), [entities]);
+  const entitySnapshot = useMemo(() => buildGenerationEntitySnapshot(entities), [entities]);
+  const relationSnapshot = useMemo(
+    () => buildGenerationRelationSnapshot(entityRelations.filter((relation) => relation.projectId === projectId)),
+    [entityRelations, projectId],
+  );
+  const worldState = useMemo(() => buildWorldStateSummary(confirmedEntities), [confirmedEntities]);
   const effectiveSettings = useMemo(
     () => ({
       ...settings,
@@ -143,6 +162,14 @@ export function GenerationLabDialog({
       setPolishResult(null);
     })();
   }, [chapter, open, projectId]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    void loadEntityRelations(projectId);
+  }, [loadEntityRelations, open, projectId]);
 
   useEffect(() => {
     if (!open) {
@@ -254,6 +281,11 @@ export function GenerationLabDialog({
           formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
           (await getContextBundle()).bundle,
         ),
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         ...buildModelRequestConfig(settings),
       });
@@ -353,6 +385,11 @@ export function GenerationLabDialog({
             formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
             contextBundle.bundle,
           ),
+          entitySnapshot,
+          relationSnapshot,
+          requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+          availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+          requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
           foreshadowSnapshot,
           ...buildModelRequestConfig(settings),
         });
@@ -424,6 +461,11 @@ export function GenerationLabDialog({
         previousSummary: await getPreviousSummaryText(),
         worldState,
         contextBundle: (await getContextBundle()).bundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         stylePrompt: effectiveSettings.stylePrompt,
         content: sourceText,
@@ -488,6 +530,11 @@ export function GenerationLabDialog({
         previousSummary: await getPreviousSummaryText(),
         worldState,
         contextBundle: (await getContextBundle()).bundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         content: sourceText,
         ...buildModelRequestConfig(settings),
@@ -548,6 +595,11 @@ export function GenerationLabDialog({
         previousSummary: await getPreviousSummaryText(),
         worldState,
         contextBundle: (await getContextBundle()).bundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         review: reviewOverride ?? reviewResult,
         content: sourceText,
@@ -592,9 +644,7 @@ export function GenerationLabDialog({
       });
 
       const savedSummary = await saveChapterSummary(projectId, activeChapter.id, response.summary);
-      const entityIdMap = new Map(
-        entities.map((entity) => [entity.name.trim().toLowerCase(), entity.id] as const),
-      );
+      const entityIdMap = buildLoreEntityIdLookup(entities);
 
       await replaceChapterStateChanges(
         projectId,
@@ -631,16 +681,22 @@ export function GenerationLabDialog({
         chapter: activeChapter,
         chapters,
         entities,
+        relationSnapshot,
         projectTitle,
         projectDescription,
         settings: effectiveSettings,
         worldState,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
+        volumeOutlineDraft: chapterVolumeOutline ?? null,
         volumeGoal: outlinePromptPayload.volumeGoal,
         chapterBeat: outlinePromptPayload.chapterBeat,
+        milestoneIndex: outlinePromptPayload.currentChapterBeat?.milestoneIndex ?? null,
         nextChapterPreview: outlinePromptPayload.nextChapterPreview,
         forbiddenZone: outlinePromptPayload.forbiddenZone,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         outlineOverride: null,
         onStageChange: ({ stage }) => {
@@ -663,9 +719,7 @@ export function GenerationLabDialog({
 
       if (result.summary) {
         const savedSummary = await saveChapterSummary(projectId, activeChapter.id, result.summary);
-        const entityIdMap = new Map(
-          entities.map((entity) => [entity.name.trim().toLowerCase(), entity.id] as const),
-        );
+        const entityIdMap = buildLoreEntityIdLookup(entities);
 
         await replaceChapterStateChanges(
           projectId,

@@ -16,6 +16,7 @@ import {
 import { EmptyState } from '@/components/EmptyState';
 import { useToast } from '@/components/Toast';
 import { buildGenerationContextBundle } from '@/lib/generation-context';
+import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import {
   backfillGenerationMemoryChunks,
   backfillGenerationMemoryEmbeddings,
@@ -32,6 +33,7 @@ import {
   fetchGenerationDebugVolumeRecaps,
 } from '@/lib/generation-debug-client';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
+import { buildGenerationRelationSnapshot } from '@/lib/generation-relation-snapshot';
 import { runGenerationPipeline, type GenerationPipelineStage } from '@/lib/generation-pipeline';
 import { buildChapterPromptPayload, runLocalRepetitionChecker } from '@/lib/generation-repetition';
 import {
@@ -59,6 +61,7 @@ import {
   saveGenerationQueueItem,
 } from '@/lib/generation-storage';
 import { createParagraphDocument, richTextToPlainText } from '@/lib/editor-content';
+import { buildLoreEntityIdLookup } from '@/lib/lore-entity';
 import { buildWorldStateSummary, getStrandLabel } from '@/lib/generation-utils';
 import {
   applyLightweightRecallPreset,
@@ -74,8 +77,10 @@ import { fetchGenerationGateConfig } from '@/lib/server-config-client';
 import {
   useChapterBeatStore,
   useEditorStore,
+  useEntityRelationStore,
   useForeshadowStore,
   useLoreStore,
+  useOutlineStore,
   useProjectStore,
   useSettingsStore,
   useSnapshotStore,
@@ -113,6 +118,7 @@ interface GenerationViewProps {
   projectDescription?: string;
   onOpenAdvancedConsole?: () => void;
   onOpenEditor?: () => void;
+  onOpenOutline?: () => void;
 }
 
 const pipelineStages: Array<{
@@ -377,6 +383,7 @@ export function GenerationView({
   projectDescription = '',
   onOpenAdvancedConsole,
   onOpenEditor,
+  onOpenOutline,
 }: GenerationViewProps) {
   const { toast } = useToast();
   const chapters = useEditorStore((state) => state.chapters);
@@ -385,9 +392,12 @@ export function GenerationView({
   const saveChapterContent = useEditorStore((state) => state.saveChapterContent);
   const updateChapterStatus = useEditorStore((state) => state.updateChapterStatus);
   const chapterBeats = useChapterBeatStore((state) => state.chapterBeats);
+  const volumeOutlines = useOutlineStore((state) => state.volumeOutlines);
   const loadChapterBeats = useChapterBeatStore((state) => state.loadChapterBeats);
   const settings = useSettingsStore((state) => state.settings);
   const entities = useLoreStore((state) => state.entities);
+  const entityRelations = useEntityRelationStore((state) => state.entityRelations);
+  const loadEntityRelations = useEntityRelationStore((state) => state.loadEntityRelations);
   const foreshadows = useForeshadowStore((state) => state.foreshadows);
   const foreshadowLoadedProjectId = useForeshadowStore((state) => state.loadedProjectId);
   const isForeshadowLoaded = useForeshadowStore((state) => state.isLoaded);
@@ -433,6 +443,13 @@ export function GenerationView({
         : null,
     [chapterBeats, selectedChapter],
   );
+  const chapterVolumeOutline = useMemo(
+    () =>
+      selectedChapter?.volumeId
+        ? volumeOutlines.find((outline) => outline.volumeId === selectedChapter.volumeId) ?? null
+        : null,
+    [selectedChapter?.volumeId, volumeOutlines],
+  );
   const previousChapterBeats = useMemo(() => {
     if (!selectedChapter) {
       return [];
@@ -466,7 +483,13 @@ export function GenerationView({
       .map((chapter) => richTextToPlainText(chapter.content).trim())
       .filter(Boolean);
   }, [chapters, selectedChapter]);
-  const worldState = useMemo(() => buildWorldStateSummary(entities), [entities]);
+  const confirmedEntities = useMemo(() => entities.filter((entity) => !entity.draft), [entities]);
+  const entitySnapshot = useMemo(() => buildGenerationEntitySnapshot(entities), [entities]);
+  const relationSnapshot = useMemo(
+    () => buildGenerationRelationSnapshot(entityRelations.filter((relation) => relation.projectId === projectId)),
+    [entityRelations, projectId],
+  );
+  const worldState = useMemo(() => buildWorldStateSummary(confirmedEntities), [confirmedEntities]);
   const foreshadowSnapshot =
     isForeshadowLoaded && foreshadowLoadedProjectId === projectId
       ? buildGenerationForeshadowSnapshot(
@@ -813,6 +836,10 @@ export function GenerationView({
   }, [loadChapterBeats, projectId]);
 
   useEffect(() => {
+    void loadEntityRelations(projectId);
+  }, [loadEntityRelations, projectId]);
+
+  useEffect(() => {
     setDebugProjectId(projectId);
   }, [projectId]);
 
@@ -852,6 +879,16 @@ export function GenerationView({
         chapterBeat: undefined,
         nextChapterPreview: undefined,
         forbiddenZone: undefined,
+        requiredEntityNames: [],
+        availableCharacterNames: [],
+        requiredForeshadowTitles: [],
+        currentChapterBeat: null,
+        nextChapterBeat: null,
+        automaticForbiddenZone: {
+          phrases: [],
+          actionPatterns: [],
+          scenePatterns: [],
+        },
       };
     }
 
@@ -1253,6 +1290,11 @@ export function GenerationView({
           formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
           mergedBundle,
         ),
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         ...buildModelRequestConfig(settings),
       });
@@ -1337,6 +1379,11 @@ export function GenerationView({
             formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
             mergedBundle,
           ),
+          entitySnapshot,
+          relationSnapshot,
+          requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+          availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+          requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
           foreshadowSnapshot,
           ...buildModelRequestConfig(settings),
         });
@@ -1407,6 +1454,11 @@ export function GenerationView({
         previousSummary,
         worldState,
         contextBundle: mergedBundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         stylePrompt: effectiveStylePrompt,
         content: sourceText,
@@ -1477,6 +1529,11 @@ export function GenerationView({
         previousSummary,
         worldState,
         contextBundle: mergedBundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         content: sourceText,
         ...buildModelRequestConfig(settings),
@@ -1498,6 +1555,11 @@ export function GenerationView({
         previousSummary,
         worldState,
         contextBundle: mergedBundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         content: sourceText,
         ...buildModelRequestConfig(settings),
@@ -1566,6 +1628,11 @@ export function GenerationView({
         previousSummary,
         worldState,
         contextBundle: mergedBundle,
+        entitySnapshot,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         review: draftItem?.review ?? null,
         languageQa: draftItem?.languageQa ?? null,
@@ -1631,9 +1698,7 @@ export function GenerationView({
         projectId,
         selectedChapter.id,
         response.stateChanges,
-        new Map(
-          entities.map((entity) => [entity.name.trim().toLowerCase(), entity.id] as const),
-        ),
+        buildLoreEntityIdLookup(entities),
       );
 
       if (response.strand) {
@@ -1768,10 +1833,16 @@ export function GenerationView({
         worldState,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
+        volumeOutlineDraft: chapterVolumeOutline ?? null,
         volumeGoal: outlinePromptPayload.volumeGoal,
         chapterBeat: outlinePromptPayload.chapterBeat,
+        milestoneIndex: currentChapterBeat?.milestoneIndex ?? null,
         nextChapterPreview: outlinePromptPayload.nextChapterPreview,
         forbiddenZone: outlinePromptPayload.forbiddenZone,
+        relationSnapshot,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         chapterHint: buildEffectiveChapterHint(chapterHint.trim()),
         outlineOverride: null,
@@ -1910,9 +1981,7 @@ export function GenerationView({
         projectId,
         selectedChapter.id,
         draftItem.stateChanges,
-        new Map(
-          entities.map((entity) => [entity.name.trim().toLowerCase(), entity.id] as const),
-        ),
+        buildLoreEntityIdLookup(entities),
       );
 
       if (draftItem.strand) {
@@ -2346,6 +2415,17 @@ export function GenerationView({
               <Sparkles size={16} />
               生成本章
             </button>
+
+            {onOpenOutline ? (
+              <button
+                type="button"
+                onClick={onOpenOutline}
+                className="mt-3 inline-flex items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-100 transition-colors hover:bg-amber-500/20"
+              >
+                <WandSparkles size={16} />
+                去大纲页修正规划
+              </button>
+            ) : null}
           </article>
         </section>
       ) : null}

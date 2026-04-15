@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, Lightbulb, LoaderCircle, Send, Sparkles, WandSparkles, X } from 'lucide-react';
+import { BookOpen, CheckCircle2, CircleDashed, Lightbulb, LoaderCircle, Send, Sparkles, WandSparkles, X } from 'lucide-react';
 import { streamChat } from '@/lib/ai-client';
 import { db } from '@/lib/db';
-import { createBookOutline, createVolumeOutline } from '@/lib/generation-client';
+import { createBookOutline, createInspirationBlueprint, createVolumeOutline, fetchDiscussTranscript } from '@/lib/generation-client';
 import { createId } from '@/lib/identity';
+import { normalizeLoreEntity } from '@/lib/lore-entity';
 import { serializeBookOutline, serializeVolumeOutline } from '@/lib/outline-serializer';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
-import { useOutlineStore, useProjectStore, useSettingsStore, useVolumeStore } from '@/stores';
+import { useForeshadowStore, useLoreStore, useOutlineStore, useProjectStore, useSettingsStore, useVolumeStore } from '@/stores';
 import { useToast } from '@/components/Toast';
-import type { AIChatRole, LoreEntityType } from '@/types';
+import type { AIChatRole, AIInspirationBlueprint, AIInspirationCoverage, VolumeOutlineFields } from '@/types';
 
 interface InspirationDialogProps {
   open: boolean;
@@ -26,28 +27,14 @@ interface InspirationVolumePlan {
   summary: string;
 }
 
-interface InspirationSeedEntity {
-  type: LoreEntityType;
-  name: string;
-  description: string;
-  tags: string[];
-  pinned?: boolean;
-}
-
-interface InspirationBlueprint {
-  projectTitle: string;
-  projectDescription: string;
-  genres: string[];
-  projectStylePrompt: string;
-  discussionSummary: string;
-  bookOutlineHint: string;
-  volumePlans: InspirationVolumePlan[];
-  seedEntities: InspirationSeedEntity[];
-}
-
 const DISCUSSION_PROJECT_ID = 'inspiration-lab';
 const MAX_VOLUME_COUNT = 4;
-const MAX_SEED_ENTITY_COUNT = 8;
+const EMPTY_COVERAGE: AIInspirationCoverage = {
+  coreHook: false,
+  protagonistDrive: false,
+  worldSlice: false,
+  endgameConflict: false,
+};
 
 const DISCUSSION_SYSTEM_PROMPT = [
   '你是中文长篇小说的立项陪跑助手。',
@@ -58,122 +45,61 @@ const DISCUSSION_SYSTEM_PROMPT = [
   '不要一次抛出太多问题，不要直接写成长篇成品，不要离题。',
 ].join('\n');
 
-const EXTRACTION_SYSTEM_PROMPT = [
-  '你是中文小说立项信息整理助手。',
-  '你的任务不是继续追问，而是把讨论记录整理为结构化立项结果。',
-  '只输出 JSON，不要输出解释、前言或 Markdown 代码块。',
-].join('\n');
-
-function normalizeText(value: unknown) {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function normalizeTextList(value: unknown) {
-  if (!Array.isArray(value)) {
-    return [] as string[];
-  }
-
-  return value
-    .map((item) => normalizeText(item))
-    .filter(Boolean);
-}
-
-function normalizeEntityType(value: unknown): LoreEntityType {
-  return value === 'character' ||
-    value === 'faction' ||
-    value === 'location' ||
-    value === 'magic_system' ||
-    value === 'item' ||
-    value === 'event'
-    ? value
-    : 'character';
-}
-
-function extractJsonText(raw: string) {
-  const fencedMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/iu);
-  const source = fencedMatch?.[1]?.trim() || raw.trim();
-  const objectStart = source.indexOf('{');
-  const objectEnd = source.lastIndexOf('}');
-
-  if (objectStart >= 0 && objectEnd > objectStart) {
-    return source.slice(objectStart, objectEnd + 1);
-  }
-
-  return source;
-}
-
-function parseBlueprint(raw: string): InspirationBlueprint {
-  const parsed = JSON.parse(extractJsonText(raw)) as Record<string, unknown>;
-  const volumePlansRaw = Array.isArray(parsed.volumePlans) ? parsed.volumePlans : [];
-  const seedEntitiesRaw = Array.isArray(parsed.seedEntities) ? parsed.seedEntities : [];
-  const volumePlans = volumePlansRaw
-    .map((item) => {
-      const candidate = item && typeof item === 'object' ? item as Record<string, unknown> : {};
-      return {
-        title: normalizeText(candidate.title),
-        summary: normalizeText(candidate.summary),
-      } satisfies InspirationVolumePlan;
-    })
-    .filter((item) => item.title || item.summary)
-    .slice(0, MAX_VOLUME_COUNT);
-  const seedEntities = seedEntitiesRaw
-    .map((item) => {
-      const candidate = item && typeof item === 'object' ? item as Record<string, unknown> : {};
-      return {
-        type: normalizeEntityType(candidate.type),
-        name: normalizeText(candidate.name),
-        description: normalizeText(candidate.description),
-        tags: normalizeTextList(candidate.tags),
-        pinned: Boolean(candidate.pinned),
-      } satisfies InspirationSeedEntity;
-    })
-    .filter((item) => item.name)
-    .slice(0, MAX_SEED_ENTITY_COUNT);
-
-  return {
-    projectTitle: normalizeText(parsed.projectTitle) || '未命名项目',
-    projectDescription: normalizeText(parsed.projectDescription),
-    genres: normalizeTextList(parsed.genres).slice(0, 3),
-    projectStylePrompt: normalizeText(parsed.projectStylePrompt),
-    discussionSummary: normalizeText(parsed.discussionSummary),
-    bookOutlineHint: normalizeText(parsed.bookOutlineHint),
-    volumePlans: volumePlans.length > 0 ? volumePlans : [{ title: '第一卷', summary: '' }],
-    seedEntities,
-  };
-}
-
 function buildTranscript(messages: InspirationMessage[]) {
   return messages
     .map((message) => `${message.role === 'user' ? '用户' : 'AI'}：${message.content.trim()}`)
     .join('\n\n');
 }
 
-function buildExtractionPrompt(messages: InspirationMessage[]) {
-  return [
-    '请把下面这段新书立项讨论整理为 JSON。',
-    '字段要求：',
-    '- projectTitle: 项目标题',
-    '- projectDescription: 80 到 160 字的项目简介',
-    '- genres: 1 到 3 个题材标签数组',
-    '- projectStylePrompt: 可直接给写作模型使用的中文文风约束，没有就给空字符串',
-    '- discussionSummary: 300 字内总结，概括世界观、主角、目标、冲突、卖点、升级线',
-    '- bookOutlineHint: 用于继续生成书纲的中文提示，尽量结构化',
-    '- volumePlans: 1 到 4 卷，每卷包含 title 和 summary',
-    '- seedEntities: 0 到 8 条当前已经确定的核心设定；type 只能是 character/faction/location/magic_system/item/event',
-    '只保留已经讨论明确的内容，不要把不确定的东西编成硬设定。',
-    '',
-    '讨论记录：',
-    buildTranscript(messages),
-  ].join('\n');
-}
-
-function buildVolumeHint(plan: InspirationVolumePlan, blueprint: InspirationBlueprint) {
+function buildVolumeHint(plan: InspirationVolumePlan, blueprint: AIInspirationBlueprint) {
   return [
     blueprint.discussionSummary ? `立项总结：${blueprint.discussionSummary}` : '',
     plan.summary ? `当前卷设想：${plan.summary}` : '',
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+function buildChecklistItems(coverage: AIInspirationCoverage) {
+  return [
+    { key: 'coreHook', label: '核心卖点', done: coverage.coreHook },
+    { key: 'protagonistDrive', label: '主角驱动力', done: coverage.protagonistDrive },
+    { key: 'worldSlice', label: '世界切片', done: coverage.worldSlice },
+    { key: 'endgameConflict', label: '终局冲突', done: coverage.endgameConflict },
+  ];
+}
+
+function collectRequiredNames(volumeOutline: VolumeOutlineFields) {
+  const requiredEntityNames = Array.from(
+    new Set(
+      [
+        ...(volumeOutline.requiredEntities ?? []),
+        ...volumeOutline.milestones.flatMap((milestone) => milestone.requiredEntities ?? []),
+      ]
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+  const requiredForeshadowTitles = Array.from(
+    new Set(
+      [
+        ...volumeOutline.foreshadowSeeds,
+        ...(volumeOutline.requiredForeshadows ?? []),
+        ...volumeOutline.milestones.flatMap((milestone) => [
+          ...milestone.mustPlant,
+          ...milestone.mustPayoff,
+          ...(milestone.requiredForeshadows ?? []),
+        ]),
+      ]
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+
+  return {
+    requiredEntityNames,
+    requiredForeshadowTitles,
+  };
 }
 
 async function collectStreamText(
@@ -196,6 +122,8 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
   const createProject = useProjectStore((state) => state.createProject);
   const setActiveProject = useProjectStore((state) => state.setActiveProject);
   const loadProjects = useProjectStore((state) => state.loadProjects);
+  const createEntity = useLoreStore((state) => state.createEntity);
+  const createForeshadow = useForeshadowStore((state) => state.createForeshadow);
   const loadVolumes = useVolumeStore((state) => state.loadVolumes);
   const updateVolume = useVolumeStore((state) => state.updateVolume);
   const createVolume = useVolumeStore((state) => state.createVolume);
@@ -206,11 +134,16 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
   const [draftInput, setDraftInput] = useState('');
   const [isDiscussing, setIsDiscussing] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isLoadingDiscussTranscript, setIsLoadingDiscussTranscript] = useState(false);
   const [progressText, setProgressText] = useState('');
+  const [coverage, setCoverage] = useState<AIInspirationCoverage>(EMPTY_COVERAGE);
+  const isBusy = isDiscussing || isGenerating || isLoadingDiscussTranscript;
 
   const canGenerateProject = useMemo(() => {
     return messages.some((message) => message.role === 'assistant' && message.content.trim());
   }, [messages]);
+  const checklistItems = useMemo(() => buildChecklistItems(coverage), [coverage]);
+  const isCoverageComplete = useMemo(() => checklistItems.every((item) => item.done), [checklistItems]);
 
   useEffect(() => {
     if (!open) {
@@ -221,7 +154,9 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
     setDraftInput('');
     setIsDiscussing(false);
     setIsGenerating(false);
+    setIsLoadingDiscussTranscript(false);
     setProgressText('');
+    setCoverage(EMPTY_COVERAGE);
   }, [open]);
 
   if (!open) {
@@ -279,8 +214,8 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
     }
   }
 
-  async function handleGenerateProject() {
-    if (messages.length === 0 || isGenerating || isDiscussing) {
+  async function generateProjectFromTranscript(transcript: string) {
+    if (!transcript.trim() || isGenerating || isDiscussing) {
       return;
     }
 
@@ -289,19 +224,15 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
     setProgressText('正在提炼立项摘要...');
 
     try {
-      const blueprintRaw = await collectStreamText(settings.serverUrl, {
-        projectId: DISCUSSION_PROJECT_ID,
-        messages: [
-          {
-            id: createId(),
-            role: 'user',
-            content: buildExtractionPrompt(messages),
-          },
-        ],
-        systemPrompt: EXTRACTION_SYSTEM_PROMPT,
+      const blueprint = await createInspirationBlueprint(settings.serverUrl, {
+        transcript: transcript.trim(),
         ...buildModelRequestConfig(settings),
       });
-      const blueprint = parseBlueprint(blueprintRaw);
+      setCoverage(blueprint.coverage);
+
+      if (!Object.values(blueprint.coverage).every(Boolean)) {
+        toast('当前立项信息仍偏少，但你仍可继续生成项目。', 'warning');
+      }
 
       setProgressText('正在创建项目骨架...');
       const project = await createProject({
@@ -312,11 +243,25 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
         seedEntities: blueprint.seedEntities.map((entity) => ({
           ...entity,
           pinned: entity.pinned ?? true,
+          draft: typeof entity.draft === 'boolean' ? entity.draft : true,
         })),
       }, {
         activate: false,
       });
       createdProjectId = project.id;
+
+      if (blueprint.seedForeshadows.length > 0) {
+        setProgressText('正在写入初始伏笔...');
+
+        for (const foreshadow of blueprint.seedForeshadows) {
+          await createForeshadow({
+            projectId: project.id,
+            title: foreshadow.title,
+            notes: foreshadow.notes,
+            status: 'planted',
+          });
+        }
+      }
 
       setProgressText('正在生成书纲...');
       const bookOutline = await createBookOutline(settings.serverUrl, {
@@ -365,6 +310,53 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
           ...buildModelRequestConfig(settings),
         });
         await saveVolumeOutline(project.id, volume.id, generatedVolumeOutline);
+        const { requiredEntityNames, requiredForeshadowTitles } = collectRequiredNames(generatedVolumeOutline);
+        const existingEntityRows = await db.entities.where('projectId').equals(project.id).toArray();
+        const existingEntityNames = new Set(
+          existingEntityRows.flatMap((rawEntity) => {
+            const entity = normalizeLoreEntity(rawEntity);
+
+            if (!entity) {
+              return [] as string[];
+            }
+
+            return [entity.name, ...(entity.aliases ?? [])].map((item) => item.trim()).filter(Boolean);
+          }),
+        );
+        const existingForeshadowRows = await db.foreshadows.where('projectId').equals(project.id).toArray();
+        const existingForeshadowTitles = new Set(existingForeshadowRows.map((item) => item.title.trim()));
+
+        for (const entityName of requiredEntityNames) {
+          if (existingEntityNames.has(entityName)) {
+            continue;
+          }
+
+          await createEntity({
+            projectId: project.id,
+            type: 'character',
+            name: entityName,
+            description: '',
+            tags: ['#placeholder'],
+            pinned: false,
+            draft: true,
+          });
+          existingEntityNames.add(entityName);
+        }
+
+        for (const foreshadowTitle of requiredForeshadowTitles) {
+          if (existingForeshadowTitles.has(foreshadowTitle)) {
+            continue;
+          }
+
+          const matchedBlueprintForeshadow = blueprint.seedForeshadows.find((item) => item.title.trim() === foreshadowTitle);
+          await createForeshadow({
+            projectId: project.id,
+            title: foreshadowTitle,
+            notes: matchedBlueprintForeshadow?.notes || '',
+            status: 'planted',
+          });
+          existingForeshadowTitles.add(foreshadowTitle);
+        }
         previousVolumeOutline = serializeVolumeOutline(generatedVolumeOutline);
       }
 
@@ -388,8 +380,36 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
     }
   }
 
+  async function handleGenerateProject() {
+    if (messages.length === 0 || isBusy) {
+      return;
+    }
+
+    await generateProjectFromTranscript(buildTranscript(messages));
+  }
+
+  async function handleGenerateFromDiscussFile() {
+    if (isBusy) {
+      return;
+    }
+
+    setIsLoadingDiscussTranscript(true);
+    setProgressText('正在读取 discuss.txt...');
+
+    try {
+      const discussFile = await fetchDiscussTranscript(settings.serverUrl);
+      await generateProjectFromTranscript(discussFile.transcript);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      setProgressText('');
+      toast(`读取 discuss.txt 失败：${message}`, 'error');
+    } finally {
+      setIsLoadingDiscussTranscript(false);
+    }
+  }
+
   function handleReset() {
-    if (isDiscussing || isGenerating) {
+    if (isBusy) {
       return;
     }
 
@@ -466,21 +486,31 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
               />
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                 <div className="text-xs text-neutral-500">
-                  {progressText || '讨论满意后，点击“生成项目”即可自动建项目并提炼结构。'}
+                  {progressText || (isCoverageComplete ? '立项核心信息已基本齐备，可以直接生成项目。' : '信息还可以继续补全，但你已经可以直接生成项目。')}
                 </div>
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
                     onClick={handleReset}
-                    disabled={isDiscussing || isGenerating}
+                    disabled={isBusy}
                     className="rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     重置
                   </button>
                   <button
                     type="button"
+                    onClick={() => void handleGenerateFromDiscussFile()}
+                    disabled={isBusy}
+                    className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    title="直接读取仓库根目录 discuss.txt，并按当前全局模型重新生成项目"
+                  >
+                    {isLoadingDiscussTranscript ? <LoaderCircle size={15} className="animate-spin" /> : <BookOpen size={15} />}
+                    从 discuss.txt 直接生成
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void handleGenerateProject()}
-                    disabled={!canGenerateProject || isDiscussing || isGenerating}
+                    disabled={!canGenerateProject || isBusy}
                     className="inline-flex items-center gap-2 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-100 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isGenerating ? <LoaderCircle size={15} className="animate-spin" /> : <WandSparkles size={15} />}
@@ -489,7 +519,7 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
                   <button
                     type="button"
                     onClick={() => void handleSendMessage()}
-                    disabled={!draftInput.trim() || isDiscussing || isGenerating}
+                    disabled={!draftInput.trim() || isBusy}
                     className="inline-flex items-center gap-2 rounded-2xl bg-amber-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isDiscussing ? <LoaderCircle size={15} className="animate-spin" /> : <Send size={15} />}
@@ -503,13 +533,38 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
           <section className="space-y-5">
             <div className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
               <div className="mb-3 flex items-center gap-2 text-sm font-medium text-neutral-200">
+                <Sparkles size={15} className="text-amber-300" />
+                立项覆盖度
+              </div>
+              <div className="space-y-3">
+                {checklistItems.map((item) => {
+                  const Icon = item.done ? CheckCircle2 : CircleDashed;
+
+                  return (
+                    <div key={item.key} className="flex items-center justify-between rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm">
+                      <span className="text-neutral-200">{item.label}</span>
+                      <span className={`inline-flex items-center gap-2 ${item.done ? 'text-emerald-300' : 'text-neutral-500'}`}>
+                        <Icon size={15} />
+                        {item.done ? '已覆盖' : '待补充'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-3 text-xs leading-6 text-neutral-500">
+                checklist 会在点击“生成项目”时根据 blueprint 提炼结果更新，不会阻止你直接立项。
+              </p>
+            </div>
+
+            <div className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-5">
+              <div className="mb-3 flex items-center gap-2 text-sm font-medium text-neutral-200">
                 <BookOpen size={15} className="text-amber-300" />
                 这一步会产出什么
               </div>
               <div className="space-y-3 text-sm leading-7 text-neutral-400">
                 <p>1. 把讨论结果提炼成项目标题、简介、题材标签和项目文风。</p>
-                <p>2. 自动创建新项目，并把当前已经明确的核心角色/势力/地点沉淀成基础设定。</p>
-                <p>3. 自动生成书纲，再按卷生成卷纲与阶段里程碑，作为后续章节裂变的起点。</p>
+                <p>2. 自动创建新项目，并把当前已经明确的核心角色与伏笔写入 Lore / Foreshadow。</p>
+                <p>3. 自动生成书纲，再生成第一卷卷纲与阶段里程碑，作为后续章节裂变的起点。</p>
               </div>
             </div>
 

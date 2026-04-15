@@ -1,6 +1,7 @@
 import type { ServerEnv } from '../config/env.js';
 import type {
   ChapterOutlineDraft,
+  GenerationRelationSnapshot,
   GenerationStructuredRelationshipQueryMode,
   GenerationStructuredRelationshipQueryReason,
   LightweightRecallConfig,
@@ -19,6 +20,21 @@ import {
   buildResourceContinuityBlocks,
   loadResourceStateRows,
 } from './generation-resource-continuity.js';
+import {
+  listForeshadowPlans,
+  listThreadLedgers,
+  type ForeshadowPlanRecord,
+  type ThreadLedgerRecord,
+  listWorldStateEntries,
+  type WorldStateEntryRecord,
+} from './structure-memory-store.js';
+import { listAntagonistAgendas, type AntagonistAgendaRecord } from './antagonist-agenda-store.js';
+import { listPovPermissions, type PovPermissionRecord } from './pov-permission-store.js';
+import {
+  getResourceContinuityHintTerms,
+  listResourceContinuities,
+  type ResourceContinuityRecord,
+} from './structured-resource-continuity-store.js';
 import { listGenerationVolumeRecaps, type GenerationVolumeRecapRecord } from './generation-volume-recap-store.js';
 
 interface GenerationContextBuildInput {
@@ -35,6 +51,11 @@ interface GenerationContextBuildInput {
   fallbackContextBundle?: string;
   preferStoredForeshadows?: boolean;
   lightweightRecallConfig?: LightweightRecallConfig;
+  relationSnapshot?: GenerationRelationSnapshot[];
+  allowDraftContext?: boolean;
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
 }
 
 interface ChapterMemoryRow {
@@ -70,7 +91,9 @@ interface GenerationEntityRow {
   description: string;
   fields: Record<string, string>;
   tags: string[];
+  aliases: string[];
   pinned: boolean;
+  draft: boolean;
   lastSeenChapterTitle: string;
   updatedAt: string;
 }
@@ -192,6 +215,43 @@ interface FallbackContextParts {
   residualBundle: string;
 }
 
+const GENERATION_CONTEXT_LIMITS = {
+  focusEntityMaxWithHardHit: 4,
+  focusEntityMaxDefault: 3,
+  focusEntityFallbackFromCurrentChapterMax: 2,
+  focusEntityFallbackFromPreviousChapterMax: 2,
+  focusEntityFallbackPinnedMax: 3,
+  relationshipFocusEntityMax: 1,
+  entityBlockMax: 6,
+  entityFieldPreviewMax: 4,
+  entityDescriptionMaxChars: 80,
+  entityTagPreviewMax: 4,
+  memoryRetrievalLimit: 6,
+} as const;
+
+const CHARACTER_STATIC_FIELD_LABELS = [
+  ['static_desire', '欲望'],
+  ['static_fear', '恐惧'],
+  ['static_values', '价值排序'],
+  ['static_trueNature', '真实底色'],
+  ['static_speechStyle', '说话方式'],
+  ['static_decisionStyle', '决策习惯'],
+  ['static_conflictResponse', '冲突反应'],
+  ['static_taboos', '底线禁忌'],
+] as const;
+
+const CHARACTER_DYNAMIC_FIELD_LABELS = [
+  ['current_stance', '立场'],
+  ['current_wound', '伤口'],
+  ['current_goal', '目标'],
+  ['current_disguise', '伪装'],
+] as const;
+
+function buildRelationPairKey(leftName: string, rightName: string) {
+  const sorted = [normalizeText(leftName), normalizeText(rightName)].filter(Boolean).sort();
+  return sorted.join('::');
+}
+
 function asString(value: unknown, fallback = '') {
   return typeof value === 'string' ? value : fallback;
 }
@@ -228,6 +288,22 @@ function parseFieldsJson(rawText: string | null | undefined) {
 
 function normalizeText(value: string | null | undefined) {
   return (value ?? '').trim().toLowerCase();
+}
+
+function getEntitySearchTerms(row: GenerationEntityRow) {
+  return createUniqueList([row.entityName, ...row.aliases])
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function countEntityTextHits(text: string, row: GenerationEntityRow) {
+  return getEntitySearchTerms(row).reduce((total, term) => total + countTextOccurrences(text, term), 0);
+}
+
+function resolveEntityRowPositionScore(entityNames: string[], row: GenerationEntityRow, scores: number[]) {
+  return getEntitySearchTerms(row).reduce((best, term) => {
+    return Math.max(best, resolveEntityPositionScore(entityNames, term, scores));
+  }, 0);
 }
 
 function clampScore(value: number, min: number, max: number) {
@@ -444,6 +520,7 @@ function buildFocusSignalTexts(input: GenerationContextBuildInput) {
       input.previousChapterTitle,
       input.previousSummary,
       input.worldState,
+      ...(input.availableCharacterNames ?? []),
     ].filter(Boolean) as string[],
   };
 }
@@ -496,6 +573,7 @@ function buildQueryPhrases(input: GenerationContextBuildInput) {
     input.chapterTitle ?? '',
     input.volumeTitle ?? '',
     input.previousChapterTitle ?? '',
+    ...(input.requiredForeshadowTitles ?? []),
     input.outline?.goal ?? '',
     input.outline?.obstacle ?? '',
     input.outline?.cost ?? '',
@@ -611,7 +689,9 @@ function loadEntityRows(env: ServerEnv, projectId: string) {
           description,
           fields_json,
           tags_json,
+          aliases_json,
           pinned,
+          draft,
           last_seen_chapter_title,
           updated_at
         FROM generation_entities
@@ -628,7 +708,9 @@ function loadEntityRows(env: ServerEnv, projectId: string) {
       description: asString(row.description),
       fields: parseFieldsJson(asString(row.fields_json)),
       tags: parseStringArrayJson(asString(row.tags_json)),
+      aliases: parseStringArrayJson(asString(row.aliases_json)),
       pinned: Number(row.pinned ?? 0) > 0,
+      draft: Number(row.draft ?? 0) > 0,
       lastSeenChapterTitle: asString(row.last_seen_chapter_title),
       updatedAt: asString(row.updated_at),
     }),
@@ -735,13 +817,13 @@ function selectFocusEntityNames(
   const latestSeenOrderMap = buildEntityLatestSeenOrderMap(chapterRows, currentChapterOrder);
   const scoredCandidates = entityRows
     .map((row) => {
-      const hardHitCount = hard.reduce((total, text) => total + countTextOccurrences(text, row.entityName), 0);
-      const softHitCount = soft.reduce((total, text) => total + countTextOccurrences(text, row.entityName), 0);
+      const hardHitCount = hard.reduce((total, text) => total + countEntityTextHits(text, row), 0);
+      const softHitCount = soft.reduce((total, text) => total + countEntityTextHits(text, row), 0);
       const currentChapterScore = currentRow
-        ? resolveEntityPositionScore(currentRow.entitiesAppeared, row.entityName, [8, 5, 3, 1])
+        ? resolveEntityRowPositionScore(currentRow.entitiesAppeared, row, [8, 5, 3, 1])
         : 0;
       const previousChapterScore = previousRow
-        ? resolveEntityPositionScore(previousRow.entitiesAppeared, row.entityName, [5, 3, 2, 1])
+        ? resolveEntityRowPositionScore(previousRow.entitiesAppeared, row, [5, 3, 2, 1])
         : 0;
       const latestSeenOrder = latestSeenOrderMap.get(normalizeText(row.entityName)) ?? 0;
       const recencyScore =
@@ -797,25 +879,33 @@ function selectFocusEntityNames(
     });
 
   if (scoredCandidates.length > 0) {
-    const limit = scoredCandidates.some((item) => item.hardHitCount > 0) ? 4 : 3;
+    const limit = scoredCandidates.some((item) => item.hardHitCount > 0)
+      ? GENERATION_CONTEXT_LIMITS.focusEntityMaxWithHardHit
+      : GENERATION_CONTEXT_LIMITS.focusEntityMaxDefault;
     return scoredCandidates.slice(0, limit).map((item) => item.entityName);
   }
 
   if (currentRow && currentRow.entitiesAppeared.length > 0) {
-    return createUniqueList(currentRow.entitiesAppeared).slice(0, 2);
+    return createUniqueList(currentRow.entitiesAppeared).slice(
+      0,
+      GENERATION_CONTEXT_LIMITS.focusEntityFallbackFromCurrentChapterMax,
+    );
   }
 
   if (previousRow && previousRow.entitiesAppeared.length > 0) {
-    return createUniqueList(previousRow.entitiesAppeared).slice(0, 2);
+    return createUniqueList(previousRow.entitiesAppeared).slice(
+      0,
+      GENERATION_CONTEXT_LIMITS.focusEntityFallbackFromPreviousChapterMax,
+    );
   }
 
   const pinnedNames = entityRows.filter((row) => row.pinned).map((row) => row.entityName);
 
   if (pinnedNames.length > 0) {
-    return pinnedNames.slice(0, 3);
+    return pinnedNames.slice(0, GENERATION_CONTEXT_LIMITS.focusEntityFallbackPinnedMax);
   }
 
-  return entityRows.slice(0, 3).map((row) => row.entityName);
+  return entityRows.slice(0, GENERATION_CONTEXT_LIMITS.focusEntityMaxDefault).map((row) => row.entityName);
 }
 
 function selectStructuredRelationshipFocusEntityNames(
@@ -825,7 +915,7 @@ function selectStructuredRelationshipFocusEntityNames(
 ) {
   const uniqueFocusEntityNames = createUniqueList(focusEntityNames);
 
-  if (uniqueFocusEntityNames.length <= 1) {
+  if (uniqueFocusEntityNames.length <= GENERATION_CONTEXT_LIMITS.relationshipFocusEntityMax) {
     return uniqueFocusEntityNames;
   }
 
@@ -837,7 +927,7 @@ function selectStructuredRelationshipFocusEntityNames(
     );
 
     if (primaryCurrentEntity) {
-      return [primaryCurrentEntity];
+      return [primaryCurrentEntity].slice(0, GENERATION_CONTEXT_LIMITS.relationshipFocusEntityMax);
     }
   }
 
@@ -847,7 +937,7 @@ function selectStructuredRelationshipFocusEntityNames(
   );
 
   if (explicitHits.length > 0) {
-    return explicitHits.slice(0, 1);
+    return explicitHits.slice(0, GENERATION_CONTEXT_LIMITS.relationshipFocusEntityMax);
   }
 
   const previousRow = findChapterRowById(chapterRows, input.previousChapterId);
@@ -858,11 +948,11 @@ function selectStructuredRelationshipFocusEntityNames(
     );
 
     if (primaryPreviousEntity) {
-      return [primaryPreviousEntity];
+      return [primaryPreviousEntity].slice(0, GENERATION_CONTEXT_LIMITS.relationshipFocusEntityMax);
     }
   }
 
-  return uniqueFocusEntityNames.slice(0, 1);
+  return uniqueFocusEntityNames.slice(0, GENERATION_CONTEXT_LIMITS.relationshipFocusEntityMax);
 }
 
 function buildRecentSummaryBlocks(rows: ChapterMemoryRow[]) {
@@ -1034,9 +1124,21 @@ function buildCurrentVolumeSnapshotBlocks(
   ];
 }
 
-function buildForeshadowBlocks(rows: ForeshadowRow[]) {
+function buildForeshadowBlocks(rows: ForeshadowRow[], requiredTitles: string[] = []) {
+  const normalizedRequiredSet = new Set(requiredTitles.map((item) => normalizeText(item)).filter(Boolean));
+
   return rows
     .filter((row) => row.lifecycle === 'active')
+    .sort((left, right) => {
+      const leftRequired = normalizedRequiredSet.has(normalizeText(left.title));
+      const rightRequired = normalizedRequiredSet.has(normalizeText(right.title));
+
+      if (leftRequired !== rightRequired) {
+        return leftRequired ? -1 : 1;
+      }
+
+      return right.updatedAt.localeCompare(left.updatedAt);
+    })
     .slice(0, 8)
     .map((row) => {
       const summary = truncateText(row.excerpt || row.notes || '暂无说明', 120);
@@ -1051,6 +1153,540 @@ function buildForeshadowBlocks(rows: ForeshadowRow[]) {
 
       return lines.join('\n');
     });
+}
+
+function buildForeshadowPlanBlocks(input: {
+  plans: ForeshadowPlanRecord[];
+  activeForeshadowRows: ForeshadowRow[];
+  requiredForeshadowTitles?: string[];
+}) {
+  const activeForeshadowMap = new Map(
+    input.activeForeshadowRows
+      .filter((row) => row.lifecycle === 'active')
+      .map((row) => [row.id, row] as const),
+  );
+  const requiredTitleSet = new Set(
+    (input.requiredForeshadowTitles ?? [])
+      .map((item) => normalizeText(item))
+      .filter(Boolean),
+  );
+
+  return input.plans
+    .filter((plan) => activeForeshadowMap.has(plan.foreshadowId) || requiredTitleSet.has(normalizeText(plan.foreshadowTitle)))
+    .sort((left, right) => {
+      if (left.importance !== right.importance) {
+        return left.importance === 'major' ? -1 : 1;
+      }
+
+      return right.updatedAt.localeCompare(left.updatedAt);
+    })
+    .slice(0, 2)
+    .map((plan) => {
+      const matchedForeshadow = activeForeshadowMap.get(plan.foreshadowId) ?? null;
+      const lines = [
+        `- ${plan.foreshadowTitle}（${plan.type || '未分类'} / ${plan.importance === 'major' ? '核心伏笔' : '次级伏笔'}）`,
+      ];
+
+      if (matchedForeshadow) {
+        const statusLabel =
+          matchedForeshadow.status === 'overdue'
+            ? '超期'
+            : matchedForeshadow.status === 'activated'
+              ? '已激活'
+              : matchedForeshadow.status === 'planted'
+                ? '已埋设'
+                : '已回收';
+        lines.push(`当前状态：${statusLabel}`);
+      }
+
+      if (typeof plan.plannedActivateVolume === 'number' && plan.plannedActivateVolume > 0) {
+        lines.push(`计划激活：第${plan.plannedActivateVolume}卷`);
+      }
+
+      if (typeof plan.plannedResolveVolume === 'number' && plan.plannedResolveVolume > 0) {
+        lines.push(`计划回收：第${plan.plannedResolveVolume}卷`);
+      }
+
+      if (plan.resolveCondition) {
+        lines.push(`回收条件：${truncateText(plan.resolveCondition, 120)}`);
+      }
+
+      if (plan.payoffEffect) {
+        lines.push(`回收效果：${truncateText(plan.payoffEffect, 120)}`);
+      }
+
+      if (plan.activationCondition) {
+        lines.push(`激活条件：${truncateText(plan.activationCondition, 100)}`);
+      }
+
+      return lines.join('\n');
+    });
+}
+
+function countNormalizedMatches(values: string[], normalizedSet: Set<string>) {
+  return values.reduce((count, value) => count + (normalizedSet.has(normalizeText(value)) ? 1 : 0), 0);
+}
+
+function buildThreadLedgerBlocks(input: {
+  rows: ThreadLedgerRecord[];
+  focusEntityNames: string[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
+  currentChapterOrder: number | null;
+  chapterTitle?: string;
+  outline?: ChapterOutlineDraft | null;
+}) {
+  const normalizedCharacterSet = new Set(
+    createUniqueList([
+      ...input.focusEntityNames,
+      ...(input.requiredEntityNames ?? []),
+      ...(input.availableCharacterNames ?? []),
+    ])
+      .map((item) => normalizeText(item))
+      .filter(Boolean),
+  );
+  const normalizedForeshadowSet = new Set(
+    (input.requiredForeshadowTitles ?? [])
+      .map((item) => normalizeText(item))
+      .filter(Boolean),
+  );
+  const chapterHintHaystack = [
+    input.chapterTitle ?? '',
+    input.outline?.goal ?? '',
+    input.outline?.obstacle ?? '',
+    input.outline?.cost ?? '',
+    ...(input.outline?.beats ?? []),
+  ]
+    .join('\n')
+    .toLowerCase();
+
+  return input.rows
+    .filter((row) => row.status !== 'resolved' && row.audienceHeat >= 3)
+    .map((row) => {
+      const relatedCharacterMatchCount = countNormalizedMatches(row.relatedCharacterNames, normalizedCharacterSet);
+      const relatedForeshadowMatchCount = countNormalizedMatches(row.relatedForeshadowTitles, normalizedForeshadowSet);
+      const normalizedThreadName = normalizeText(row.name);
+      const normalizedCoreQuestion = normalizeText(row.coreQuestion);
+      const recentGap =
+        typeof row.lastProgressChapterOrder === 'number' &&
+        input.currentChapterOrder &&
+        input.currentChapterOrder > row.lastProgressChapterOrder
+          ? input.currentChapterOrder - row.lastProgressChapterOrder
+          : null;
+      const chapterHintHit =
+        (normalizedThreadName ? chapterHintHaystack.includes(normalizedThreadName) : false) ||
+        (normalizedCoreQuestion ? chapterHintHaystack.includes(normalizedCoreQuestion) : false);
+      const score =
+        (row.status === 'active' ? 120 : 50) +
+        row.audienceHeat * 20 +
+        relatedCharacterMatchCount * 90 +
+        relatedForeshadowMatchCount * 75 +
+        (chapterHintHit ? 40 : 0) +
+        (recentGap === null ? 0 : Math.max(0, 20 - recentGap));
+
+      return {
+        row,
+        score,
+      };
+    })
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
+      if (left.row.status !== right.row.status) {
+        return left.row.status === 'active' ? -1 : 1;
+      }
+
+      if (left.row.audienceHeat !== right.row.audienceHeat) {
+        return right.row.audienceHeat - left.row.audienceHeat;
+      }
+
+      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+    })
+    .slice(0, 2)
+    .map(({ row }) => {
+      const statusLabel = row.status === 'dormant' ? '休眠' : '活跃';
+      const lines = [
+        `- ${row.name}（${row.type || '未分类'} / ${statusLabel} / 热度 ${row.audienceHeat}）`,
+        `核心问题：${truncateText(row.coreQuestion || '暂无核心问题', 120)}`,
+        `当前阶段：${truncateText(row.currentPhase || '暂无阶段说明', 140)}`,
+      ];
+
+      if (row.lastProgressAt) {
+        lines.push(`最近推进：${truncateText(row.lastProgressAt, 120)}`);
+      }
+
+      if (row.nextTrigger) {
+        lines.push(`下一触发：${truncateText(row.nextTrigger, 120)}`);
+      }
+
+      if (row.blockedBy) {
+        lines.push(`当前卡点：${truncateText(row.blockedBy, 100)}`);
+      }
+
+      if (typeof row.plannedResolveVolume === 'number' && row.plannedResolveVolume > 0) {
+        lines.push(`预计收束卷：第${row.plannedResolveVolume}卷`);
+      }
+
+      return lines.join('\n');
+    });
+}
+
+function normalizeWorldStateTitle(value: string | null | undefined) {
+  return normalizeText(value);
+}
+
+function selectWorldStateValue(primary: string, fallback: string) {
+  return primary.trim() ? primary.trim() : fallback.trim();
+}
+
+function selectWorldStateList(primary: string[], fallback: string[]) {
+  return primary.length > 0 ? primary : fallback;
+}
+
+function mergeWorldStateEntries(input: {
+  volumeEntry: WorldStateEntryRecord;
+  milestoneEntry?: WorldStateEntryRecord | null;
+}) {
+  const milestoneEntry = input.milestoneEntry ?? null;
+
+  return {
+    publicEvents: selectWorldStateList(milestoneEntry?.publicEvents ?? [], input.volumeEntry.publicEvents),
+    secretEvents: selectWorldStateList(milestoneEntry?.secretEvents ?? [], input.volumeEntry.secretEvents),
+    powerBalanceChange: selectWorldStateValue(
+      milestoneEntry?.powerBalanceChange ?? '',
+      input.volumeEntry.powerBalanceChange,
+    ),
+    institutionChange: selectWorldStateValue(
+      milestoneEntry?.institutionChange ?? '',
+      input.volumeEntry.institutionChange,
+    ),
+    ruleChange: selectWorldStateValue(
+      milestoneEntry?.ruleChange ?? '',
+      input.volumeEntry.ruleChange,
+    ),
+    rumorState: selectWorldStateValue(
+      milestoneEntry?.rumorState ?? '',
+      input.volumeEntry.rumorState,
+    ),
+    knownByCharacterNames: selectWorldStateList(
+      milestoneEntry?.knownByCharacterNames ?? [],
+      input.volumeEntry.knownByCharacterNames,
+    ),
+    currentRisks: selectWorldStateList(milestoneEntry?.currentRisks ?? [], input.volumeEntry.currentRisks),
+  };
+}
+
+function formatWorldStateEntryBlock(label: string, entry: {
+  volumeTitle: string;
+  publicEvents: string[];
+  secretEvents: string[];
+  powerBalanceChange: string;
+  institutionChange: string;
+  ruleChange: string;
+  rumorState: string;
+  knownByCharacterNames: string[];
+  currentRisks: string[];
+}) {
+  const lines = [`- ${label}《${entry.volumeTitle || '未命名卷'}》`];
+
+  if (entry.publicEvents.length > 0) {
+    lines.push(`公开事件：${entry.publicEvents.join('；')}`);
+  }
+
+  if (entry.secretEvents.length > 0) {
+    lines.push(`秘密事件：${entry.secretEvents.join('；')}`);
+  }
+
+  if (entry.powerBalanceChange) {
+    lines.push(`势力变化：${truncateText(entry.powerBalanceChange, 120)}`);
+  }
+
+  if (entry.institutionChange) {
+    lines.push(`制度变化：${truncateText(entry.institutionChange, 120)}`);
+  }
+
+  if (entry.ruleChange) {
+    lines.push(`规则变化：${truncateText(entry.ruleChange, 120)}`);
+  }
+
+  if (entry.rumorState) {
+    lines.push(`舆论状态：${truncateText(entry.rumorState, 120)}`);
+  }
+
+  if (entry.knownByCharacterNames.length > 0) {
+    lines.push(`关键信息掌握者：${entry.knownByCharacterNames.join('、')}`);
+  }
+
+  if (entry.currentRisks.length > 0) {
+    lines.push(`当前风险：${entry.currentRisks.join('；')}`);
+  }
+
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+function buildWorldStateDeltaBlocks(input: {
+  rows: WorldStateEntryRecord[];
+  volumeTitle?: string;
+  milestoneIndex?: number | null;
+}) {
+  const volumeLevelRows = input.rows
+    .filter((row) => row.milestoneIndex === null)
+    .sort((left, right) => {
+      if (left.volumeOrder !== right.volumeOrder) {
+        return right.volumeOrder - left.volumeOrder;
+      }
+
+      return right.updatedAt.localeCompare(left.updatedAt);
+    });
+  const normalizedCurrentVolumeTitle = normalizeWorldStateTitle(input.volumeTitle);
+
+  if (!normalizedCurrentVolumeTitle) {
+    return [] as string[];
+  }
+
+  const currentVolumeEntry =
+    volumeLevelRows.find((row) => normalizeWorldStateTitle(row.volumeTitle) === normalizedCurrentVolumeTitle) ?? null;
+
+  if (!currentVolumeEntry) {
+    return [] as string[];
+  }
+
+  const milestoneEntry =
+    typeof input.milestoneIndex === 'number' && Number.isFinite(input.milestoneIndex)
+      ? input.rows.find(
+        (row) =>
+          row.volumeId === currentVolumeEntry.volumeId &&
+          row.milestoneIndex === Math.max(0, Math.trunc(input.milestoneIndex ?? 0)),
+      ) ?? null
+      : null;
+  const previousVolumeEntry =
+    volumeLevelRows.find((row) => row.volumeOrder < currentVolumeEntry.volumeOrder) ?? null;
+  const currentBlock = formatWorldStateEntryBlock('世界状态-本卷变化', {
+    volumeTitle: currentVolumeEntry.volumeTitle,
+    ...mergeWorldStateEntries({
+      volumeEntry: currentVolumeEntry,
+      milestoneEntry,
+    }),
+  });
+  const previousBlock = previousVolumeEntry
+    ? formatWorldStateEntryBlock('世界状态-前一卷残留', {
+      volumeTitle: previousVolumeEntry.volumeTitle,
+      ...mergeWorldStateEntries({
+        volumeEntry: previousVolumeEntry,
+      }),
+    })
+    : '';
+
+  return [currentBlock, previousBlock].filter(Boolean);
+}
+
+function buildAntagonistAgendaBlocks(input: {
+  rows: AntagonistAgendaRecord[];
+  focusEntityNames: string[];
+  chapterTitle?: string;
+  outline?: ChapterOutlineDraft | null;
+}) {
+  const focusEntitySet = new Set(input.focusEntityNames.map((item) => normalizeText(item)).filter(Boolean));
+  const chapterHintHaystack = [
+    input.chapterTitle ?? '',
+    input.outline?.goal ?? '',
+    input.outline?.obstacle ?? '',
+    input.outline?.cost ?? '',
+    ...(input.outline?.beats ?? []),
+  ]
+    .join('\n')
+    .toLowerCase();
+
+  return input.rows
+    .filter((row) => row.status === 'active')
+    .map((row) => ({
+      row,
+      score:
+        (focusEntitySet.has(normalizeText(row.characterName)) ? 100 : 0) +
+        (normalizeText(row.characterName) && chapterHintHaystack.includes(normalizeText(row.characterName)) ? 60 : 0) +
+        (row.triggerToStrike ? 20 : 0) +
+        (row.currentAction ? 20 : 0),
+    }))
+    .filter((item) => item.score >= 40)
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+    })
+    .slice(0, 2)
+    .map(({ row }) => {
+      const lines = [`- ${row.characterName}${row.publicRole ? `（${row.publicRole}）` : ''}`];
+      if (row.currentObjective) {
+        lines.push(`当前目标：${truncateText(row.currentObjective, 120)}`);
+      }
+      if (row.currentAction) {
+        lines.push(`当前动作：${truncateText(row.currentAction, 120)}`);
+      }
+      if (row.triggerToStrike) {
+        lines.push(`出手触发：${truncateText(row.triggerToStrike, 100)}`);
+      }
+      if (row.ifProtagonistDoesNothing) {
+        lines.push(`主角不动时：${truncateText(row.ifProtagonistDoesNothing, 120)}`);
+      }
+      return lines.join('\n');
+    });
+}
+
+function selectEffectivePovPermissions(input: {
+  rows: PovPermissionRecord[];
+  volumeTitle?: string;
+  chapterId?: string;
+}) {
+  if (input.chapterId) {
+    const chapterRows = input.rows.filter((row) => row.chapterId === input.chapterId);
+
+    if (chapterRows.length > 0) {
+      return chapterRows;
+    }
+  }
+
+  const normalizedVolumeTitle = normalizeText(input.volumeTitle);
+
+  if (!normalizedVolumeTitle) {
+    return [] as PovPermissionRecord[];
+  }
+
+  return input.rows.filter(
+    (row) =>
+      normalizeText(row.volumeTitle) === normalizedVolumeTitle &&
+      !row.chapterId,
+  );
+}
+
+function buildPovPermissionBlocks(input: {
+  rows: PovPermissionRecord[];
+  volumeTitle?: string;
+  chapterId?: string;
+}) {
+  return selectEffectivePovPermissions(input)
+    .slice(0, 2)
+    .map((row) => {
+      const lines = [
+        `- ${row.povCharacterName || '未命名视角'}${row.chapterTitle ? ` / 章节 ${row.chapterTitle}` : row.volumeTitle ? ` / ${row.volumeTitle}` : ''}`,
+      ];
+      if (row.mustHide.length > 0) {
+        lines.push(`禁止透露：${row.mustHide.join('；')}`);
+      }
+      if (row.canHint.length > 0) {
+        lines.push(`允许暗示：${row.canHint.join('；')}`);
+      }
+      if (row.forbiddenReveal.length > 0) {
+        lines.push(`本单元禁止揭晓：${row.forbiddenReveal.join('；')}`);
+      }
+      return lines.join('\n');
+    });
+}
+
+function buildStructuredResourceContinuityBlocks(input: {
+  rows: ResourceContinuityRecord[];
+  focusEntityNames: string[];
+  chapterTitle?: string;
+  outline?: ChapterOutlineDraft | null;
+  highPressure: boolean;
+}) {
+  const focusEntitySet = new Set(input.focusEntityNames.map((item) => normalizeText(item)).filter(Boolean));
+  const chapterHintHaystack = [
+    input.chapterTitle ?? '',
+    input.outline?.goal ?? '',
+    input.outline?.obstacle ?? '',
+    input.outline?.cost ?? '',
+    ...(input.outline?.beats ?? []),
+    ...(input.outline?.immutableFacts ?? []),
+  ]
+    .join('\n')
+    .toLowerCase();
+  const riskLabelMap: Record<ResourceContinuityRecord['riskLevel'], string> = {
+    critical: '致命',
+    high: '高',
+    medium: '中',
+    low: '低',
+  };
+
+  return input.rows
+    .filter((row) => row.status === 'active' || row.status === 'permanent')
+    .map((row) => {
+      const hintTerms = getResourceContinuityHintTerms(row.resourceType);
+      const hintScore = hintTerms.reduce((total, term) => total + (countTextOccurrences(chapterHintHaystack, term) > 0 ? 18 : 0), 0);
+      const riskScore =
+        row.riskLevel === 'critical'
+          ? 45
+          : row.riskLevel === 'high'
+            ? 30
+            : row.riskLevel === 'medium'
+              ? 15
+              : 0;
+
+      return {
+        row,
+        score:
+          (focusEntitySet.has(normalizeText(row.ownerCharacterName)) ? 100 : 0) +
+          (row.status === 'permanent' ? 30 : 0) +
+          riskScore +
+          hintScore +
+          (input.highPressure && row.riskLevel !== 'low' ? 10 : 0),
+      };
+    })
+    .filter((item) => item.score >= (input.highPressure ? 35 : 60))
+    .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+    })
+    .slice(0, input.highPressure ? 6 : 4)
+    .map(({ row }) => {
+      const lines = [`- ${row.ownerCharacterName || '未绑定角色'} / ${row.resourceType}`];
+      lines.push(`风险级别：${riskLabelMap[row.riskLevel]}`);
+      if (row.currentState) {
+        lines.push(`当前状态：${truncateText(row.currentState, 120)}`);
+      }
+      if (row.performanceImpact) {
+        lines.push(`行动限制：${truncateText(row.performanceImpact, 120)}`);
+      }
+      if (input.highPressure && row.lastConsumedAt) {
+        lines.push(`最近消耗：${truncateText(row.lastConsumedAt, 80)}`);
+      }
+      if (input.highPressure && row.recoveryCondition) {
+        lines.push(`恢复条件：${truncateText(row.recoveryCondition, 100)}`);
+      }
+      if (row.hiddenCost) {
+        lines.push(`隐藏代价：${truncateText(row.hiddenCost, 100)}`);
+      }
+      if (row.continuityRisk) {
+        lines.push(`连续性风险：${truncateText(row.continuityRisk, 100)}`);
+      }
+      return lines.join('\n');
+    });
+}
+
+function isHighPressureResourceScene(input: {
+  chapterTitle?: string;
+  outline?: ChapterOutlineDraft | null;
+}) {
+  if (input.outline?.hookStrength === 'strong') {
+    return true;
+  }
+
+  const haystack = [
+    input.chapterTitle ?? '',
+    input.outline?.goal ?? '',
+    input.outline?.obstacle ?? '',
+    input.outline?.cost ?? '',
+    ...(input.outline?.beats ?? []),
+    ...(input.outline?.immutableFacts ?? []),
+  ]
+    .join('\n');
+
+  return /(追杀|围杀|突围|亡命|逃亡|审判|对峙|翻案|搜证|破局|借势|反噬|倒计时|期限|封锁|围捕|潜入|截杀)/u.test(haystack);
 }
 
 function buildWorkingMemoryBlocks(
@@ -1107,28 +1743,69 @@ function buildLightweightRecallItems(items: GenerationRetrievedChunk[]) {
 }
 
 function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: string[]) {
-  const entityRowMap = new Map(entityRows.map((row) => [normalizeText(row.entityName), row] as const));
+  const entityRowMap = new Map<string, GenerationEntityRow>();
+
+  for (const row of entityRows) {
+    for (const term of getEntitySearchTerms(row)) {
+      const normalizedTerm = normalizeText(term);
+
+      if (normalizedTerm && !entityRowMap.has(normalizedTerm)) {
+        entityRowMap.set(normalizedTerm, row);
+      }
+    }
+  }
 
   return focusEntityNames
     .map((entityName) => entityRowMap.get(normalizeText(entityName)))
     .filter((row): row is GenerationEntityRow => Boolean(row))
-    .slice(0, 6)
+    .filter((row, index, rows) => {
+      return rows.findIndex((candidate) => normalizeText(candidate.entityName) === normalizeText(row.entityName)) === index;
+    })
+    .slice(0, GENERATION_CONTEXT_LIMITS.entityBlockMax)
     .map((row) => {
       const lines = [`- ${row.entityName}${row.entityType ? `（${row.entityType}）` : ''}`];
-      const fieldEntries = Object.entries(row.fields)
+      const genericFieldEntries = Object.entries(row.fields)
+        .filter(([key]) =>
+          !CHARACTER_STATIC_FIELD_LABELS.some(([fieldKey]) => fieldKey === key)
+          && !CHARACTER_DYNAMIC_FIELD_LABELS.some(([fieldKey]) => fieldKey === key),
+        )
         .map(([key, value]) => `${key}=${value}`)
-        .slice(0, 4);
+        .slice(0, GENERATION_CONTEXT_LIMITS.entityFieldPreviewMax);
+      const staticFieldEntries = CHARACTER_STATIC_FIELD_LABELS
+        .map(([fieldKey, label]) => {
+          const value = row.fields[fieldKey];
+          return value ? `${label}：${value}` : '';
+        })
+        .filter(Boolean);
+      const dynamicFieldEntries = CHARACTER_DYNAMIC_FIELD_LABELS
+        .map(([fieldKey, label]) => {
+          const value = row.fields[fieldKey];
+          return value ? `${label}：${value}` : '';
+        })
+        .filter(Boolean);
 
       if (row.description) {
-        lines.push(`描述：${truncateText(row.description, 80)}`);
+        lines.push(`描述：${truncateText(row.description, GENERATION_CONTEXT_LIMITS.entityDescriptionMaxChars)}`);
       }
 
-      if (fieldEntries.length > 0) {
-        lines.push(`关键状态：${fieldEntries.join('；')}`);
+      if (row.aliases.length > 0) {
+        lines.push(`别名：${row.aliases.slice(0, GENERATION_CONTEXT_LIMITS.entityTagPreviewMax).join(' / ')}`);
+      }
+
+      if (staticFieldEntries.length > 0) {
+        lines.push(`【人格内核-不可改变】${staticFieldEntries.join('；')}`);
+      }
+
+      if (dynamicFieldEntries.length > 0) {
+        lines.push(`【当前阶段状态】${dynamicFieldEntries.join('；')}`);
+      }
+
+      if (genericFieldEntries.length > 0) {
+        lines.push(`关键状态：${genericFieldEntries.join('；')}`);
       }
 
       if (row.tags.length > 0) {
-        lines.push(`标签：${row.tags.slice(0, 4).join(' / ')}`);
+        lines.push(`标签：${row.tags.slice(0, GENERATION_CONTEXT_LIMITS.entityTagPreviewMax).join(' / ')}`);
       }
 
       if (row.lastSeenChapterTitle) {
@@ -1137,6 +1814,167 @@ function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: 
 
       return lines.join('\n');
     });
+}
+
+function buildAvailableCharacterHintBlocks(
+  entityRows: GenerationEntityRow[],
+  availableCharacterNames: string[],
+  focusEntityNames: string[],
+) {
+  const normalizedFocusSet = new Set(focusEntityNames.map((item) => normalizeText(item)).filter(Boolean));
+  const entityRowMap = new Map<string, GenerationEntityRow>();
+
+  for (const row of entityRows) {
+    for (const term of getEntitySearchTerms(row)) {
+      const normalizedTerm = normalizeText(term);
+
+      if (normalizedTerm && !entityRowMap.has(normalizedTerm)) {
+        entityRowMap.set(normalizedTerm, row);
+      }
+    }
+  }
+
+  return createUniqueList(availableCharacterNames)
+    .map((entityName) => entityRowMap.get(normalizeText(entityName)))
+    .filter((row): row is GenerationEntityRow => Boolean(row))
+    .filter((row) => !normalizedFocusSet.has(normalizeText(row.entityName)))
+    .filter((row, index, rows) => {
+      return rows.findIndex((candidate) => normalizeText(candidate.entityName) === normalizeText(row.entityName)) === index;
+    })
+    .slice(0, 4)
+    .map((row) => {
+      const summary = row.description.trim()
+        || row.fields.current_status?.trim()
+        || row.fields.current_goal?.trim()
+        || row.fields.static_role?.trim();
+
+      return [
+        `- 候选人物：${row.entityName}${row.entityType ? `（${row.entityType}）` : ''}`,
+        '弱提示：可用于分担对话、对照、施压或信息转手，但不要抢走必须出场人物的章节职责。',
+        summary ? `当前抓手：${truncateText(summary, 80)}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    });
+}
+
+function expandFocusEntityNamesByExplicitRelations(
+  focusEntityNames: string[],
+  relationSnapshots: GenerationRelationSnapshot[],
+  allowDraftContext?: boolean,
+) {
+  const normalizedFocusSet = new Set(focusEntityNames.map((item) => normalizeText(item)).filter(Boolean));
+
+  if (normalizedFocusSet.size === 0 || relationSnapshots.length === 0) {
+    return [] as string[];
+  }
+
+  return relationSnapshots
+    .flatMap((relation) => {
+      if (!allowDraftContext && relation.draft) {
+        return [] as string[];
+      }
+
+      const sourceMatched = normalizedFocusSet.has(normalizeText(relation.sourceEntityName));
+      const targetMatched = normalizedFocusSet.has(normalizeText(relation.targetEntityName));
+
+      if (sourceMatched && relation.targetEntityName.trim()) {
+        return [relation.targetEntityName.trim()];
+      }
+
+      if (targetMatched && relation.sourceEntityName.trim()) {
+        return [relation.sourceEntityName.trim()];
+      }
+
+      return [] as string[];
+    })
+    .filter(Boolean);
+}
+
+function buildExplicitRelationshipBlocks(input: {
+  relationSnapshots: GenerationRelationSnapshot[];
+  focusEntityNames: string[];
+  allowDraftContext?: boolean;
+}) {
+  const normalizedFocusSet = new Set(input.focusEntityNames.map((item) => normalizeText(item)).filter(Boolean));
+
+  if (normalizedFocusSet.size === 0 || input.relationSnapshots.length === 0) {
+    return {
+      blocks: [] as string[],
+      coverageKeys: new Set<string>(),
+    };
+  }
+
+  const blocks: string[] = [];
+  const coverageKeys = new Set<string>();
+
+  for (const relation of input.relationSnapshots) {
+    if (!input.allowDraftContext && relation.draft) {
+      continue;
+    }
+
+    const sourceName = relation.sourceEntityName.trim();
+    const targetName = relation.targetEntityName.trim();
+    const focusMatched =
+      normalizedFocusSet.has(normalizeText(sourceName)) || normalizedFocusSet.has(normalizeText(targetName));
+
+    if (!focusMatched || !sourceName || !targetName || !relation.relationType.trim()) {
+      continue;
+    }
+
+    coverageKeys.add(buildRelationPairKey(sourceName, targetName));
+    blocks.push(
+      [
+        `- 显式关系：${sourceName} <-> ${targetName}（${relation.relationType.trim()}）`,
+        relation.description.trim() ? `关系本质：${truncateText(relation.description.trim(), 120)}` : '',
+        relation.origin.trim() ? `建立原因：${truncateText(relation.origin.trim(), 80)}` : '',
+        relation.currentStance.trim() ? `当前态度：${relation.currentStance.trim()}` : '',
+        relation.currentIntensity > 0 ? `当前强度：${relation.currentIntensity}` : '',
+        relation.stanceReason.trim() ? `态度锚点：${truncateText(relation.stanceReason.trim(), 80)}` : '',
+        relation.draft ? '状态：草案' : '状态：已确认',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    );
+
+    if (blocks.length >= GENERATION_CONTEXT_LIMITS.entityBlockMax) {
+      break;
+    }
+  }
+
+  return {
+    blocks,
+    coverageKeys,
+  };
+}
+
+function filterAutomaticRelationshipBlocksByExplicitCoverage(
+  blocks: string[],
+  relationSnapshots: GenerationRelationSnapshot[],
+  coverageKeys: Set<string>,
+) {
+  if (blocks.length === 0 || coverageKeys.size === 0) {
+    return blocks;
+  }
+
+  const [headerBlock, ...detailBlocks] = blocks;
+  const filteredDetailBlocks = detailBlocks.filter((block) => {
+    return !relationSnapshots.some((relation) => {
+      const pairKey = buildRelationPairKey(relation.sourceEntityName, relation.targetEntityName);
+
+      return (
+        coverageKeys.has(pairKey) &&
+        block.includes(relation.sourceEntityName) &&
+        block.includes(relation.targetEntityName)
+      );
+    });
+  });
+
+  if (filteredDetailBlocks.length === 0) {
+    return [] as string[];
+  }
+
+  return [headerBlock, ...filteredDetailBlocks];
 }
 
 function describeStructuredRelationshipOneHopReason(reason: GenerationStructuredRelationshipQueryReason) {
@@ -1728,10 +2566,28 @@ export async function buildGenerationContextBundle(
       return right.updatedAt.localeCompare(left.updatedAt);
     })
     .slice(0, 5);
-  const entityRows = loadEntityRows(env, input.projectId);
+  const entityRows = loadEntityRows(env, input.projectId).filter((row) => input.allowDraftContext || !row.draft);
   const relationshipRows = loadRelationshipRows(env, input.projectId);
   const resourceStateRows = loadResourceStateRows(env, input.projectId);
   const storedVolumeRecaps = listGenerationVolumeRecaps(env, input.projectId);
+  const foreshadowPlanRows = listForeshadowPlans(env, {
+    projectId: input.projectId,
+  });
+  const worldStateRows = listWorldStateEntries(env, {
+    projectId: input.projectId,
+  });
+  const antagonistAgendaRows = listAntagonistAgendas(env, {
+    projectId: input.projectId,
+  });
+  const povPermissionRows = listPovPermissions(env, {
+    projectId: input.projectId,
+  });
+  const structuredResourceContinuityRows = listResourceContinuities(env, {
+    projectId: input.projectId,
+  });
+  const threadLedgerRows = listThreadLedgers(env, {
+    projectId: input.projectId,
+  });
   const storedForeshadowRows = listGenerationForeshadows(env, input.projectId).map(
     (row): ForeshadowRow => ({
       id: row.id,
@@ -1746,7 +2602,14 @@ export async function buildGenerationContextBundle(
       updatedAt: row.updatedAt,
     }),
   );
-  const focusEntityNames = selectFocusEntityNames(input, chapterRows, entityRows);
+  const seedFocusEntityNames = createUniqueList([
+    ...(input.requiredEntityNames ?? []),
+    ...selectFocusEntityNames(input, chapterRows, entityRows),
+  ]);
+  const focusEntityNames = createUniqueList([
+    ...seedFocusEntityNames,
+    ...expandFocusEntityNamesByExplicitRelations(seedFocusEntityNames, input.relationSnapshot ?? [], input.allowDraftContext),
+  ]);
   const queryPhrases = buildQueryPhrases(input);
   const fallbackContext = parseFallbackContextBundle(input.fallbackContextBundle);
   const volumeRecapBlocks = mergeVolumeRecapBlocks(
@@ -1761,12 +2624,17 @@ export async function buildGenerationContextBundle(
     volumeTitle: input.volumeTitle,
     queryPhrases,
     focusEntityNames,
-    limit: 6,
+    limit: GENERATION_CONTEXT_LIMITS.memoryRetrievalLimit,
     lightweightRecallConfig: input.lightweightRecallConfig,
   });
   const relatedChapterBlocks = buildRelatedChapterBlocks(retrievalItems);
   const lightweightRecallBlocks = buildLightweightRecallItems(retrievalItems);
   const entityBlocks = buildEntityBlocks(entityRows, focusEntityNames);
+  const availableCharacterHintBlocks = buildAvailableCharacterHintBlocks(
+    entityRows,
+    input.availableCharacterNames ?? [],
+    focusEntityNames,
+  );
   const relationshipFocusEntityNames = selectStructuredRelationshipFocusEntityNames(
     input,
     chapterRows,
@@ -1779,10 +2647,30 @@ export async function buildGenerationContextBundle(
     currentChapterOrder,
     currentChapterId: input.chapterId,
   });
-  const relationshipBlocks = structuredRelationshipResult.blocks;
-  const serverForeshadowBlocks = buildForeshadowBlocks(storedForeshadowRows);
+  const explicitRelationshipResult = buildExplicitRelationshipBlocks({
+    relationSnapshots: input.relationSnapshot ?? [],
+    focusEntityNames,
+    allowDraftContext: input.allowDraftContext,
+  });
+  const relationshipBlocks = [
+    ...explicitRelationshipResult.blocks,
+    ...filterAutomaticRelationshipBlocksByExplicitCoverage(
+      structuredRelationshipResult.blocks,
+      input.relationSnapshot ?? [],
+      explicitRelationshipResult.coverageKeys,
+    ),
+  ];
+  const serverForeshadowBlocks = buildForeshadowBlocks(
+    storedForeshadowRows,
+    input.requiredForeshadowTitles ?? [],
+  );
   const activeForeshadowBlocks =
     input.preferStoredForeshadows ? serverForeshadowBlocks : fallbackContext.activeForeshadowBlocks;
+  const foreshadowPlanBlocks = buildForeshadowPlanBlocks({
+    plans: foreshadowPlanRows,
+    activeForeshadowRows: storedForeshadowRows,
+    requiredForeshadowTitles: input.requiredForeshadowTitles,
+  });
   const workingMemoryBlocks = buildWorkingMemoryBlocks(
     input,
     currentVolumeSnapshotBlocks,
@@ -1792,15 +2680,58 @@ export async function buildGenerationContextBundle(
     resourceStateRows,
     currentChapterOrder,
   );
+  const highPressureResourceScene = isHighPressureResourceScene({
+    chapterTitle: input.chapterTitle,
+    outline: input.outline,
+  });
+  const structuredResourceContinuityBlocks = buildStructuredResourceContinuityBlocks({
+    rows: structuredResourceContinuityRows,
+    focusEntityNames,
+    chapterTitle: input.chapterTitle,
+    outline: input.outline,
+    highPressure: highPressureResourceScene,
+  });
+  const worldStateDeltaBlocks = buildWorldStateDeltaBlocks({
+    rows: worldStateRows,
+    volumeTitle: input.volumeTitle,
+    milestoneIndex: null,
+  });
+  const antagonistAgendaBlocks = buildAntagonistAgendaBlocks({
+    rows: antagonistAgendaRows,
+    focusEntityNames,
+    chapterTitle: input.chapterTitle,
+    outline: input.outline,
+  });
+  const povPermissionBlocks = buildPovPermissionBlocks({
+    rows: povPermissionRows,
+    volumeTitle: input.volumeTitle,
+    chapterId: input.chapterId,
+  });
+  const threadLedgerBlocks = buildThreadLedgerBlocks({
+    rows: threadLedgerRows,
+    focusEntityNames,
+    requiredEntityNames: input.requiredEntityNames,
+    availableCharacterNames: input.availableCharacterNames,
+    requiredForeshadowTitles: input.requiredForeshadowTitles,
+    currentChapterOrder,
+    chapterTitle: input.chapterTitle,
+    outline: input.outline,
+  });
   const sections = [
     createSection('working_memory', '工作记忆', workingMemoryBlocks),
+    createSection('thread_ledger', '剧情线提醒', threadLedgerBlocks),
+    createSection('foreshadow_plan', '伏笔规划', foreshadowPlanBlocks),
+    createSection('antagonist_agenda', '反派议程', antagonistAgendaBlocks),
+    createSection('pov_permission', '信息控制', povPermissionBlocks),
+    createSection('world_state_delta', '世界状态', worldStateDeltaBlocks),
     createSection('immediate_memory', '即时记忆', buildRecentTextBlocks(recentTextRows)),
     createSection('short_term_memory', '短期记忆', buildRecentSummaryBlocks(recentSummaryRows)),
     createSection('long_term_memory', '长期记忆', volumeRecapBlocks),
     createSection('retrieval_memory', '外部检索', relatedChapterBlocks),
     input.worldState?.trim() ? createSection('physical_engine', '物理引擎', [input.worldState.trim()]) : null,
-    createSection('resource_continuity', '资源连续性', resourceContinuityBlocks),
+    createSection('resource_continuity', '资源连续性', [...structuredResourceContinuityBlocks, ...resourceContinuityBlocks].slice(0, highPressureResourceScene ? 8 : 6)),
     createSection('focus_entities', '当前关注实体', entityBlocks),
+    createSection('candidate_entities', '候选出场人物', availableCharacterHintBlocks),
     createSection('relationships', '相关关系', relationshipBlocks),
     fallbackContext.residualBundle
       ? createSection('fallback_context', '前端补充上下文', [fallbackContext.residualBundle])
@@ -1816,7 +2747,16 @@ export async function buildGenerationContextBundle(
     dormantForeshadowRecallCount: retrievalItems.filter((item) => item.sourceType === 'dormant_foreshadow').length,
     volumeRecapRecallCount: retrievalItems.filter((item) => item.sourceType === 'volume_recap').length,
     entityCount: entityBlocks.length,
-    relationshipCount: structuredRelationshipResult.signalCount,
+    relationshipCount:
+      explicitRelationshipResult.blocks.length +
+      Math.max(
+        0,
+        filterAutomaticRelationshipBlocksByExplicitCoverage(
+          structuredRelationshipResult.blocks,
+          input.relationSnapshot ?? [],
+          explicitRelationshipResult.coverageKeys,
+        ).length - 1,
+      ),
     hasFallbackContext: Boolean(input.fallbackContextBundle?.trim()),
     focusEntityNames,
     queryPhrases,

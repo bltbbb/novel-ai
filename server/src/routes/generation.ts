@@ -3,6 +3,7 @@ import type { ServerEnv } from '../config/env.js';
 import {
   extractChapterArtifacts,
   checkChapterLanguageQa,
+  generateInspirationBlueprint,
   generateBookOutline,
   generateBeatDraft,
   generateChapterOutline,
@@ -10,6 +11,7 @@ import {
   generateVolumeMilestones,
   generateVolumeOutline,
   polishChapterDraft,
+  reconcileVolumePlan,
   reviewChapterDraft,
   styleChapterDraft,
 } from '../services/generation.js';
@@ -26,6 +28,7 @@ import { syncGenerationArtifacts } from '../services/generation-artifact-sync.js
 import type {
   AIBookAnalysisRequest,
   AIEpubExtractRequest,
+  AIInspirationBlueprintRequest,
   AIBookOutlineRequest,
   AIExtractRequest,
   AILanguageQaRequest,
@@ -36,6 +39,7 @@ import type {
   AIVolumeBeatsRequest,
   AIVolumeMilestonesRequest,
   AIVolumeOutlineRequest,
+  AIVolumePlanReconcileRequest,
   AIWriteRequest,
   GenerationArtifactSyncRequest,
 } from '../types/ai.js';
@@ -66,6 +70,20 @@ function isAIBookOutlineRequest(body: unknown): body is AIBookOutlineRequest {
     typeof candidate.projectTitle === 'string' &&
     typeof candidate.projectDescription === 'string' &&
     Array.isArray(candidate.genre) &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIInspirationBlueprintRequest(body: unknown): body is AIInspirationBlueprintRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIInspirationBlueprintRequest>;
+
+  return (
+    typeof candidate.transcript === 'string' &&
     typeof candidate.model === 'string' &&
     typeof candidate.temperature === 'number'
   );
@@ -140,6 +158,27 @@ function isAIVolumeMilestonesRequest(body: unknown): body is AIVolumeMilestonesR
     typeof candidate.bookOutline === 'string' &&
     typeof candidate.volumeTitle === 'string' &&
     typeof candidate.volumeOrder === 'number' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIVolumePlanReconcileRequest(body: unknown): body is AIVolumePlanReconcileRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIVolumePlanReconcileRequest>;
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    typeof candidate.projectDescription === 'string' &&
+    typeof candidate.volumeTitle === 'string' &&
+    typeof candidate.volumeOrder === 'number' &&
+    typeof candidate.bookOutline === 'string' &&
+    typeof candidate.currentVolumeOutline === 'string' &&
+    typeof candidate.currentMilestones === 'string' &&
+    typeof candidate.chapterSummaries === 'string' &&
     typeof candidate.model === 'string' &&
     typeof candidate.temperature === 'number'
   );
@@ -446,6 +485,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
     }
   });
 
+  app.post('/api/ai/inspiration-blueprint', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIInspirationBlueprintRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIInspirationBlueprintRequest 结构',
+      });
+    }
+
+    try {
+      return await generateInspirationBlueprint(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
   app.post('/api/ai/book-outline', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAIBookOutlineRequest(request.body)) {
       return reply.status(400).send({
@@ -489,6 +545,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
 
     try {
       return await generateVolumeMilestones(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/volume-plan-reconcile', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIVolumePlanReconcileRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIVolumePlanReconcileRequest 结构',
+      });
+    }
+
+    try {
+      return await reconcileVolumePlan(env, request.body);
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       return reply.status(500).send({

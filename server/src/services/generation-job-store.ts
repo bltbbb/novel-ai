@@ -166,6 +166,24 @@ function normalizeRequest(
     previousSummary: typeof requestCandidate.previousSummary === 'string' ? requestCandidate.previousSummary : undefined,
     worldState: typeof requestCandidate.worldState === 'string' ? requestCandidate.worldState : undefined,
     contextBundle: typeof requestCandidate.contextBundle === 'string' ? requestCandidate.contextBundle : undefined,
+    requiredEntityNames: Array.isArray(requestCandidate.requiredEntityNames)
+      ? requestCandidate.requiredEntityNames
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : undefined,
+    availableCharacterNames: Array.isArray(requestCandidate.availableCharacterNames)
+      ? requestCandidate.availableCharacterNames
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : undefined,
+    requiredForeshadowTitles: Array.isArray(requestCandidate.requiredForeshadowTitles)
+      ? requestCandidate.requiredForeshadowTitles
+          .filter((item): item is string => typeof item === 'string')
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : undefined,
     stylePrompt: typeof requestCandidate.stylePrompt === 'string' ? requestCandidate.stylePrompt : undefined,
     model: typeof requestCandidate.model === 'string' ? requestCandidate.model : '',
     temperature: typeof requestCandidate.temperature === 'number' ? requestCandidate.temperature : 0.7,
@@ -207,9 +225,38 @@ function normalizeRequest(
             tags: Array.isArray(item.tags)
               ? item.tags.filter((tag): tag is string => typeof tag === 'string').map((tag) => tag.trim()).filter(Boolean)
               : [],
+            aliases: Array.isArray(item.aliases)
+              ? item.aliases
+                  .filter((alias): alias is string => typeof alias === 'string')
+                  .map((alias) => alias.trim())
+                  .filter(Boolean)
+              : [],
             pinned: typeof item.pinned === 'boolean' ? item.pinned : false,
+            draft: typeof item.draft === 'boolean' ? item.draft : false,
           }))
           .filter((item) => item.name)
+      : [],
+    relationSnapshot: Array.isArray(requestCandidate.relationSnapshot)
+      ? requestCandidate.relationSnapshot
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => ({
+            id: typeof item.id === 'string' ? item.id.trim() : '',
+            sourceEntityId: typeof item.sourceEntityId === 'string' ? item.sourceEntityId.trim() : '',
+            targetEntityId: typeof item.targetEntityId === 'string' ? item.targetEntityId.trim() : '',
+            sourceEntityName: typeof item.sourceEntityName === 'string' ? item.sourceEntityName.trim() : '',
+            targetEntityName: typeof item.targetEntityName === 'string' ? item.targetEntityName.trim() : '',
+            relationType: typeof item.relationType === 'string' ? item.relationType.trim() : '',
+            origin: typeof item.origin === 'string' ? item.origin.trim() : '',
+            description: typeof item.description === 'string' ? item.description.trim() : '',
+            currentStance: typeof item.currentStance === 'string' ? item.currentStance.trim() : '',
+            currentIntensity:
+              typeof item.currentIntensity === 'number' && Number.isFinite(item.currentIntensity)
+                ? Math.max(0, Math.min(5, Math.trunc(item.currentIntensity)))
+                : 0,
+            stanceReason: typeof item.stanceReason === 'string' ? item.stanceReason.trim() : '',
+            draft: typeof item.draft === 'boolean' ? item.draft : false,
+          }))
+          .filter((item) => item.sourceEntityName && item.targetEntityName && item.relationType)
       : [],
     foreshadowSnapshot: Array.isArray(requestCandidate.foreshadowSnapshot)
       ? requestCandidate.foreshadowSnapshot

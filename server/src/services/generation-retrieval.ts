@@ -31,6 +31,13 @@ export interface GenerationMemoryRetrievalRequest {
   lightweightRecallConfig?: LightweightRecallConfig;
 }
 
+const GENERATION_RETRIEVAL_LIMITS = {
+  queryPhraseMax: 16,
+  focusEntityNameMax: 8,
+  requestLimitDefault: 8,
+  requestLimitMax: 12,
+} as const;
+
 export type GenerationRetrievedSourceType = 'memory_chunk' | 'dormant_foreshadow' | 'volume_recap';
 export type GenerationRetrievedHitOrigin = 'lexical_only' | 'vector_only' | 'hybrid';
 
@@ -245,11 +252,11 @@ function countOccurrences(source: string, pattern: string) {
 }
 
 function buildQueryPhrases(request: GenerationMemoryRetrievalRequest) {
-  return createUniqueList(request.queryPhrases ?? []).slice(0, 16);
+  return createUniqueList(request.queryPhrases ?? []).slice(0, GENERATION_RETRIEVAL_LIMITS.queryPhraseMax);
 }
 
 function buildFocusEntityNames(request: GenerationMemoryRetrievalRequest) {
-  return createUniqueList(request.focusEntityNames ?? []).slice(0, 8);
+  return createUniqueList(request.focusEntityNames ?? []).slice(0, GENERATION_RETRIEVAL_LIMITS.focusEntityNameMax);
 }
 
 interface MemoryMetadataPrefilterContext {
@@ -1389,7 +1396,13 @@ export async function retrieveGenerationMemory(
           rescuedVectorOnlyCandidates: 0,
           droppedBelowThresholdCandidates: 0,
           droppedByLimitCandidates: 0,
-          limit: Math.max(1, Math.min(12, Math.trunc(request.limit ?? 8))),
+          limit: Math.max(
+            1,
+            Math.min(
+              GENERATION_RETRIEVAL_LIMITS.requestLimitMax,
+              Math.trunc(request.limit ?? GENERATION_RETRIEVAL_LIMITS.requestLimitDefault),
+            ),
+          ),
           topScore: null,
           dynamicThreshold: null,
           rescuedVectorOnlyChunkIds: [],
@@ -1444,7 +1457,13 @@ export async function retrieveGenerationMemory(
   );
   const selectionPhase = applyDynamicSelection(
     dedupeRerankPhase.candidates,
-    Math.max(1, Math.min(12, Math.trunc(request.limit ?? 8))),
+    Math.max(
+      1,
+      Math.min(
+        GENERATION_RETRIEVAL_LIMITS.requestLimitMax,
+        Math.trunc(request.limit ?? GENERATION_RETRIEVAL_LIMITS.requestLimitDefault),
+      ),
+    ),
   );
 
   const lightweightRecallConfig = resolveLightweightRecallConfig(env, request.lightweightRecallConfig);

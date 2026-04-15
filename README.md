@@ -174,10 +174,12 @@ cd app
 npm run test:e2e:ai
 npm run test:e2e:export
 npm run test:e2e:records
+npm run test:e2e:inspiration
 npm run test:e2e:archive
 npm run test:e2e:graph
 npm run test:e2e:inspector
 npm run test:e2e:generation
+npm run test:e2e:planning
 npm run test:e2e:retrieval
 ```
 

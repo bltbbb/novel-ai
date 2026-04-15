@@ -1,4 +1,5 @@
 import { serializeBookOutline, serializeVolumeOutline } from '@/lib/outline-serializer';
+import { collectPlanningRequirements } from '@/lib/planning-requirements';
 import { getEffectiveChapterText, loadGenerationQueueMap } from '@/lib/generation-storage';
 import { useChapterBeatStore, useOutlineStore } from '@/stores';
 import type {
@@ -49,6 +50,9 @@ export interface ChapterPromptPayload {
   chapterBeat?: string;
   nextChapterPreview?: string;
   forbiddenZone?: string;
+  requiredEntityNames: string[];
+  availableCharacterNames: string[];
+  requiredForeshadowTitles: string[];
   currentChapterBeat: ChapterBeat | null;
   nextChapterBeat: ChapterBeat | null;
   automaticForbiddenZone: AutomaticForbiddenZone;
@@ -99,6 +103,8 @@ function serializeChapterBeat(beat: ChapterBeat | ChapterBeatFields) {
     beat.titleHint.trim() ? `标题提示：${beat.titleHint.trim()}` : '',
     beat.scenePurpose.trim() ? `场景功能：${beat.scenePurpose.trim()}` : '',
     beat.focusCharacter.trim() ? `焦点角色：${beat.focusCharacter.trim()}` : '',
+    (beat.mustAppearCharacters ?? []).length > 0 ? `必须出场：${(beat.mustAppearCharacters ?? []).join('；')}` : '',
+    (beat.availableCharacters ?? []).length > 0 ? `可出场候选：${(beat.availableCharacters ?? []).join('；')}` : '',
     beat.mainPlot.trim() ? `主线推进：${beat.mainPlot.trim()}` : '',
     beat.subPlot.trim() ? `支线推进：${beat.subPlot.trim()}` : '',
     beat.pacing.trim() ? `节奏：${beat.pacing.trim()}` : '',
@@ -237,6 +243,11 @@ export async function buildChapterPromptPayload(
       ? volumeChapterBeats.find((beat) => beat.orderInVolume === currentChapterBeat.orderInVolume + 1) ?? null
       : null;
   const automaticForbiddenZone = buildAutomaticForbiddenZone(getRecentChapterTexts(chapters, chapter, queueMap));
+  const planningRequirements = collectPlanningRequirements({
+    volumeOutline: volumeOutlineRecord ?? null,
+    milestoneIndex: currentChapterBeat?.milestoneIndex,
+    chapterBeat: currentChapterBeat ?? null,
+  });
 
   return {
     bookOutline: bookOutlineRecord ? serializeBookOutline(bookOutlineRecord) : undefined,
@@ -245,6 +256,9 @@ export async function buildChapterPromptPayload(
     chapterBeat: currentChapterBeat ? serializeChapterBeat(currentChapterBeat) : undefined,
     nextChapterPreview: nextChapterBeat ? serializeNextChapterPreview(nextChapterBeat) : undefined,
     forbiddenZone: buildForbiddenZoneText(currentChapterBeat ?? null, automaticForbiddenZone),
+    requiredEntityNames: planningRequirements.requiredEntityNames,
+    availableCharacterNames: planningRequirements.availableCharacterNames,
+    requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
     currentChapterBeat: currentChapterBeat ?? null,
     nextChapterBeat,
     automaticForbiddenZone,

@@ -69,6 +69,8 @@ function normalizeChapterBeatInput(input: SaveChapterBeatInput): ChapterBeatFiel
     titleHint: normalizeText(input.titleHint),
     scenePurpose: normalizeText(input.scenePurpose),
     focusCharacter: normalizeText(input.focusCharacter),
+    mustAppearCharacters: normalizeTextList(input.mustAppearCharacters),
+    availableCharacters: normalizeTextList(input.availableCharacters),
     mainPlot: normalizeText(input.mainPlot),
     subPlot: normalizeText(input.subPlot),
     pacing: normalizeText(input.pacing),
@@ -103,6 +105,14 @@ function createChapterBeatRecord(
     volumeId,
     chapterId: input.chapterId ?? existing?.chapterId,
     ...normalized,
+    mustAppearCharacters:
+      Array.isArray(input.mustAppearCharacters)
+        ? normalized.mustAppearCharacters
+        : existing?.mustAppearCharacters ?? [],
+    availableCharacters:
+      Array.isArray(input.availableCharacters)
+        ? normalized.availableCharacters
+        : existing?.availableCharacters ?? [],
     milestoneIndex: resolveMilestoneIndex(input, existing),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
