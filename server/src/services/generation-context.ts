@@ -43,6 +43,7 @@ interface GenerationContextBuildInput {
   chapterTitle?: string;
   chapterOrder?: number;
   volumeTitle?: string;
+  milestoneIndex?: number | null;
   previousChapterId?: string;
   previousChapterTitle?: string;
   previousSummary?: string;
@@ -2694,7 +2695,7 @@ export async function buildGenerationContextBundle(
   const worldStateDeltaBlocks = buildWorldStateDeltaBlocks({
     rows: worldStateRows,
     volumeTitle: input.volumeTitle,
-    milestoneIndex: null,
+    milestoneIndex: input.milestoneIndex ?? null,
   });
   const antagonistAgendaBlocks = buildAntagonistAgendaBlocks({
     rows: antagonistAgendaRows,

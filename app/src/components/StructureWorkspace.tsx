@@ -49,6 +49,8 @@ import type {
 
 interface StructureWorkspaceProps {
   projectId: Id;
+  initialSectionKey?: string | null;
+  navigationToken?: number;
 }
 
 type SectionFilterMode = 'all' | 'attention' | 'unsynced';
@@ -103,7 +105,11 @@ function scrollToSection(sectionId: string) {
   });
 }
 
-export function StructureWorkspace({ projectId }: StructureWorkspaceProps) {
+export function StructureWorkspace({
+  projectId,
+  initialSectionKey = null,
+  navigationToken = 0,
+}: StructureWorkspaceProps) {
   const { toast } = useToast();
   const settings = useSettingsStore((state) => state.settings);
   const [filterMode, setFilterMode] = useState<SectionFilterMode>('all');
@@ -230,6 +236,23 @@ export function StructureWorkspace({ projectId }: StructureWorkspaceProps) {
     setLastBackfillApply(null);
     void refreshGuardAlerts(true);
   }, [projectId, settings.serverUrl]);
+
+  useEffect(() => {
+    if (!initialSectionKey) {
+      return;
+    }
+
+    setFilterMode('all');
+    setGroupMode('all');
+
+    const timer = window.setTimeout(() => {
+      scrollToSection(initialSectionKey);
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [initialSectionKey, navigationToken]);
 
   const sectionSummaries = useMemo<SectionSummary[]>(() => {
     const countUnsynced = (map: Record<string, string>) => Object.values(map).filter((value) => value && value !== 'synced').length;

@@ -10,6 +10,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "test": "node --experimental-test-module-mocks --test --test-concurrency=1 --import tsx \"test/**/*.test.ts\"",
     "seed:calibration": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/seed-calibration-sample.ts",
     "calibration:round2": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round2.ts",
     "calibration:round43a-context": "set TSX_DISABLE_CACHE=1&& tsx src/scripts/run-calibration-round43a-context.ts",

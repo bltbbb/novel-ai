@@ -1,8 +1,8 @@
-长篇结构记忆系统（longform-structure-systems）
+# 长篇结构记忆系统（longform-structure-systems）
 
 ## 目标
 
-[hashed-discovering-kay.md](h:/myproject/novel-ai/hashed-discovering-kay.md) 解决"人物不撞脸"（人物卡 + 显式关系）。
+[hashed-discovering-kay.md](./hashed-discovering-kay.md) 解决"人物不撞脸"（人物卡 + 显式关系）。
 本文档解决"故事不断线"：
 
 - 故事线不断、不丢
@@ -12,63 +12,60 @@
 - 信息权限不泄露
 - 代价和资源连续
 
-## 当前进度（2026-04-15）
+## 文档定位（2026-04-16）
 
-执行拆解与实时进度记录见：
+实时进度与执行拆解见：
 
-- [longform-structure-systems-plan.md](h:/myproject/novel-ai/longform-structure-systems-plan.md)
+- [longform-structure-systems-plan.md](./longform-structure-systems-plan.md)
+- 字段级 HTTP 接口、最小请求样例与 client / route / service 落点见：[完整接口手册.md](./完整接口手册.md)
 
-### 已完成
+本文档分三层使用：
 
-- `P0-1 Outline Schema Upgrade` 已落地第一版：
-  - `BookOutline / VolumeOutline / VolumeMilestone` 新增 longform 骨架字段
-  - `OutlineView` 已补对应编辑 UI
-  - `outline-store / project-archive / demo data` 已补兼容与默认值
-  - `outline-serializer` 已能序列化新字段
-  - `server/src/services/generation.ts` 已补书纲 / 卷纲 / 里程碑 prompt 与 normalize 支持
-- `S0` 结构记忆底座已打通：
-  - 服务端权威表、统一 route、前端请求封装已可复用
-- `P0-2 / P0-3 / P0-4` 已完成第一版：
-  - `ThreadLedger / ForeshadowPlan / WorldStateEntry` 已落服务端 CRUD、前端维护与上下文注入
-- `P1-1 / P1-2 / P1-3 / P1-4` 已完成第一版：
-  - `QuestionPool / AntagonistAgenda / POVPermission / ResourceContinuity(core)` 已进入可继续打磨状态
-- `P2-1 ResourceContinuity(expanded)` 已完成第一版：
-  - 扩展资源类型预设已补到 `物资 / 人情 / 信用 / 证据链`
-  - 管理面板已支持按资源类型、人物、风险级别筛选
-  - 正文上下文会在高压结构章动态扩张资源连续性注入
-  - 审核链路已补非伤势型约束的连续性冲突检测
+- 历史设计：说明为什么需要这些结构记忆系统，以及字段和层级的设计初衷
+- 当前已落地：说明 2026-04-16 仓库里已经存在的类型、面板、接口与生成消费入口
+- 待补强 / 待验证：明确第一版尚未闭环或暂未自动化的部分，避免把预留字段当成现成功能
 
-### 下一步
+### 当前已落地
 
-- 继续做运行态观察与提示降噪，必要时把联动提醒升级成更自动的守护规则
-- `ResourceContinuity(expanded)` 后续只保留运行态观察，不再占用主任务位
+- `Outline Schema Upgrade` 第一版已落到 `app/src/types/domain.ts`、`app/src/components/OutlineView.tsx`、`app/src/stores/outline-store.ts`、`server/src/services/generation.ts`
+- 7 套结构记忆对象已具备服务端权威表、统一 route、前端 client 与工作台入口
+- 正文上下文已消费 `ThreadLedger / ForeshadowPlan / WorldStateEntry / AntagonistAgenda / POVPermission / ResourceContinuity`
+- `QuestionPool` 已具备卷号级提醒与告警；`ResourceContinuity(expanded)` 已进入运行态观察阶段
 
-### 当前口径
+### 当前真实边界
 
-- 本文档偏设计说明，实时实施状态以 [longform-structure-systems-plan.md](h:/myproject/novel-ai/longform-structure-systems-plan.md) 为准
-- 规划骨架层、结构记忆核心层与 `ResourceContinuity(expanded)` 都已落第一版
-- 当前阶段重点从“先补功能”切到“运行态观察与联动降噪”
+- `WorldStateEntry` 当前正式模型只有“卷级记录 + 可选里程碑记录”；正文默认消费仍是“当前卷卷级变化 + 前一卷卷级残留”，没有 chapter 级 `WorldStateEntry`
+- `QuestionPool.expectedRevealWindow` 当前是作者备注字段；自动化只稳定识别卷号，不支持“中段 / 末段 / 地点”这类细粒度语义判断
+- `ForeshadowPlan.relatedQuestionIds` 目前是前向兼容预留字段；第一版 UI 保存仍未填写，不能按“已和 QuestionPool 闭环”理解
+- `VolumeRecap / WorldStateSummary` 仍是摘要 / 工作记忆参考，不参与 `WorldStateEntry` 的结构化字段覆盖
+
+### 待补强 / 待验证
+
+- `WorldStateEntry` 若要升级成里程碑默认覆盖，先要把 `milestoneIndex` 真正接入正文生成入参
+- `QuestionPool` 若要支持“第 2 卷中段承天城”这类自动化，需要结构化窗口字段，而不是继续依赖自由文本
+- `ForeshadowPlan` 与 `QuestionPool` 若要形成稳定联动，需要补齐 UI 录入、持久化、生成消费与守护规则
+- 运行态观察、告警降噪与回填守护仍以 [longform-structure-systems-plan.md](./longform-structure-systems-plan.md) 为最新执行入口
 
 ## 现有基础（项目已有的相关机制）
 
 在设计前必须先明确：项目不是白纸，已有一批相关机制。新系统要和它们共存，不能冲突。
 
-| 现有机制 | 位置 | 能力 | 不足 |
+| 现有机制 | 当前主要落点（按 2026-04-16 仓库现状） | 能力 | 不足 |
 |---------|------|------|------|
-| StrandTracker | `domain.ts:352` + `db.ts` | 追踪每章剧情线类型 + 最后出现章节 | 类型固定为 quest/fire/constellation 三种，无自定义；无"线的目标/卡点/触发器" |
-| Foreshadow | `domain.ts:273` + `foreshadow-store.ts` | 完整的 planted→activated→resolved→overdue 状态机 | 无规划维度（计划哪卷回收、重要性、激活条件、回收效果） |
-| StateChange | `domain.ts:339` + `generation-storage.ts` | 每章提取 entity 的字段变更（oldValue→newValue） | 被动记录，不能主动维护；无"代价持续影响"追踪 |
-| WorldStateSummary | `generation-utils.ts` | 从 pinned entities 构建世界快照 | 只是 pinned 实体的摘要拼接，不是结构化的世界状态 |
-| ChapterOutline.immutableFacts | `domain.ts:323` | 每章的不可更改事实列表 | 只在章节级别，无跨章/跨卷的持续约束 |
-| ChapterSummary + VolumeRecap | `domain.ts:328` + 后端 | 最近 20 章摘要 + 分卷回顾 | 是被动总结，不是主动规划 |
+| StrandTracker | `app/src/types/domain.ts` 中 `StrandTracker`，配合前端本地存储 | 追踪每章剧情线类型 + 最后出现章节 | 类型固定为 quest/fire/constellation 三种，无自定义；无"线的目标/卡点/触发器" |
+| Foreshadow | `app/src/types/domain.ts` 中 `Foreshadow` + `app/src/stores/foreshadow-store.ts` | 完整的 planted→activated→resolved→overdue 状态机 | 无规划维度（计划哪卷回收、重要性、激活条件、回收效果） |
+| StateChange | `app/src/types/domain.ts` 中 `StateChange` + `server/src/services/generation-storage.ts` | 每章提取 entity 的字段变更（oldValue→newValue） | 被动记录，不能主动维护；无"代价持续影响"追踪 |
+| WorldStateSummary | `app/src/lib/generation-utils.ts` 中 `buildWorldStateSummary` | 从 pinned entities 构建世界快照 | 只是 pinned 实体的摘要拼接，不是结构化的世界状态 |
+| ChapterOutline.immutableFacts | `app/src/types/domain.ts` 中 `ChapterOutline.immutableFacts` | 每章的不可更改事实列表 | 只在章节级别，无跨章/跨卷的持续约束 |
+| ChapterSummary + VolumeRecap | `server/src/services/generation-context.ts` 的近期摘要 / 卷回顾拼装链路 | 最近章节摘要 + 分卷回顾 | 是被动总结，不是主动规划 |
 
 **设计原则：新系统独立建表，但在生成消费时和上述机制协同工作——新系统提供"规划层"数据，现有机制继续提供"记录层"数据。**
 
-### 数据归属与同步架构（补强建议）
+### 数据归属与同步架构（当前权威口径）
 
-这一组结构记忆系统不能只停留在前端本地表里。原因很简单：真正消费它们的是服务端 `buildGenerationContextBundle` 和服务端生成队列。
+这一组结构记忆系统已经不是纯前端草稿方案。当前实现是：前端 Dexie / store 负责编辑态与镜像，服务端 SQLite 结构记忆表负责权威态，生成链路正式消费服务端数据。
 
-**推荐架构：前端编辑态 + 服务端权威态双层**
+**当前实现结构：前端编辑态 + 服务端权威态双层**
 
 - **服务端 SQLite = 权威源（source of truth）**
   - 所有被生成链路正式消费的数据，都必须存在服务端结构记忆表中
@@ -107,7 +104,7 @@
 
 **因此这里明确：规划骨架扩容属于本文件的正式实施范围，不再停留在“仅供参考”。**
 
-### BookOutline 建议新增字段
+### BookOutline 字段设计（现已落第一版）
 
 ```typescript
 interface BookOutlineFields {
@@ -125,7 +122,7 @@ interface BookOutlineFields {
 }
 ```
 
-### VolumeOutline 建议新增字段
+### VolumeOutline 字段设计（现已落第一版）
 
 ```typescript
 interface VolumeOutlineFields {
@@ -144,7 +141,7 @@ interface VolumeOutlineFields {
 }
 ```
 
-### VolumeMilestone 建议新增字段
+### VolumeMilestone 字段设计（现已落第一版）
 
 ```typescript
 interface VolumeMilestoneDraft {
@@ -202,13 +199,13 @@ interface ThreadLedger {
 ```
 
 ### 生成消费
-- 生成 ChapterBeat 时注入：当前 active 且 audienceHeat >= 3 的线，提醒"本章可以推进哪条线"
+- 生成 ChapterBeat 时注入：当前未 `resolved` 且 `audienceHeat >= 3` 的线，`active` 优先排序，但 `dormant` 线也会进入可见提醒，提示"本章可以推进哪条线"
 - 生成正文时注入：本章相关的 1-2 条线的 coreQuestion + currentPhase
 - 每章生成后：检查是否有 dormant 线超过 N 章（如 15 章）未推进 → 告警
 
 ---
 
-## 二、伏笔规划账本（ForeshadowPlan）
+## 三、伏笔规划账本（ForeshadowPlan）
 
 ### 解决什么问题
 现有 Foreshadow 只记"埋了/收了"的事实状态，不记"打算什么时候动、动了会改什么"。
@@ -217,7 +214,8 @@ interface ThreadLedger {
 - 不替换 Foreshadow，而是为每个 Foreshadow 补一条规划记录
 - Foreshadow 继续管状态（planted/activated/resolved）
 - ForeshadowPlan 管意图（计划什么时候收、收了改变什么）
-- **假线索 / 误导答案统一归 QuestionPool 管**，ForeshadowPlan 只通过 `relatedQuestionIds` 关联，不再重复存一份
+- `QuestionPool` 仍负责"未解问题 / 假线索 / 误导答案"这一类问题视角信息
+- `relatedQuestionIds` 先保留为预留字段；第一版不要把它理解为已经和 QuestionPool 完成闭环同步
 
 ### 数据模型
 ```typescript
@@ -235,7 +233,7 @@ interface ForeshadowPlan {
   dependsOnForeshadowIds: Id[];    // 依赖哪些前提伏笔
   dependsOnForeshadowTitles: string[]; // 冗余存标题
   dependsOnEventKeys: string[];    // 依赖哪些事件/状态键
-  relatedQuestionIds: Id[];        // 这条伏笔主要服务于哪些未解问题
+  relatedQuestionIds: Id[];        // 预留：后续稳定关联未解问题；当前第一版通常为空
   payoffEffect: string;            // 回收后改变什么："量天司合法性被连根拔起"
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -247,9 +245,15 @@ interface ForeshadowPlan {
 - 生成正文时：当前章节相关的 activated 伏笔，附带 resolveCondition 提醒
 - 轻校验：importance=major 的伏笔超过计划回收卷 2 卷仍未 resolved → 告警
 
+### 当前落地边界（2026-04-16）
+
+- 当前前端面板按"一条伏笔对应一条规划"独立维护
+- `relatedQuestionIds` 当前在 UI 保存链路里默认写空，验收只看 `ForeshadowPlan` 自身的 CRUD、按卷提醒与超卷告警
+- 因此"假线索 / 误导答案归 QuestionPool 管"目前是概念分工，不是已完成的自动联动
+
 ---
 
-## 三、世界状态表（WorldStateTable）
+## 四、世界状态表（WorldStateTable）
 
 ### 解决什么问题
 世界像静止背景板——上一卷仙盟大会变天了，下一卷世界却像没动过。
@@ -259,14 +263,16 @@ interface ForeshadowPlan {
 - StateChange 是章节级的自动提取，粒度太细
 - WorldStateTable 是作者主动维护的"世界现在是什么样"，按卷/里程碑粒度
 
-### 数据模型（采用 Gemini 建议的 Delta 更新法）
+### 数据模型（当前正式模型：卷级记录 + 可选里程碑记录）
 ```typescript
 interface WorldStateEntry {
   id: Id;
   projectId: Id;
-  volumeId: Id;                    // 哪个卷末的状态
-  milestoneIndex?: number;         // 可选：精确到哪个里程碑
-  // Delta 字段 — 只记本卷/本阶段的变化
+  volumeId: Id;                    // 所属卷
+  volumeTitle: string;             // 冗余存卷名
+  volumeOrder: number;             // 冗余存卷序
+  milestoneIndex: number | null;   // 可选：同卷内某个里程碑的覆盖记录；当前没有 chapterId
+  // Delta 字段 — 只记本卷 / 本阶段的变化
   publicEvents: string[];          // 公开事件："秦不孤案平反"
   secretEvents: string[];          // 秘密事件："量天司灭口余化及"
   powerBalanceChange: string;      // 势力变化："柳镇守使被明升暗降"
@@ -281,33 +287,30 @@ interface WorldStateEntry {
 }
 ```
 
-### WorldState 的合并规则（必须写死）
+说明：
+- 当前结构化世界状态只建到"卷级 + 可选里程碑级"
+- `milestoneIndex=null` 表示卷级默认状态；非空表示同卷某个里程碑的补充 / 覆盖
+- 当前模型没有 `chapterId`，因此本文档不再把 chapter 级 `WorldStateEntry` 写成已存在能力
 
-WorldStateEntry 采用 delta 方案的前提，是必须明确覆盖优先级，否则不同层的状态会相互打架。
+### 当前合并与消费口径（按 2026-04-16 实现收口）
 
-**推荐合并优先级：**
-`chapter > milestone > volume > recap`
+当前只应写成：`milestone > volume`；`VolumeRecap / WorldStateSummary` 只作旁路参考，不参与结构化字段覆盖。
 
-解释：
-- `chapter`：最细粒度，优先级最高
-- `milestone`：当前阶段的稳定状态
-- `volume`：本卷默认状态
-- `recap`：仅作兜底参考，不覆盖结构化字段
-
-**消费规则：**
-- 当前章若存在 chapter 级状态，直接覆盖同 key 的 milestone / volume 值
-- 若无 chapter 级，取 milestone 级
-- 若 milestone 级也无，取 volume 级
-- recap 只参与补全文本说明，不参与覆盖判断
+具体规则：
+- 如果同卷存在匹配 `milestoneIndex` 的记录，则按字段级"里程碑优先、卷级回退"合并
+- 如果没有里程碑记录，则直接使用卷级记录
+- `VolumeRecap` 与 `WorldStateSummary` 仍走各自摘要 / 工作记忆链路，不覆盖 `WorldStateEntry` 的结构化字段
+- chapter 级覆盖当前不存在；若后续要支持，需要单独扩 schema、存储和生成入参
 
 ### 生成消费
-- 生成正文时：注入当前卷 + 前一卷的 WorldStateEntry（两条 delta 叠加即为当前世界）
-- 注入格式："【世界状态-本卷变化】公开事件：…；势力变化：…；当前风险：…"
-- 不注入所有历史卷的状态——token 预算有限，只看最近两层 delta
+- 当前正文默认注入：当前卷的卷级 `WorldStateEntry`，再补一条前一卷卷级残留
+- 当前正文链路尚未把 `milestoneIndex` 传入 `buildWorldStateDeltaBlocks`，因此不要把里程碑覆盖视为正文默认能力
+- 注入格式仍是"【世界状态-本卷变化】..." 与 "【世界状态-前一卷残留】..."
+- 这是一种"最近两层提示"，不是"跨所有历史卷的完整世界重建"
 
 ---
 
-## 四、反派议程板（AntagonistAgenda）
+## 五、反派议程板（AntagonistAgenda）
 
 ### 解决什么问题
 反派等着被打——主角不动，世界就停。
@@ -342,7 +345,7 @@ interface AntagonistAgenda {
 
 ---
 
-## 五、未解问题池（QuestionPool）
+## 六、未解问题池（QuestionPool）
 
 ### 解决什么问题
 早期抛出的钩子蒸发了——读者记得"量天司到底是什么"，但 200 章后作者忘了推进。
@@ -359,7 +362,7 @@ interface QuestionPool {
   belongsToThreadName: string;     // 冗余存线名
   currentClue: string;             // 当前已给线索："许明知道名字，柳镇守使不敢说"
   falseAnswers: string[];          // 已抛出的假线索
-  expectedRevealWindow: string;    // 预计揭晓窗口："第二卷中段在承天城"
+  expectedRevealWindow: string;    // 作者备注窗口："第2卷中段承天城"；当前自动化只稳定识别卷号
   finalAnswerSummary: string;      // 最终答案概述（作者预设）
   status: 'open' | 'partial' | 'answered';
   createdAt: Timestamp;
@@ -367,13 +370,20 @@ interface QuestionPool {
 }
 ```
 
+### 当前落地边界（2026-04-16）
+
+- `expectedRevealWindow` 目前仍是自由文本，系统只会抽取第一个可解析卷号，或做 `第N卷` 的包含匹配
+- 因此"中段 / 末段 / 地点 / 章节级窗口"只对人读有效，不构成当前自动化判断依据
+- 如果窗口只写地点、不写卷号，当前提醒与告警可能不触发；这属于第一版边界，不应按细粒度自动化失败来验收
+
 ### 生成消费
-- 生成 VolumeOutline 时：注入该卷 expectedRevealWindow 内的问题，提醒"本卷该推进哪些悬念"
-- 轻校验：status=open 且超过 expectedRevealWindow 仍未推进 → 告警
+- 生成 `VolumeOutline` 时：优先挑 `status !== answered` 且 `expectedRevealWindow` 可解析为当前卷或更早卷的问题
+- 轻校验：`status=open` 且 `expectedRevealWindow` 能解析出卷号，并且当前卷序号已到 / 已超过该卷 → 告警
+- 当前不要验"本卷中段""某地触发""章节级超窗"这类更细粒度自动化
 
 ---
 
-## 六、视角与信息权限表（POVPermission）
+## 七、视角与信息权限表（POVPermission）
 
 ### 解决什么问题
 主角不该知道的事情，写得像他知道了；该保密的信息提前泄露。
@@ -408,7 +418,7 @@ interface POVPermission {
 
 ---
 
-## 七、资源与代价连续性表（ResourceContinuity）
+## 八、资源与代价连续性表（ResourceContinuity）
 
 ### 解决什么问题
 上一章付了代价，下一章像没事人。
@@ -440,7 +450,7 @@ interface ResourceContinuity {
 
 ---
 
-## 八、系统间联动规则（Gemini 建议）
+## 九、系统间联动规则（设计目标 + 当前第一版边界）
 
 这 7 个系统不是孤立的 Excel 表，需要联动：
 
@@ -449,12 +459,12 @@ interface ResourceContinuity {
 | 伏笔被标记为 resolved | 检查 WorldStateEntry 是否需要更新（如"附则第七条恢复"改变了世界规则） |
 | 反派 agenda 的 triggerToStrike 被满足 | 检查 ThreadLedger 对应线是否需要推进 |
 | 章节生成完成 | 检查 ResourceContinuity 中 active 条目是否在本章被遵守 |
-| 卷结束 | 检查 QuestionPool 中 expectedRevealWindow 匹配本卷的问题是否有推进 |
-| 世界状态变更 | 检查 AntagonistAgenda 的 currentAction 是否需要响应 |
+| 卷结束 | 检查 QuestionPool 中 `expectedRevealWindow` 可解析到当前卷的问题是否有推进（当前仅卷号级） |
+| 世界状态变更 | 提醒重新评估 AntagonistAgenda 的 `currentAction / nextMoveWindow`，当前不是自动改写 |
 
 ---
 
-## 九、和现有结构的完整层级关系
+## 十、和现有结构的完整层级关系
 
 ```
 BookOutline（全局总纲）
@@ -462,7 +472,7 @@ BookOutline（全局总纲）
 ├── QuestionPool[]（未解问题池 — 全局级）
 │
 ├── VolumeOutline（卷级推进）
-│   ├── WorldStateEntry（世界状态 — 卷级 delta）
+│   ├── WorldStateEntry（世界状态 — 卷级默认 + 可选里程碑覆盖）
 │   ├── POVPermission（视角权限 — 卷级默认）
 │   │
 │   ├── VolumeMilestone（阶段推进）
@@ -490,9 +500,13 @@ BookOutline（全局总纲）
     └── generation_relationships（自动关系）
 ```
 
+注：
+- `WorldStateEntry` 当前没有 chapter 级层
+- `ForeshadowPlan -> QuestionPool` 的 `relatedQuestionIds` 目前仍是预留关联，不应按已闭环理解
+
 ---
 
-## 十、实施优先级
+## 十一、历史实施优先级（供理解依赖，不代表 2026-04-16 当前待办）
 
 ### P0（直接影响长篇中后期是否散架）
 1. **Outline Schema Upgrade（书纲 / 卷纲 / 里程碑字段扩容）**
@@ -514,32 +528,106 @@ BookOutline（全局总纲）
 - 这些内容如果跨章连续性断掉，会直接破坏主线可信度
 - 因此“核心代价连续性”不是锦上添花，而是中后期稳定性的核心部件
 
-### 新增文件清单
+### 当前主要代码落点（按 2026-04-16 仓库现状）
 
-| 文件 | 内容 |
+| 文件 | 当前职责 |
 |------|------|
-| `app/src/types/domain.ts` | BookOutline / VolumeOutline / VolumeMilestone 字段扩容 + 结构记忆接口定义（统一采用 Id + name/title 双存） |
-| `app/src/lib/db.ts` | 前端本地草稿/镜像表（可选） |
-| `app/src/lib/structure-memory-client.ts` | 新建 — 前端与服务端结构记忆同步客户端 |
-| `app/src/stores/outline-store.ts` | 书纲 / 卷纲 / 里程碑扩容字段的保存与读取 |
-| `app/src/stores/thread-ledger-store.ts` | 新建 |
-| `app/src/stores/foreshadow-plan-store.ts` | 新建 |
-| `app/src/stores/world-state-store.ts` | 新建 |
-| `app/src/stores/antagonist-agenda-store.ts` | 新建 |
-| `app/src/stores/pov-permission-store.ts` | 新建 |
-| `app/src/stores/question-pool-store.ts` | 新建 |
-| `app/src/stores/resource-continuity-store.ts` | 新建 |
-| `app/src/components/OutlineView.tsx` | 书纲 / 卷纲 / 里程碑新增字段的编辑 UI |
-| `app/src/components/StructureWorkspace.tsx` | 新建 — 结构记忆系统的统一管理界面 |
-| `server/src/routes/structure-memory.ts` | 新建 — 结构记忆读写 / 批量同步接口 |
-| `server/src/services/structure-memory-store.ts` | 新建 — 服务端结构记忆 CRUD / 合并逻辑 |
-| `server/src/services/generation-sqlite.ts` | 新增结构记忆表 + 索引（服务端权威态） |
-| `server/src/services/generation.ts` | BookOutline / VolumeOutline / Milestone prompt 与 normalize 结构同步扩容 |
-| `server/src/services/generation-context.ts` | 改造 — 在 buildGenerationContextBundle 中增加结构记忆注入 |
+| `app/src/types/domain.ts` | 已包含骨架扩容字段与 7 套结构记忆接口定义 |
+| `app/src/lib/db.ts` | 已包含前端 Dexie 镜像表 |
+| `app/src/stores/outline-store.ts` | 已承接书纲 / 卷纲 / 里程碑扩容字段的保存与读取 |
+| `app/src/lib/structure-memory-client.ts` | 已封装 `/api/structure-memory/*`、回填预览 / 确认、守护告警请求 |
+| `app/src/components/StructureWorkspace.tsx` | 已作为结构记忆统一工作台入口 |
+| `app/src/components/ForeshadowPlanPanel.tsx` | 已落伏笔规划面板；`relatedQuestionIds` 当前未在 UI 中录入 |
+| `app/src/lib/question-pool.ts` | 已提供 `QuestionPool` 的卷号级提醒拼装 |
+| `server/src/routes/structure-memory.ts` | 已注册 7 套结构记忆 CRUD 与 maintenance 接口 |
+| `server/src/services/structure-memory-store.ts` | 已承接 `ThreadLedger / ForeshadowPlan / WorldStateEntry` 基础存取 |
+| `server/src/services/question-pool-store.ts` | 已承接 `QuestionPool` 存取与卷号级告警 |
+| `server/src/services/antagonist-agenda-store.ts` | 已承接 `AntagonistAgenda` 存取 |
+| `server/src/services/pov-permission-store.ts` | 已承接 `POVPermission` 存取 |
+| `server/src/services/structured-resource-continuity-store.ts` | 已承接 `ResourceContinuity` 存取 |
+| `server/src/services/structure-memory-maintenance.ts` | 已提供 backfill / guard-alerts 维护逻辑 |
+| `server/src/services/generation-sqlite.ts` | 已持有结构记忆表与索引（服务端权威态） |
+| `server/src/services/generation.ts` | 已补书纲 / 卷纲 / 里程碑 prompt 与 normalize 支持 |
+| `server/src/services/generation-context.ts` | 已将结构记忆块注入正文生成上下文 |
 
 ---
 
-## 十一、结构记忆层增量预算（叠加在人物关系层之上）
+## 十二、最小联调 / 验收视角（按当前第一版）
+
+### 1. 最小保存 -> 读取 -> 验证路径
+
+- 最短联调建议先走 `ThreadLedger`：字段最少，`StructureWorkspace`、前端 client、服务端 route、守护提醒也都已经接好
+- 在 `app/src/components/StructureWorkspace.tsx` 打开“剧情线账本”面板，新建一条记录并保存；前端会通过 `app/src/lib/structure-memory-client.ts` 调 `POST /api/structure-memory/thread-ledgers`
+- 保存后立刻刷新同一面板；读取链路对应 `GET /api/structure-memory/thread-ledgers?projectId=...`，如果当前只验 CRUD，先只带 `projectId`
+- 刷新页面后仍能回显同一条记录，且网络返回能看到 `POST -> { item }`、`GET -> { items, alerts }`，就说明“工作台编辑 -> client -> route -> 服务端权威态 -> 前端镜像”这条最小闭环已经成立
+- 继续验编辑 / 删除时，再补看 `PUT /api/structure-memory/thread-ledgers/:threadLedgerId` 和 `DELETE /api/structure-memory/thread-ledgers/:threadLedgerId?projectId=...`
+- 其他 6 套结构记忆对象沿用同一模式：集合 `GET/POST`、单条 `PUT/DELETE`，统一挂在 `/api/structure-memory/*`
+
+### 2. 最小 payload 视角（以 `ThreadLedger` 为例）
+
+```json
+POST /api/structure-memory/thread-ledgers
+{
+  "projectId": "project_xxx",
+  "name": "量天司线",
+  "coreQuestion": "量天司到底是什么？",
+  "currentPhase": "已发现存在，尚未正面接触",
+  "status": "active",
+  "audienceHeat": 4
+}
+```
+
+- `projectId` 是硬前提；没有它，route 校验不会通过，列表接口也无法回到正确项目
+- `name / coreQuestion / currentPhase` 就足够形成一条最小可读记录；这是第一次联调最值得先填的字段
+- `status / audienceHeat` 会直接影响后续提醒和告警观察；如果只想看最短保存链路，其他关联字段可以先不填
+- `currentChapterOrder / staleChapterGap` 不是保存体字段，而是列表读取时的可选 query；只有在你要顺手验证 dormant 告警时才需要带上
+
+```json
+POST 响应骨架
+{
+  "item": {
+    "id": "thread_xxx",
+    "projectId": "project_xxx"
+  }
+}
+
+GET /api/structure-memory/thread-ledgers?projectId=project_xxx
+{
+  "items": [],
+  "alerts": []
+}
+```
+
+### 3. 联调完成后建议看哪里
+
+- 前端 client：`app/src/lib/structure-memory-client.ts`，先确认当前面板实际调用的是哪一个 `fetch/create/update/delete` 方法，body 和 query 是否和预期一致
+- 服务端 route：`server/src/routes/structure-memory.ts`，先确认 route 名和返回壳子；当前最常见的三类返回分别是 `{ item }`、`{ items, alerts }`、`{ success: true }`
+- 工作台入口：`app/src/components/StructureWorkspace.tsx`，这里会统一触发各系统 reload；进入工作台或切项目后还会刷新 `GET /api/structure-memory/maintenance/guard-alerts?projectId=...`
+- 维护链路如果要顺手抽查：历史回填预览走 `POST /api/structure-memory/maintenance/backfill-preview`，返回重点看 `totalCandidates / newCandidates / candidates`；守护扫描返回重点看 `{ projectId, scannedAt, trigger, items }`
+- 面板侧最少看三处：当前系统列表是否回显、工作台索引上的数量 / 未同步状态是否变化、守护扫描结果里是否出现对应 `items`
+- 如果只是第一次上手，不必一次把 7 套对象都跑完；先把 `ThreadLedger` 跑通，再用同样模式抽查 `ForeshadowPlan` 或 `WorldStateEntry` 一条即可
+
+### 4. 正文生成消费
+
+- `server/src/services/generation-context.ts` 应产出 `thread_ledger / foreshadow_plan / antagonist_agenda / pov_permission / world_state_delta / resource_continuity` 等 section
+- `WorldStateEntry` 当前默认验收口径只看"当前卷卷级变化 + 前一卷卷级残留"，不要验 chapter 级覆盖
+- `ForeshadowPlan` 当前只验计划注入与超卷告警，不要验 `relatedQuestionIds` 的双向联动
+
+### 5. 卷纲提醒 / 告警
+
+- `app/src/lib/question-pool.ts` 与 `server/src/services/question-pool-store.ts` 当前都只稳定识别卷号
+- 例：`第2卷中段承天城` 当前应按"第 2 卷问题"验收，不要要求系统自动识别"中段"或"承天城"
+- 纯地点 / 纯阶段写法不应作为第一版自动化通过标准
+
+### 6. 待补强后再开启的验收项
+
+- 里程碑级 `WorldStateEntry` 默认正文覆盖：先把 `milestoneIndex` 真正接入生成链路
+- `ForeshadowPlan <-> QuestionPool` 闭环：先补 UI、持久化与消费链路
+- `expectedRevealWindow` 的地点 / 阶段自动化：先拆成结构化字段，再谈更细粒度提醒
+
+---
+
+## 十三、结构记忆层增量预算（叠加在人物关系层之上）
 
 | 类型 | 上限 | 预算 |
 |------|------|------|
@@ -554,10 +642,10 @@ BookOutline（全局总纲）
 | **结构层高压结构章** | 取高位数组合 | **约 4200-6000 字** |
 
 **本节只定义“结构记忆层增量预算”。**
-- [hashed-discovering-kay.md](h:/myproject/novel-ai/hashed-discovering-kay.md) 定义的是“人物关系层预算”
+- [hashed-discovering-kay.md](./hashed-discovering-kay.md) 定义的是“人物关系层预算”
 - 本文档定义的是“结构记忆层增量预算”
 - 两者叠加后，才是**单章记忆层总预算**
-- [hashed-discovering-kay.md](h:/myproject/novel-ai/hashed-discovering-kay.md) 里的“隐形限流点”只定义容量参数，不单独定义 token 预算
+- [hashed-discovering-kay.md](./hashed-discovering-kay.md) 里的“隐形限流点”只定义容量参数，不单独定义 token 预算
 - 上表只覆盖“结构核心块”，**还不包括当前系统已有的检索/摘要层**（最近摘要、最近正文尾段、卷 recap、memory retrieval chunks）
 
 **按项目当前估算公式（`text.length / 1.5`）换算，结构层增量大致对应：**
@@ -570,9 +658,9 @@ BookOutline（全局总纲）
 - 常规章：`1800-3000 tokens`
 - 群像 / 高压结构章：`3000-5000 tokens`
 
-## 十二、单章记忆层总预算（人物关系层 + 结构记忆层）
+## 十四、单章记忆层总预算（人物关系层 + 结构记忆层）
 
-**人物关系层预算来自 [hashed-discovering-kay.md](h:/myproject/novel-ai/hashed-discovering-kay.md)：**
+**人物关系层预算来自 [hashed-discovering-kay.md](./hashed-discovering-kay.md)：**
 - 轻章：`1200-1600 tokens`
 - 常规章：`1800-2500 tokens`
 - 群像 / 高压人物章：`2500-3500 tokens`

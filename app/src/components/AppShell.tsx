@@ -19,6 +19,14 @@ import {
 } from '@/stores';
 
 type AppView = 'workspace' | 'structure' | 'lore' | 'foreshadow' | 'graph';
+type StructureWorkspaceSectionKey =
+  | 'thread-ledger'
+  | 'foreshadow-plan'
+  | 'world-state'
+  | 'question-pool'
+  | 'antagonist-agenda'
+  | 'pov-permission'
+  | 'resource-continuity';
 
 const navItems = [
   { key: 'workspace' as const, label: '创作工作台', icon: BookOpen },
@@ -130,6 +138,10 @@ export function AppShell() {
   const [showTemplateLibrary, setShowTemplateLibrary] = useState(false);
   const [showTemplateBinding, setShowTemplateBinding] = useState(false);
   const [showCompatibilityConsole, setShowCompatibilityConsole] = useState(false);
+  const [structureWorkspaceFocus, setStructureWorkspaceFocus] = useState<{
+    sectionKey: StructureWorkspaceSectionKey;
+    navigationToken: number;
+  } | null>(null);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -212,7 +224,19 @@ export function AppShell() {
       setActiveChapter(chapterId);
     }
 
+    setStructureWorkspaceFocus(null);
     setActiveView('workspace');
+  }
+
+  function openStructureWorkspace(sectionKey?: StructureWorkspaceSectionKey | null) {
+    if (sectionKey) {
+      setStructureWorkspaceFocus({
+        sectionKey,
+        navigationToken: Date.now(),
+      });
+    }
+
+    setActiveView('structure');
   }
 
   useEffect(() => {
@@ -306,7 +330,10 @@ export function AppShell() {
                 <button
                   key={item.key}
                   type="button"
-                  onClick={() => setActiveView(item.key)}
+                  onClick={() => {
+                    setStructureWorkspaceFocus(null);
+                    setActiveView(item.key);
+                  }}
                   className={`flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition-colors ${
                     active
                       ? 'bg-indigo-500/15 text-indigo-200'
@@ -446,7 +473,10 @@ export function AppShell() {
                 <button
                   key={item.key}
                   type="button"
-                  onClick={() => setActiveView(item.key)}
+                  onClick={() => {
+                    setStructureWorkspaceFocus(null);
+                    setActiveView(item.key);
+                  }}
                   className={`inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm transition-colors ${
                     active
                       ? 'bg-indigo-500/15 text-indigo-300'
@@ -470,10 +500,15 @@ export function AppShell() {
                 onOpenSettings={() => setShowSettings(true)}
                 onOpenProjectSettings={() => setShowProjectSettings(true)}
                 onOpenForeshadow={() => setActiveView('foreshadow')}
+                onOpenStructureMemory={(sectionKey) => openStructureWorkspace(sectionKey)}
                 onOpenAdvancedGeneration={() => setShowCompatibilityConsole(true)}
               />
             ) : activeView === 'structure' ? (
-              <StructureWorkspace projectId={activeProject.id} />
+              <StructureWorkspace
+                projectId={activeProject.id}
+                initialSectionKey={structureWorkspaceFocus?.sectionKey ?? null}
+                navigationToken={structureWorkspaceFocus?.navigationToken ?? 0}
+              />
             ) : activeView === 'lore' ? (
               <LoreWorkspace projectId={activeProject.id} />
             ) : activeView === 'foreshadow' ? (

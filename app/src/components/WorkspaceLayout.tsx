@@ -9,6 +9,14 @@ import { useEditorStore, useOutlineStore, useVolumeStore } from '@/stores';
 import type { Id } from '@/types';
 
 type WorkspaceTabKey = 'outline' | 'generation' | 'editor';
+type StructureWorkspaceSectionKey =
+  | 'thread-ledger'
+  | 'foreshadow-plan'
+  | 'world-state'
+  | 'question-pool'
+  | 'antagonist-agenda'
+  | 'pov-permission'
+  | 'resource-continuity';
 
 interface WorkspaceLayoutProps {
   projectId: Id;
@@ -18,6 +26,7 @@ interface WorkspaceLayoutProps {
   onOpenSettings: () => void;
   onOpenProjectSettings: () => void;
   onOpenForeshadow: () => void;
+  onOpenStructureMemory?: (sectionKey: StructureWorkspaceSectionKey) => void;
   onOpenAdvancedGeneration?: () => void;
   initialTab?: WorkspaceTabKey;
 }
@@ -40,6 +49,7 @@ export function WorkspaceLayout({
   onOpenSettings,
   onOpenProjectSettings,
   onOpenForeshadow,
+  onOpenStructureMemory,
   onOpenAdvancedGeneration,
   initialTab = 'outline',
 }: WorkspaceLayoutProps) {
@@ -241,6 +251,7 @@ export function WorkspaceLayout({
               projectDescription={projectDescription}
               genre={genre}
               focusVolumeId={focusedVolumeId}
+              onOpenStructureMemory={onOpenStructureMemory}
             />
           ) : activeTab === 'generation' ? (
             <GenerationView

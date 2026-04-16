@@ -1,26 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   BookOpen,
   CheckCircle2,
+  CircleAlert,
   ChevronDown,
   ChevronRight,
+  Compass,
+  GitBranch,
+  Globe2,
+  KeyRound,
   LoaderCircle,
   MoreHorizontal,
   Plus,
   Save,
+  Shield,
   Sparkles,
   X,
 } from 'lucide-react';
 import { useToast } from '@/components/Toast';
-import { AntagonistAgendaPanel } from '@/components/AntagonistAgendaPanel';
-import { ForeshadowPlanPanel } from '@/components/ForeshadowPlanPanel';
-import { PovPermissionPanel } from '@/components/PovPermissionPanel';
-import { QuestionPoolPanel } from '@/components/QuestionPoolPanel';
-import { ResourceContinuityPanel } from '@/components/ResourceContinuityPanel';
-import { ThreadLedgerPanel } from '@/components/ThreadLedgerPanel';
-import { WorldStatePanel } from '@/components/WorldStatePanel';
 import { db } from '@/lib/db';
 import { buildVolumeForeshadowPlanBundle } from '@/lib/foreshadow-plan';
 import { createBookOutline, createVolumeBeats, createVolumeMilestones, createVolumeOutline, reconcileVolumePlan } from '@/lib/generation-client';
@@ -34,7 +34,23 @@ import { collectPlanningRequirements } from '@/lib/planning-requirements';
 import { buildVolumeQuestionPoolBundle } from '@/lib/question-pool';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
-import { useChapterBeatStore, useEditorStore, useForeshadowPlanStore, useForeshadowStore, useLoreStore, useOutlineStore, useProjectStore, useQuestionPoolStore, useSettingsStore, useVolumeStore } from '@/stores';
+import {
+  useAntagonistAgendaStore,
+  useChapterBeatStore,
+  useEditorStore,
+  useForeshadowPlanStore,
+  useForeshadowStore,
+  useLoreStore,
+  useOutlineStore,
+  usePovPermissionStore,
+  useProjectStore,
+  useQuestionPoolStore,
+  useResourceContinuityStore,
+  useSettingsStore,
+  useThreadLedgerStore,
+  useVolumeStore,
+  useWorldStateStore,
+} from '@/stores';
 import type {
   AIVolumePlanReconcileResponse,
   BookCharacterArcDraft,
@@ -53,8 +69,18 @@ interface OutlineViewProps {
   projectDescription: string;
   genre: string[];
   focusVolumeId?: Id | null;
+  onOpenStructureMemory?: (sectionKey: StructureWorkspaceSectionKey) => void;
   className?: string;
 }
+
+type StructureWorkspaceSectionKey =
+  | 'thread-ledger'
+  | 'foreshadow-plan'
+  | 'world-state'
+  | 'question-pool'
+  | 'antagonist-agenda'
+  | 'pov-permission'
+  | 'resource-continuity';
 
 interface TextAreaFieldProps {
   label: string;
@@ -96,6 +122,15 @@ interface ChapterBeatRowModel {
   chapterLabel: string;
   chapterNumber: number;
   beat: ChapterBeat | null;
+}
+
+interface StructureMemorySummaryCardProps {
+  label: string;
+  detail: string;
+  count: number;
+  attentionCount?: number;
+  icon: typeof GitBranch;
+  onOpen?: () => void;
 }
 
 interface VolumePlanReconcilePreview {
@@ -223,6 +258,22 @@ function parseMultilineList(raw: string) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function parseExpectedVolumeOrderHint(windowText: string) {
+  const matched = windowText.match(/第\s*(\d+)\s*卷/u) ?? windowText.match(/(\d+)/u);
+
+  if (!matched) {
+    return null;
+  }
+
+  const parsed = Number(matched[1]);
+
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return Math.max(1, Math.trunc(parsed));
 }
 
 function joinMultilineList(values: string[]) {
@@ -644,12 +695,66 @@ function ListFieldEditor({
   );
 }
 
+function StructureMemorySummaryCard({
+  label,
+  detail,
+  count,
+  attentionCount = 0,
+  icon: Icon,
+  onOpen,
+}: StructureMemorySummaryCardProps) {
+  return (
+    <article className="rounded-3xl border border-neutral-800 bg-neutral-950/50 p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-500/15 text-indigo-200">
+            <Icon size={18} />
+          </span>
+          <div>
+            <p className="text-sm font-medium text-neutral-100">{label}</p>
+            <p className="mt-1 text-xs text-neutral-500">{detail}</p>
+          </div>
+        </div>
+        <span className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300">
+          {count} 条
+        </span>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2 text-xs">
+          {attentionCount > 0 ? (
+            <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-amber-100">
+              提醒 {attentionCount}
+            </span>
+          ) : (
+            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1.5 text-emerald-100">
+              当前无提醒
+            </span>
+          )}
+        </div>
+
+        {onOpen ? (
+          <button
+            type="button"
+            onClick={onOpen}
+            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-900 px-3 py-2 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-800"
+          >
+            去结构记忆处理
+            <ArrowRight size={15} />
+          </button>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
 export function OutlineView({
   projectId,
   projectTitle,
   projectDescription,
   genre,
   focusVolumeId = null,
+  onOpenStructureMemory,
   className,
 }: OutlineViewProps) {
   const { toast } = useToast();
@@ -665,12 +770,20 @@ export function OutlineView({
   const chapterBeats = useChapterBeatStore((state) => state.chapterBeats);
   const entities = useLoreStore((state) => state.entities);
   const foreshadows = useForeshadowStore((state) => state.foreshadows);
+  const threadLedgers = useThreadLedgerStore((state) => state.threadLedgers);
+  const threadAlerts = useThreadLedgerStore((state) => state.alerts);
   const foreshadowPlans = useForeshadowPlanStore((state) => state.foreshadowPlans);
+  const foreshadowAlerts = useForeshadowPlanStore((state) => state.alerts);
   const foreshadowPlanLoadedProjectId = useForeshadowPlanStore((state) => state.loadedProjectId);
   const loadForeshadowPlans = useForeshadowPlanStore((state) => state.loadForeshadowPlans);
+  const worldStateEntries = useWorldStateStore((state) => state.worldStateEntries);
   const questionPools = useQuestionPoolStore((state) => state.questionPools);
+  const questionAlerts = useQuestionPoolStore((state) => state.alerts);
   const questionPoolLoadedProjectId = useQuestionPoolStore((state) => state.loadedProjectId);
   const loadQuestionPools = useQuestionPoolStore((state) => state.loadQuestionPools);
+  const antagonistAgendas = useAntagonistAgendaStore((state) => state.antagonistAgendas);
+  const povPermissions = usePovPermissionStore((state) => state.povPermissions);
+  const resourceContinuities = useResourceContinuityStore((state) => state.resourceContinuities);
   const loadChapterBeats = useChapterBeatStore((state) => state.loadChapterBeats);
   const saveChapterBeat = useChapterBeatStore((state) => state.saveChapterBeat);
   const saveVolumeChapterBeats = useChapterBeatStore((state) => state.saveVolumeChapterBeats);
@@ -726,6 +839,14 @@ export function OutlineView({
   const sortedVolumes = useMemo(
     () => [...volumes].sort((left, right) => left.order - right.order),
     [volumes],
+  );
+  const activeStructureVolume = useMemo(
+    () =>
+      sortedVolumes.find((volume) => volume.id === expandedVolumeId) ??
+      sortedVolumes.find((volume) => volume.id === focusVolumeId) ??
+      sortedVolumes[0] ??
+      null,
+    [expandedVolumeId, focusVolumeId, sortedVolumes],
   );
   const volumeOutlineById = useMemo(
     () => new Map(volumeOutlines.map((outline) => [outline.volumeId, outline] as const)),
@@ -785,6 +906,146 @@ export function OutlineView({
 
     return next;
   }, [chapterBeats, chapters, chaptersByVolumeId, sortedVolumes]);
+  const structureMemorySummaries = useMemo(() => {
+    const activeVolumeOrder = activeStructureVolume?.order ?? null;
+    const activeVolumeId = activeStructureVolume?.id ?? null;
+    const activeVolumeTitle = activeStructureVolume?.title ?? '当前卷';
+
+    const projectThreadLedgers = threadLedgers.filter((item) => item.projectId === projectId);
+    const projectForeshadowPlans = foreshadowPlans.filter((item) => item.projectId === projectId);
+    const projectWorldStateEntries = worldStateEntries.filter((item) => item.projectId === projectId);
+    const projectQuestionPools = questionPools.filter((item) => item.projectId === projectId);
+    const projectAntagonistAgendas = antagonistAgendas.filter((item) => item.projectId === projectId);
+    const projectPovPermissions = povPermissions.filter((item) => item.projectId === projectId);
+    const projectResourceContinuities = resourceContinuities.filter((item) => item.projectId === projectId);
+
+    const hotThreadCount = projectThreadLedgers.filter(
+      (item) => item.status !== 'resolved' && item.audienceHeat >= 3,
+    ).length;
+    const dormantThreadCount = projectThreadLedgers.filter(
+      (item) => item.status === 'dormant' && item.audienceHeat >= 3,
+    ).length;
+    const currentVolumeForeshadowCount =
+      activeVolumeOrder === null
+        ? 0
+        : projectForeshadowPlans.filter(
+            (item) =>
+              item.plannedActivateVolume === activeVolumeOrder ||
+              item.plannedResolveVolume === activeVolumeOrder,
+          ).length;
+    const currentVolumeWorldStateEntries = projectWorldStateEntries.filter(
+      (item) => item.volumeId === activeVolumeId,
+    );
+    const currentVolumeQuestionCount =
+      activeVolumeOrder === null
+        ? 0
+        : projectQuestionPools.filter(
+            (item) =>
+              item.status !== 'answered' &&
+              (() => {
+                const parsedVolumeOrder = parseExpectedVolumeOrderHint(item.expectedRevealWindow);
+                if (parsedVolumeOrder !== null) {
+                  return parsedVolumeOrder <= activeVolumeOrder;
+                }
+                return item.expectedRevealWindow.includes(`第${activeVolumeOrder}卷`);
+              })(),
+          ).length;
+    const activeAgendaCount = projectAntagonistAgendas.filter((item) => item.status === 'active').length;
+    const currentVolumePermissionCount = projectPovPermissions.filter(
+      (item) => item.volumeId === null || item.volumeId === activeVolumeId,
+    ).length;
+    const activeResourceCount = projectResourceContinuities.filter((item) => item.status === 'active').length;
+    const highRiskResourceCount = projectResourceContinuities.filter(
+      (item) => item.status === 'active' && (item.riskLevel === 'critical' || item.riskLevel === 'high'),
+    ).length;
+
+    return [
+      {
+        key: 'thread-ledger' as const,
+        label: '剧情线账本',
+        icon: GitBranch,
+        count: projectThreadLedgers.length,
+        attentionCount: threadAlerts.length,
+        detail:
+          hotThreadCount > 0
+            ? `${hotThreadCount} 条高热未收束剧情线，${dormantThreadCount} 条处于休眠待捡回`
+            : '当前没有高热剧情线提醒',
+      },
+      {
+        key: 'foreshadow-plan' as const,
+        label: '伏笔规划',
+        icon: Sparkles,
+        count: projectForeshadowPlans.length,
+        attentionCount: foreshadowAlerts.length,
+        detail:
+          activeVolumeOrder === null
+            ? '进入卷纲后可查看本卷激活 / 回收窗口'
+            : `${activeVolumeTitle} 有 ${currentVolumeForeshadowCount} 条直接相关的伏笔规划`,
+      },
+      {
+        key: 'world-state' as const,
+        label: '世界状态',
+        icon: Globe2,
+        count: projectWorldStateEntries.length,
+        attentionCount: 0,
+        detail:
+          activeVolumeId === null
+            ? '优先维护卷级默认状态与关键里程碑变化'
+            : `${activeVolumeTitle} 已维护 ${currentVolumeWorldStateEntries.length} 条世界状态，其中 ${currentVolumeWorldStateEntries.filter((item) => typeof item.milestoneIndex === 'number').length} 条是里程碑级`,
+      },
+      {
+        key: 'question-pool' as const,
+        label: '未解问题',
+        icon: Compass,
+        count: projectQuestionPools.length,
+        attentionCount: questionAlerts.length,
+        detail:
+          activeVolumeOrder === null
+            ? `${projectQuestionPools.filter((item) => item.status !== 'answered').length} 条问题仍未回答`
+            : `${currentVolumeQuestionCount} 条问题与 ${activeVolumeTitle} 窗口直接相关`,
+      },
+      {
+        key: 'antagonist-agenda' as const,
+        label: '反派议程',
+        icon: CircleAlert,
+        count: projectAntagonistAgendas.length,
+        attentionCount: 0,
+        detail: `${activeAgendaCount} 条活跃议程，建议在正文前确认触发条件与当前动作`,
+      },
+      {
+        key: 'pov-permission' as const,
+        label: '信息权限',
+        icon: Shield,
+        count: projectPovPermissions.length,
+        attentionCount: 0,
+        detail:
+          activeVolumeId === null
+            ? '统一维护卷级、章节级的信息限制与可暗示范围'
+            : `${currentVolumePermissionCount} 条当前卷 / 全局权限规则正在生效`,
+      },
+      {
+        key: 'resource-continuity' as const,
+        label: '资源连续性',
+        icon: KeyRound,
+        count: projectResourceContinuities.length,
+        attentionCount: 0,
+        detail: `${activeResourceCount} 条 active 约束，${highRiskResourceCount} 条处于高风险状态`,
+      },
+    ];
+  }, [
+    activeStructureVolume,
+    antagonistAgendas,
+    foreshadowAlerts.length,
+    foreshadowPlans,
+    povPermissions,
+    projectId,
+    questionAlerts.length,
+    questionPools,
+    resourceContinuities,
+    threadAlerts.length,
+    threadLedgers,
+    worldStateEntries,
+  ]);
   const milestoneStatusMapByVolumeId = useMemo(() => {
     const next = new Map<Id, MilestoneProgressStatus[]>();
 
@@ -2460,19 +2721,45 @@ export function OutlineView({
         </footer>
       </article>
 
-      <ThreadLedgerPanel projectId={projectId} />
+      <section className="space-y-4 rounded-3xl border border-neutral-800 bg-neutral-900/70 p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">结构记忆概览</p>
+            <h3 className="mt-2 text-xl font-semibold text-neutral-100">规划页只看摘要，正式维护统一去结构记忆工作台</h3>
+            <p className="mt-2 text-sm leading-7 text-neutral-400">
+              这里保留和当前项目 / 当前卷最相关的结构记忆摘要，不再直接嵌完整维护面板。需要新增、编辑、历史回填或处理守护告警时，请跳到独立的“结构记忆”页面。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onOpenStructureMemory?.('thread-ledger')}
+            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-2.5 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-800"
+          >
+            打开结构记忆工作台
+            <ArrowRight size={15} />
+          </button>
+        </div>
 
-      <ForeshadowPlanPanel projectId={projectId} />
+        {activeStructureVolume ? (
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 px-4 py-4 text-sm leading-7 text-neutral-400">
+            当前摘要默认跟随《{activeStructureVolume.title}》。如果你从左侧卷目录切进来，会优先按该卷展示摘要；真正维护时请到结构记忆工作台集中处理。
+          </div>
+        ) : null}
 
-      <WorldStatePanel projectId={projectId} />
-
-      <QuestionPoolPanel projectId={projectId} />
-
-      <AntagonistAgendaPanel projectId={projectId} />
-
-      <PovPermissionPanel projectId={projectId} />
-
-      <ResourceContinuityPanel projectId={projectId} />
+        <div className="grid gap-4 xl:grid-cols-2">
+          {structureMemorySummaries.map((item) => (
+            <StructureMemorySummaryCard
+              key={item.key}
+              label={item.label}
+              detail={item.detail}
+              count={item.count}
+              attentionCount={item.attentionCount}
+              icon={item.icon}
+              onOpen={onOpenStructureMemory ? () => onOpenStructureMemory(item.key) : undefined}
+            />
+          ))}
+        </div>
+      </section>
 
       <section className="space-y-4">
         <header className="flex flex-wrap items-center justify-between gap-3">

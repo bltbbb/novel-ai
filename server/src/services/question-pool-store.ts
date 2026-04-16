@@ -317,7 +317,7 @@ export function deleteQuestionPool(env: ServerEnv, projectId: string, questionPo
   return result.changes > 0;
 }
 
-function parseExpectedVolumeOrder(windowText: string) {
+export function parseQuestionPoolExpectedVolumeOrder(windowText: string) {
   const matched = windowText.match(/第\s*(\d+)\s*卷/u) ?? windowText.match(/(\d+)/u);
 
   if (!matched) {
@@ -340,7 +340,7 @@ export function listQuestionPoolAlerts(env: ServerEnv, projectId: string, curren
     .filter((item) => item.status === 'open' && item.expectedRevealWindow.trim())
     .map((item) => ({
       item,
-      expectedVolumeOrder: parseExpectedVolumeOrder(item.expectedRevealWindow),
+      expectedVolumeOrder: parseQuestionPoolExpectedVolumeOrder(item.expectedRevealWindow),
     }))
     .filter(({ expectedVolumeOrder }) => expectedVolumeOrder !== null)
     .filter(({ expectedVolumeOrder }) => {
@@ -375,13 +375,16 @@ export function listQuestionPoolAlerts(env: ServerEnv, projectId: string, curren
         expectedRevealWindow: item.expectedRevealWindow,
         currentVolumeOrder: currentVolumeOrder ?? null,
         overdueVolumeCount:
-          currentVolumeOrder && parseExpectedVolumeOrder(item.expectedRevealWindow)
-            ? Math.max(0, currentVolumeOrder - (parseExpectedVolumeOrder(item.expectedRevealWindow) ?? currentVolumeOrder))
-            : 0,
+        currentVolumeOrder && parseQuestionPoolExpectedVolumeOrder(item.expectedRevealWindow)
+          ? Math.max(
+            0,
+            currentVolumeOrder - (parseQuestionPoolExpectedVolumeOrder(item.expectedRevealWindow) ?? currentVolumeOrder),
+          )
+          : 0,
         message:
-          currentVolumeOrder && parseExpectedVolumeOrder(item.expectedRevealWindow)
-            ? currentVolumeOrder > (parseExpectedVolumeOrder(item.expectedRevealWindow) ?? currentVolumeOrder)
-              ? `当前已推进到第 ${currentVolumeOrder} 卷，这条未解问题原计划在「${item.expectedRevealWindow}」前后推进，但仍处于 open，已经超出 ${Math.max(0, currentVolumeOrder - (parseExpectedVolumeOrder(item.expectedRevealWindow) ?? currentVolumeOrder))} 卷。`
+          currentVolumeOrder && parseQuestionPoolExpectedVolumeOrder(item.expectedRevealWindow)
+            ? currentVolumeOrder > (parseQuestionPoolExpectedVolumeOrder(item.expectedRevealWindow) ?? currentVolumeOrder)
+              ? `当前已推进到第 ${currentVolumeOrder} 卷，这条未解问题原计划在「${item.expectedRevealWindow}」前后推进，但仍处于 open，已经超出 ${Math.max(0, currentVolumeOrder - (parseQuestionPoolExpectedVolumeOrder(item.expectedRevealWindow) ?? currentVolumeOrder))} 卷。`
               : `当前已到第 ${currentVolumeOrder} 卷，这条未解问题的揭晓窗口就是「${item.expectedRevealWindow}」，但服务端记录仍是 open，建议本卷至少推进一次线索。`
             : `这条未解问题仍处于 open，且揭晓窗口已明确写为「${item.expectedRevealWindow}」，建议至少在后续卷纲或章节里推进线索。`,
       }),
