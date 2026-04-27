@@ -1,6 +1,6 @@
 import type { Chapter, Project, RichTextMark, RichTextNode } from '@/types';
 
-function sanitizeFileName(name: string) {
+export function sanitizeFileName(name: string) {
   return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim() || 'novel';
 }
 

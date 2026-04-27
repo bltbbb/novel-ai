@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "type": "lore-location-card",
+  "exportedAt": "2026-04-17T17:35:00+08:00",
+  "data": {
+    "name": "灵茶铺",
+    "description": "刑律司外巷口的小茶铺，表面是歇脚之地，实际是前代见证人、旧消息和关键谈话得以安全落地的缓冲地带。",
+    "tags": [
+      "地点",
+      "茶铺",
+      "缓冲场景",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "location_type": "巷口茶铺",
+      "public_function": "供书吏、差役、修士歇脚饮茶。",
+      "true_function": "在官署之外给真话、旧事和人心留一个不必立刻入簿的地方。",
+      "physical_impression": "不大，灯暖，茶气轻，夜里更像一块被时间放慢的角落。",
+      "atmosphere": "温、稳、不抢戏，却总像有人在这里等后来者。",
+      "symbolic_meaning": "有些话不能在堂上说，但必须有人在灯下把它端上桌。",
+      "controllers": "灵茶铺老板。",
+      "key_people": "老板、许明、柳镇守使。",
+      "hidden_layers": "前代旧案、周垣之死、承天城那盏灯与老板压着不说的旧账。",
+      "danger_level": "低表面风险、高信息密度。",
+      "volume1_function": "负责守夜观察、卷尾夜谈、把周垣与承天城那盏灯端上桌。",
+      "future_hook": "老板补旧账、讲法理之心边界与前代真相，都会继续从这里往外开。"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { DEFAULT_PROMPT_CONFIG, type PromptConfig } from '../prompts/index.js';
 import type {
+  AIReasoningEffort,
   AIProviderPreset,
   GenerationGateConfig,
   GenerationVectorBackendKind,
@@ -17,6 +18,11 @@ export interface ServerEnv {
   openaiApiKey: string;
   openaiBaseUrl?: string;
   defaultModel: string;
+  editorRefineApiKey?: string;
+  editorRefineBaseUrl?: string;
+  editorRefineModel?: string;
+  editorRefineProvider?: AIProviderPreset;
+  editorRefineReasoningEffort?: AIReasoningEffort;
   embeddingApiKey?: string;
   embeddingBaseUrl?: string;
   embeddingDimensions?: number;
@@ -96,6 +102,29 @@ function parseReviewSeverityEnv(name: string, fallback: ReviewSeverity): ReviewS
   throw new Error(`环境变量 ${name} 不是有效的审查级别`);
 }
 
+function parseReasoningEffortEnv(name: string): AIReasoningEffort | undefined {
+  const rawValue = process.env[name];
+
+  if (typeof rawValue === 'undefined') {
+    return undefined;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+
+  if (
+    normalized === 'none' ||
+    normalized === 'minimal' ||
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh'
+  ) {
+    return normalized;
+  }
+
+  throw new Error(`环境变量 ${name} 不是有效的推理强度`);
+}
+
 function parseGenerationVectorBackendEnv(
   name: string,
   fallback: GenerationVectorBackendKind,
@@ -140,6 +169,13 @@ export function loadServerEnv(): ServerEnv {
     openaiApiKey: process.env.OPENAI_API_KEY ?? '',
     openaiBaseUrl: process.env.OPENAI_BASE_URL?.trim() || undefined,
     defaultModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+    editorRefineApiKey: process.env.GENERATION_EDITOR_REFINE_API_KEY?.trim() || undefined,
+    editorRefineBaseUrl: process.env.GENERATION_EDITOR_REFINE_BASE_URL?.trim() || undefined,
+    editorRefineModel: process.env.GENERATION_EDITOR_REFINE_MODEL?.trim() || undefined,
+    editorRefineProvider: process.env.GENERATION_EDITOR_REFINE_BASE_URL?.trim()
+      ? inferOpenAIProvider(process.env.GENERATION_EDITOR_REFINE_BASE_URL)
+      : undefined,
+    editorRefineReasoningEffort: parseReasoningEffortEnv('GENERATION_EDITOR_REFINE_REASONING_EFFORT'),
     embeddingApiKey: process.env.EMBEDDING_API_KEY?.trim() || undefined,
     embeddingBaseUrl: process.env.EMBEDDING_BASE_URL?.trim() || undefined,
     embeddingDimensions:

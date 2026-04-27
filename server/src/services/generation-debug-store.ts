@@ -1647,6 +1647,8 @@ export async function getGenerationDebugContext(
     outline: outlineFromJob ?? request?.outlineOverride ?? buildContextOutlineFromChapterRecord(chapterRecord),
     fallbackContextBundle: request?.contextBundle,
     preferStoredForeshadows: Array.isArray(request?.foreshadowSnapshot),
+    entitySnapshot: request?.entitySnapshot,
+    foreshadowSnapshot: request?.foreshadowSnapshot,
     lightweightRecallConfig: request?.gateConfigOverride?.lightweightRecall,
   });
   const structuredRelationshipDebug = parseStructuredRelationshipSummary(context.sections);
@@ -1801,6 +1803,8 @@ export async function getGenerationDebugRetrieval(
     outline: outlineFromJob ?? request?.outlineOverride ?? buildContextOutlineFromChapterRecord(chapterRecord),
     fallbackContextBundle: request?.contextBundle,
     preferStoredForeshadows: Array.isArray(request?.foreshadowSnapshot),
+    entitySnapshot: request?.entitySnapshot,
+    foreshadowSnapshot: request?.foreshadowSnapshot,
     lightweightRecallConfig: request?.gateConfigOverride?.lightweightRecall,
   });
   const retrieval = await retrieveGenerationMemory(env, {

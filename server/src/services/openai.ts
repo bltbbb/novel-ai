@@ -3,11 +3,40 @@ import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import type { ServerEnv } from '../config/env.js';
 import { buildWritingRulesPrompt, WRITING_RULES_MARKER } from '../prompts/index.js';
-import type { AIChatRequest, AIRuntimeModelOption, AIProviderPreset, AIReasoningEffort } from '../types/ai.js';
+import type {
+  AIChatRequest,
+  AIRuntimeModelOption,
+  AIProviderPreset,
+  AIReasoningEffort,
+  GenerationPromptPreviewTransport,
+} from '../types/ai.js';
 
 const OPENAI_REQUEST_TIMEOUT_MS = 60 * 60 * 1000;
 const CLAUDE_API_VERSION = '2023-06-01';
 const CLAUDE_MAX_OUTPUT_TOKENS = 4096;
+
+export interface ChatRuntimeOverride {
+  apiKey?: string;
+  baseUrl?: string;
+  provider?: AIProviderPreset;
+}
+
+interface ResolvedChatRuntime {
+  apiKey: string;
+  baseUrl?: string;
+  provider: AIProviderPreset;
+}
+
+export interface ChatRuntimePreviewInfo {
+  provider: AIProviderPreset;
+  baseUrl: string;
+  model: string;
+  requestReasoningEffort: AIReasoningEffort | null;
+  effectiveReasoningEffort: string | null;
+  apiKeySource: 'default' | 'override';
+  baseUrlSource: 'default' | 'override';
+  providerSource: 'inferred' | 'override';
+}
 
 function hasWritingRules(systemPrompt?: string) {
   return Boolean(systemPrompt?.includes(WRITING_RULES_MARKER));
@@ -62,6 +91,75 @@ function buildMessages(env: ServerEnv, request: AIChatRequest): ChatCompletionMe
   }
 
   return messages;
+}
+
+function inferProviderByBaseUrl(baseUrl?: string) {
+  const normalizedBaseUrl = baseUrl?.trim().replace(/\/+$/u, '').toLowerCase() || '';
+
+  if (normalizedBaseUrl.includes('anthropic')) {
+    return 'claude_compatible' as const;
+  }
+
+  if (normalizedBaseUrl.includes('deepseek')) {
+    return 'deepseek' as const;
+  }
+
+  if (normalizedBaseUrl.includes('siliconflow')) {
+    return 'siliconflow' as const;
+  }
+
+  if (normalizedBaseUrl.includes('openrouter')) {
+    return 'openrouter' as const;
+  }
+
+  if (normalizedBaseUrl.includes('dashscope')) {
+    return 'dashscope' as const;
+  }
+
+  if (normalizedBaseUrl.includes('bigmodel')) {
+    return 'zhipu' as const;
+  }
+
+  return 'openai' as const;
+}
+
+function resolveChatRuntime(
+  env: ServerEnv,
+  runtimeOverride?: ChatRuntimeOverride,
+): ResolvedChatRuntime {
+  const baseUrl = runtimeOverride?.baseUrl?.trim() || env.openaiBaseUrl;
+  const provider = runtimeOverride?.provider ??
+    (baseUrl ? inferProviderByBaseUrl(baseUrl) : env.openaiProvider);
+  const apiKey = runtimeOverride?.apiKey?.trim() || env.openaiApiKey;
+
+  return {
+    apiKey,
+    baseUrl,
+    provider,
+  };
+}
+
+function buildChatRuntimePreviewInfo(
+  env: ServerEnv,
+  request: AIChatRequest,
+  runtimeOverride?: ChatRuntimeOverride,
+): ChatRuntimePreviewInfo {
+  const runtime = resolveChatRuntime(env, runtimeOverride);
+  const model = request.model || env.defaultModel;
+  const effectiveReasoningEffort = isClaudeCompatibleProvider(runtime.provider)
+    ? (resolveClaudeEffort(model, request.reasoningEffort) ?? null)
+    : (resolveReasoningEffort(model, request.reasoningEffort) ?? null);
+
+  return {
+    provider: runtime.provider,
+    baseUrl: runtime.baseUrl || '',
+    model,
+    requestReasoningEffort: request.reasoningEffort ?? null,
+    effectiveReasoningEffort,
+    apiKeySource: runtimeOverride?.apiKey?.trim() ? 'override' : 'default',
+    baseUrlSource: runtimeOverride?.baseUrl?.trim() ? 'override' : 'default',
+    providerSource: runtimeOverride?.provider ? 'override' : 'inferred',
+  };
 }
 
 function buildClaudeSystemMessage(env: ServerEnv, request: AIChatRequest) {
@@ -316,9 +414,10 @@ async function collectStreamCompletionText(
   env: ServerEnv,
   request: AIChatRequest,
   resolvedModel: string,
+  runtime: ResolvedChatRuntime,
 ) {
   const stream = await client.chat.completions.create(
-    buildChatCompletionRequest(env, request, resolvedModel, true) as any,
+    buildChatCompletionRequest(env, request, resolvedModel, true, runtime) as any,
   ) as unknown as AsyncIterable<any>;
   let text = '';
 
@@ -366,11 +465,20 @@ function resolveReasoningEffort(
   return reasoningEffort;
 }
 
+function shouldEnableDeepSeekThinking(runtime: ResolvedChatRuntime, model: string) {
+  if (runtime.provider !== 'deepseek') {
+    return false;
+  }
+
+  return model.trim().toLowerCase().startsWith('deepseek-v4-pro');
+}
+
 function buildChatCompletionRequest(
   env: ServerEnv,
   request: AIChatRequest,
   resolvedModel: string,
   stream: boolean,
+  runtime: ResolvedChatRuntime,
 ): Record<string, unknown> {
   const chatRequest = {
     model: resolvedModel,
@@ -384,11 +492,23 @@ function buildChatCompletionRequest(
     (chatRequest as Record<string, unknown>).reasoning_effort = reasoningEffort;
   }
 
+  if (shouldEnableDeepSeekThinking(runtime, resolvedModel)) {
+    (chatRequest as Record<string, unknown>).extra_body = {
+      thinking: {
+        type: 'enabled',
+      },
+    };
+  }
+
   return chatRequest;
 }
 
-function isClaudeCompatibleProvider(env: ServerEnv) {
-  return env.openaiProvider === 'claude_compatible';
+function getOpenAIChatCompletionsUrl(baseUrl?: string) {
+  return `${(baseUrl || 'https://api.openai.com/v1').replace(/\/+$/u, '')}/chat/completions`;
+}
+
+function isClaudeCompatibleProvider(provider: AIProviderPreset) {
+  return provider === 'claude_compatible';
 }
 
 function supportsClaudeEffort(model: string) {
@@ -449,8 +569,63 @@ function buildClaudeMessagesRequest(
   };
 }
 
-function getClaudeMessagesUrl(env: ServerEnv) {
-  return `${(env.openaiBaseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/u, '')}/messages`;
+function getClaudeMessagesUrl(baseUrl?: string) {
+  return `${(baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/u, '')}/messages`;
+}
+
+function extractFetchCauseDetails(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return '';
+  }
+
+  const candidate = error as {
+    message?: unknown;
+    cause?: unknown;
+  };
+  const details: string[] = [];
+
+  if (typeof candidate.message === 'string' && candidate.message.trim()) {
+    details.push(candidate.message.trim());
+  }
+
+  const cause = candidate.cause;
+
+  if (typeof cause === 'string' && cause.trim()) {
+    details.push(cause.trim());
+  } else if (cause && typeof cause === 'object') {
+    const causeCandidate = cause as {
+      code?: unknown;
+      errno?: unknown;
+      message?: unknown;
+    };
+    const causeParts: string[] = [];
+
+    if (typeof causeCandidate.code === 'string' && causeCandidate.code.trim()) {
+      causeParts.push(causeCandidate.code.trim());
+    }
+
+    if (
+      (typeof causeCandidate.errno === 'string' || typeof causeCandidate.errno === 'number') &&
+      String(causeCandidate.errno).trim()
+    ) {
+      causeParts.push(String(causeCandidate.errno).trim());
+    }
+
+    if (typeof causeCandidate.message === 'string' && causeCandidate.message.trim()) {
+      causeParts.push(causeCandidate.message.trim());
+    }
+
+    if (causeParts.length > 0) {
+      details.push(causeParts.join(' '));
+    }
+  }
+
+  return Array.from(new Set(details.filter(Boolean))).join('；');
+}
+
+function buildFetchFailureMessage(label: string, method: 'GET' | 'POST', url: string, error: unknown) {
+  const detail = extractFetchCauseDetails(error);
+  return `${label}网络请求失败：${method} ${url}${detail ? `；${detail}` : ''}`;
 }
 
 async function createClaudeMessagesResponse(
@@ -458,17 +633,26 @@ async function createClaudeMessagesResponse(
   request: AIChatRequest,
   resolvedModel: string,
   stream: boolean,
+  runtimeOverride?: ChatRuntimeOverride,
 ) {
-  const response = await fetch(getClaudeMessagesUrl(env), {
-    method: 'POST',
-    headers: {
-      'x-api-key': env.openaiApiKey,
-      'anthropic-version': CLAUDE_API_VERSION,
-      'Content-Type': 'application/json',
-      Accept: stream ? 'text/event-stream' : 'application/json',
-    },
-    body: JSON.stringify(buildClaudeMessagesRequest(env, request, resolvedModel, stream)),
-  });
+  const runtime = resolveChatRuntime(env, runtimeOverride);
+  const url = getClaudeMessagesUrl(runtime.baseUrl);
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'x-api-key': runtime.apiKey,
+        'anthropic-version': CLAUDE_API_VERSION,
+        'Content-Type': 'application/json',
+        Accept: stream ? 'text/event-stream' : 'application/json',
+      },
+      body: JSON.stringify(buildClaudeMessagesRequest(env, request, resolvedModel, stream)),
+    });
+  } catch (error) {
+    throw new Error(buildFetchFailureMessage('Claude Messages', 'POST', url, error));
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -580,8 +764,9 @@ async function* streamClaudeMessages(
   env: ServerEnv,
   request: AIChatRequest,
   resolvedModel: string,
+  runtimeOverride?: ChatRuntimeOverride,
 ) {
-  const response = await createClaudeMessagesResponse(env, request, resolvedModel, true);
+  const response = await createClaudeMessagesResponse(env, request, resolvedModel, true, runtimeOverride);
 
   if (!response.body) {
     throw new Error('Claude 流式响应缺少响应体');
@@ -641,8 +826,9 @@ async function completeClaudeMessages(
   env: ServerEnv,
   request: AIChatRequest,
   resolvedModel: string,
+  runtimeOverride?: ChatRuntimeOverride,
 ) {
-  const response = await createClaudeMessagesResponse(env, request, resolvedModel, false);
+  const response = await createClaudeMessagesResponse(env, request, resolvedModel, false, runtimeOverride);
   const payload = await parseClaudeMessagesResponse(response);
   const errorMessage = extractClaudeErrorMessage(payload);
 
@@ -742,14 +928,15 @@ async function createZhipuEmbeddings(
 
 export async function streamChatCompletion(env: ServerEnv, request: AIChatRequest) {
   const resolvedModel = request.model || env.defaultModel;
+  const runtime = resolveChatRuntime(env);
 
-  if (isClaudeCompatibleProvider(env)) {
+  if (isClaudeCompatibleProvider(runtime.provider)) {
     return streamClaudeMessages(env, request, resolvedModel);
   }
 
-  const client = createOpenAIClient(env);
+  const client = createOpenAIClientByConfig(runtime.apiKey, runtime.baseUrl);
   const stream = await client.chat.completions.create(
-    buildChatCompletionRequest(env, request, resolvedModel, true) as any,
+    buildChatCompletionRequest(env, request, resolvedModel, true, runtime) as any,
   ) as unknown as AsyncIterable<any>;
 
   async function* validatedStream() {
@@ -766,16 +953,25 @@ export async function streamChatCompletion(env: ServerEnv, request: AIChatReques
   return validatedStream();
 }
 
-export async function completeChatCompletion(env: ServerEnv, request: AIChatRequest) {
+export async function completeChatCompletion(
+  env: ServerEnv,
+  request: AIChatRequest,
+  runtimeOverride?: ChatRuntimeOverride,
+) {
   const resolvedModel = request.model || env.defaultModel;
+  const runtime = resolveChatRuntime(env, runtimeOverride);
 
-  if (isClaudeCompatibleProvider(env)) {
-    return completeClaudeMessages(env, request, resolvedModel);
+  if (!runtime.apiKey) {
+    throw new Error('缺少可用 API Key，无法执行聊天请求');
   }
 
-  const client = createOpenAIClient(env);
+  if (isClaudeCompatibleProvider(runtime.provider)) {
+    return completeClaudeMessages(env, request, resolvedModel, runtimeOverride);
+  }
+
+  const client = createOpenAIClientByConfig(runtime.apiKey, runtime.baseUrl);
   const completion = await client.chat.completions.create(
-    buildChatCompletionRequest(env, request, resolvedModel, false) as any,
+    buildChatCompletionRequest(env, request, resolvedModel, false, runtime) as any,
   );
   const normalizedCompletion = normalizeChatCompletionResponse(completion);
   const choices = ensureChoicesArray({
@@ -809,7 +1005,7 @@ export async function completeChatCompletion(env: ServerEnv, request: AIChatRequ
       );
     }
 
-    const streamedText = await collectStreamCompletionText(client, env, request, resolvedModel);
+    const streamedText = await collectStreamCompletionText(client, env, request, resolvedModel, runtime);
 
     if (streamedText) {
       return streamedText;
@@ -824,6 +1020,43 @@ export async function completeChatCompletion(env: ServerEnv, request: AIChatRequ
   }
 
   return content;
+}
+
+export function previewOutgoingChatRequest(
+  env: ServerEnv,
+  request: AIChatRequest,
+  runtimeOverride?: ChatRuntimeOverride,
+) {
+  const resolvedModel = request.model || env.defaultModel;
+  const runtime = resolveChatRuntime(env, runtimeOverride);
+  const systemPrompt = buildSystemMessage(env, request);
+  const userPrompt = request.messages
+    .filter((message) => message.role !== 'system' && message.content.trim())
+    .map((message) => message.content.trim())
+    .join('\n\n');
+  let transport: GenerationPromptPreviewTransport;
+  let requestUrl: string;
+  let requestBody: Record<string, unknown>;
+
+  if (isClaudeCompatibleProvider(runtime.provider)) {
+    transport = 'claude_messages';
+    requestUrl = getClaudeMessagesUrl(runtime.baseUrl);
+    requestBody = buildClaudeMessagesRequest(env, request, resolvedModel, false);
+  } else {
+    transport = 'openai_chat_completions';
+    requestUrl = getOpenAIChatCompletionsUrl(runtime.baseUrl);
+    requestBody = buildChatCompletionRequest(env, request, resolvedModel, false, runtime);
+  }
+
+  return {
+    model: resolvedModel,
+    transport,
+    requestUrl,
+    systemPrompt,
+    userPrompt,
+    requestBody: JSON.stringify(requestBody, null, 2),
+    runtime: buildChatRuntimePreviewInfo(env, request, runtimeOverride),
+  };
 }
 
 export async function createEmbeddings(
@@ -902,14 +1135,21 @@ async function listClaudeCompatibleModels(input: {
   baseUrl?: string;
 }) {
   const baseUrl = (input.baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/u, '');
-  const response = await fetch(`${baseUrl}/models`, {
-    method: 'GET',
-    headers: {
-      'x-api-key': input.apiKey,
-      'anthropic-version': CLAUDE_API_VERSION,
-      Accept: 'application/json',
-    },
-  });
+  const url = `${baseUrl}/models`;
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'x-api-key': input.apiKey,
+        'anthropic-version': CLAUDE_API_VERSION,
+        Accept: 'application/json',
+      },
+    });
+  } catch (error) {
+    throw new Error(buildFetchFailureMessage('Claude 模型列表', 'GET', url, error));
+  }
 
   if (!response.ok) {
     const errorText = await response.text();

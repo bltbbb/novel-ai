@@ -8,8 +8,7 @@ import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { chapterToMarkdown, downloadMarkdown, projectToMarkdown } from '@/lib/export';
 import { createId } from '@/lib/identity';
-import { getProjectStylePrompt } from '@/lib/project-style';
-import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
+import { buildEffectiveStylePrompt } from '@/lib/project-style';
 import {
   useEditorStore,
   useForeshadowStore,
@@ -123,17 +122,10 @@ export function EditorWorkspace({
   const effectiveContinueSettings = useMemo(
     () => ({
       ...settings,
-      stylePrompt: mergePromptSections(
-        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
-        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
-        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
-        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
-      ),
+      stylePrompt: buildEffectiveStylePrompt(currentProject, settings),
     }),
     [
-      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
       currentProject?.templateSnapshot?.promptBundle.stylePrompt,
-      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
       currentProject?.stylePrompt,
       settings,
     ],

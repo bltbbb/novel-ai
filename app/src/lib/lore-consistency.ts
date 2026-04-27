@@ -88,7 +88,7 @@ function createSparseEntityHints(matchedEntities: LoreEntity[]) {
       ];
     }
 
-    if (entity.type === 'character') {
+    if (entity.type === 'character' || entity.type === 'functional_role') {
       const filledCount = getCharacterCardFilledCount(entity.fields);
 
       if (filledCount >= CHARACTER_CARD_FIELD_TOTAL) {
@@ -99,8 +99,8 @@ function createSparseEntityHints(matchedEntities: LoreEntity[]) {
         {
           id: `character-fields:${entity.id}`,
           level: 'info' as const,
-          title: `${entity.name} 的人物字段偏少`,
-          description: `当前已填写 ${filledCount}/${CHARACTER_CARD_FIELD_TOTAL} 项人物卡字段，建议继续补充人格内核与当前阶段状态。`,
+          title: `${entity.name} 的角色字段偏少`,
+          description: `当前已填写 ${filledCount}/${CHARACTER_CARD_FIELD_TOTAL} 项稳定事实层字段，建议继续补充角色内核；当前阶段状态更适合迁移到结构记忆（世界状态 / 资源连续性 / 剧情线账本等）。`,
           entityId: entity.id,
         },
       ];

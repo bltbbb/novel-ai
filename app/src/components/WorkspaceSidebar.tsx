@@ -81,8 +81,8 @@ function getDisplayStatusMeta(
     case 'queued':
       return {
         label: '生成中',
-        dotClassName: 'bg-indigo-400',
-        textClassName: 'text-indigo-300',
+        dotClassName: 'bg-[color:var(--studio-accent-strong)]',
+        textClassName: 'text-[color:var(--studio-accent-strong)]',
         isConfirmed: false,
       };
     case 'paused':
@@ -122,8 +122,8 @@ function getDisplayStatusMeta(
     case 'queued':
       return {
         label: '生成中',
-        dotClassName: 'bg-indigo-400',
-        textClassName: 'text-indigo-300',
+        dotClassName: 'bg-[color:var(--studio-accent-strong)]',
+        textClassName: 'text-[color:var(--studio-accent-strong)]',
         isConfirmed: false,
       };
     case 'ready':
@@ -158,12 +158,7 @@ function getVolumeDisplayTitle(volume: Volume) {
 }
 
 function getContainerClassName(className?: string) {
-  return [
-    'flex h-full min-h-0 flex-col rounded-3xl border border-neutral-800 bg-neutral-900/70',
-    className ?? '',
-  ]
-    .filter(Boolean)
-    .join(' ');
+  return ['studio-shell flex h-full min-h-0 flex-col', className ?? ''].filter(Boolean).join(' ');
 }
 
 export function WorkspaceSidebar({
@@ -324,6 +319,16 @@ export function WorkspaceSidebar({
     });
   }, [groups, hideConfirmedVolumes, queueStatusMap, serverJobStatusMap]);
 
+  const confirmedChapterCount = useMemo(() => {
+    return chapters.filter((chapter) =>
+      getDisplayStatusMeta(
+        chapter,
+        queueStatusMap.get(chapter.id) as GenerationQueueStatus | undefined,
+        serverJobStatusMap.get(chapter.id),
+      ).isConfirmed,
+    ).length;
+  }, [chapters, queueStatusMap, serverJobStatusMap]);
+
   const selectedVolumeId = useMemo(() => {
     if (!selectedChapterId) {
       return null;
@@ -369,17 +374,34 @@ export function WorkspaceSidebar({
 
   return (
     <aside className={getContainerClassName(className)}>
-      <div className="border-b border-neutral-800 px-4 py-4">
-        <div className="flex items-center justify-between">
-          <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">章节树</p>
-          <span className="rounded-full bg-indigo-500/15 px-2 py-0.5 text-xs text-indigo-300">
-            {chapters.length} 章
+      <div className="border-b border-[color:var(--studio-line)] px-4 py-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="studio-overline">Chapter Tree</p>
+            <p className="mt-2 text-sm text-[color:var(--studio-muted)]">按卷切换章节、卷纲与正文复制。</p>
+          </div>
+          <span className="studio-chip studio-chip--compact studio-chip--secondary whitespace-nowrap">
+            已确认 {confirmedChapterCount}
           </span>
         </div>
-        <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-neutral-400">
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          <div className="studio-sidebar-stat">
+            <span className="studio-sidebar-stat__label">章节</span>
+            <strong className="studio-sidebar-stat__value">{chapters.length}</strong>
+          </div>
+          <div className="studio-sidebar-stat">
+            <span className="studio-sidebar-stat__label">分卷</span>
+            <strong className="studio-sidebar-stat__value">{volumes.length}</strong>
+          </div>
+          <div className="studio-sidebar-stat">
+            <span className="studio-sidebar-stat__label">展示</span>
+            <strong className="studio-sidebar-stat__value">{visibleGroups.length}</strong>
+          </div>
+        </div>
+        <label className="mt-4 flex cursor-pointer items-center gap-3 rounded-[18px] border border-[color:var(--studio-line)] bg-black/10 px-3 py-3 text-sm text-[color:var(--studio-muted)]">
           <input
             type="checkbox"
-            className="h-3.5 w-3.5 rounded border-neutral-600 bg-neutral-800 text-indigo-500 focus:ring-indigo-500"
+            className="h-4 w-4 rounded border-[color:var(--studio-line)] bg-transparent text-[color:var(--studio-accent)] focus:ring-[color:var(--studio-accent)]"
             checked={hideConfirmedVolumes}
             onChange={(event) => setHideConfirmedVolumes(event.target.checked)}
           />
@@ -387,9 +409,9 @@ export function WorkspaceSidebar({
         </label>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-2 py-3">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
         {visibleGroups.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-neutral-800 px-3 py-6 text-center text-xs text-neutral-500">
+          <div className="rounded-[24px] border border-dashed border-[color:var(--studio-line)] px-4 py-8 text-center text-sm text-[color:var(--studio-muted)]">
             当前没有可展示的卷
           </div>
         ) : (
@@ -399,13 +421,13 @@ export function WorkspaceSidebar({
             const shouldShowChapters = forceExpanded || !isCollapsed;
 
             return (
-              <section key={group.id} className="rounded-2xl border border-neutral-800 bg-neutral-950/40">
+              <section key={group.id} className="studio-tree-group">
                 <button
                   type="button"
                   onClick={() => toggleVolumeCollapse(group.id)}
-                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-neutral-900/60"
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-white/5"
                 >
-                  <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-neutral-200">
+                  <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-[color:var(--studio-text)]">
                     {shouldShowChapters ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                     <span className="truncate">{group.title}</span>
                   </span>
@@ -425,19 +447,19 @@ export function WorkspaceSidebar({
                             onOpenVolumeOutline(group.id as Id);
                           }
                         }}
-                        className="rounded-full border border-neutral-700 px-2 py-1 text-[11px] text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-900"
+                        className="studio-chip min-h-[30px] px-3 py-1 text-[11px]"
                       >
-                        编辑卷大纲
+                        编辑卷纲
                       </span>
                     ) : null}
-                    <span className="text-xs text-neutral-500">{group.chapters.length}</span>
+                    <span className="text-xs text-[color:var(--studio-subtle)]">{group.chapters.length}</span>
                   </span>
                 </button>
 
                 {shouldShowChapters ? (
-                  <div className="space-y-1 border-t border-neutral-800 px-2 py-2">
+                  <div className="space-y-2 border-t border-[color:var(--studio-line)] px-3 py-3">
                     {group.chapters.length === 0 ? (
-                      <p className="px-2 py-1 text-xs text-neutral-500">本卷暂无章节</p>
+                      <p className="px-2 py-1 text-xs text-[color:var(--studio-muted)]">本卷暂无章节</p>
                     ) : (
                       group.chapters.map((chapter) => {
                         const statusMeta = getDisplayStatusMeta(
@@ -450,11 +472,8 @@ export function WorkspaceSidebar({
                         return (
                           <div
                             key={chapter.id}
-                            className={`w-full rounded-xl border px-2 py-2 text-left transition-colors ${
-                              isSelected
-                                ? 'border-indigo-500/40 bg-indigo-500/10'
-                                : 'border-transparent hover:border-neutral-700 hover:bg-neutral-900/70'
-                            }`}
+                            data-active={isSelected ? 'true' : 'false'}
+                            className="studio-tree-row px-3 py-3"
                           >
                             <div className="flex items-start gap-2">
                               <button
@@ -462,19 +481,25 @@ export function WorkspaceSidebar({
                                 onClick={() => onSelectChapter(chapter.id)}
                                 className="min-w-0 flex-1 text-left"
                               >
-                                <p className={`line-clamp-1 text-sm ${isSelected ? 'text-indigo-200' : 'text-neutral-200'}`}>
+                                <p
+                                  className={`line-clamp-1 text-sm font-medium ${
+                                    isSelected
+                                      ? 'text-[color:var(--studio-accent-strong)]'
+                                      : 'text-[color:var(--studio-text)]'
+                                  }`}
+                                >
                                   {chapter.title}
                                 </p>
-                                <div className="mt-1 flex items-center gap-2 text-xs">
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                                   <span className={`h-1.5 w-1.5 rounded-full ${statusMeta.dotClassName}`} />
                                   <span className={statusMeta.textClassName}>{statusMeta.label}</span>
-                                  <span className="text-neutral-500">第 {chapter.order} 章</span>
+                                  <span className="text-[color:var(--studio-subtle)]">第 {chapter.order} 章</span>
                                 </div>
                               </button>
                               <button
                                 type="button"
                                 onClick={() => void handleCopyChapterContent(chapter)}
-                                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-neutral-700 text-neutral-400 transition hover:border-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+                                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[color:var(--studio-line)] bg-black/10 text-[color:var(--studio-muted)] transition hover:border-[color:var(--studio-line-strong)] hover:text-[color:var(--studio-accent-strong)]"
                                 aria-label={`复制《${chapter.title}》正文`}
                                 title="复制正文"
                               >
@@ -493,19 +518,15 @@ export function WorkspaceSidebar({
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-2 border-t border-neutral-800 p-3">
-        <button
-          type="button"
-          onClick={onCreateChapter}
-          className="flex items-center justify-center gap-1 rounded-xl border border-neutral-700 bg-neutral-900 px-2 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
-        >
+      <div className="grid grid-cols-2 gap-2 border-t border-[color:var(--studio-line)] p-3">
+        <button type="button" onClick={onCreateChapter} className="studio-action-button">
           <Plus size={14} />
           新建章节
         </button>
         <button
           type="button"
           onClick={onCreateVolume}
-          className="flex items-center justify-center gap-1 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-2 py-2 text-sm text-indigo-200 transition-colors hover:bg-indigo-500/20"
+          className="studio-action-button studio-action-button--primary"
         >
           <Plus size={14} />
           新建卷

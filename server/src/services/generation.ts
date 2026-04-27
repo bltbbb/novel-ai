@@ -1,5 +1,6 @@
-import { buildWritingRulesPrompt, WRITING_RULES_MARKER } from '../prompts/index.js';
-import { completeChatCompletion } from './openai.js';
+import { buildGenerationStageWritingRulesPrompt, buildWritingRulesPrompt, WRITING_RULES_MARKER } from '../prompts/index.js';
+import { completeChatCompletion, previewOutgoingChatRequest, type ChatRuntimeOverride } from './openai.js';
+import { appendGenerationStepLog } from './generation-step-log.js';
 import { buildGenerationContextBundle } from './generation-context.js';
 import { replaceGenerationForeshadows } from './generation-foreshadow-store.js';
 import { upsertGenerationEntitiesSnapshot } from './generation-knowledge-store.js';
@@ -23,6 +24,8 @@ import type {
   AIBookOutlineRequest,
   AIBookOutlineResponse,
   AIChatRequest,
+  AIEditorRefineRequest,
+  AIEditorRefineResponse,
   AIExtractRequest,
   AIExtractResponse,
   AILanguageQaRequest,
@@ -47,10 +50,17 @@ import type {
   AIWriteResponse,
   BookOutlineFields,
   ChapterLanguageQaDraft,
+  ChapterEditorRefineDraft,
+  ChapterOutlineBeatDraft,
+  ChapterSceneActorRef,
+  ChapterSceneDraft,
   ChapterPolishDraft,
   ChapterReviewDraft,
   ChapterStyleDraft,
+  ForeshadowRef,
   GenerationGateConfig,
+  GenerationPromptPreviewItem,
+  GenerationPromptPreviewRequest,
   GenerationEntitySnapshot,
   GenerationRelationSnapshot,
   GenerationForeshadowSnapshot,
@@ -95,6 +105,27 @@ type ContextAwareRequest = {
 const GENERATION_PROMPT_LIMITS = {
   completedTextTailChars: 2200,
 } as const;
+
+const ENTITY_CARD_FIELD_LABELS: Array<[string, string]> = [
+  ['static_role', '角色定位'],
+  ['static_desire', '核心欲望'],
+  ['static_fear', '核心恐惧'],
+  ['static_values', '价值排序'],
+  ['static_trueNature', '真实性情'],
+  ['static_speechStyle', '说话风格'],
+  ['static_decisionStyle', '决策方式'],
+  ['static_conflictResponse', '冲突反应'],
+  ['static_taboos', '禁忌'],
+  ['current_stance', '当前立场'],
+  ['current_goal', '当前目标'],
+  ['current_wound', '当前伤势'],
+  ['current_disguise', '当前伪装'],
+] as const;
+
+const SCENE_ACTOR_FIELD_KEYS = {
+  focus: ['static_desire', 'static_trueNature', 'static_speechStyle', 'static_decisionStyle'],
+  support: ['static_desire', 'static_trueNature', 'static_speechStyle'],
+} as const satisfies Record<'focus' | 'support', string[]>;
 
 function stripMarkdownCodeFence(text: string) {
   return text
@@ -293,6 +324,101 @@ function sanitizeString(value: unknown, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback;
 }
 
+function normalizeSceneActorRole(
+  value: unknown,
+  fallbackRole: ChapterSceneActorRef['role'] = 'support',
+): ChapterSceneActorRef['role'] {
+  return value === 'focus' || value === 'support' || value === 'candidate' ? value : fallbackRole;
+}
+
+function normalizeSceneActorRef(
+  value: unknown,
+  fallbackRole: ChapterSceneActorRef['role'] = 'support',
+): ChapterSceneActorRef | null {
+  if (typeof value === 'string') {
+    const characterId = sanitizeString(value);
+
+    return characterId
+      ? {
+          characterId,
+          role: fallbackRole,
+        }
+      : null;
+  }
+
+  const candidate = (value && typeof value === 'object' ? value : {}) as Partial<ChapterSceneActorRef> & {
+    name?: unknown;
+    entityId?: unknown;
+  };
+  const characterId = sanitizeString(candidate.characterId ?? candidate.name ?? candidate.entityId);
+
+  if (!characterId) {
+    return null;
+  }
+
+  return {
+    characterId,
+    role: normalizeSceneActorRole(candidate.role, fallbackRole),
+    sceneFocus: sanitizeString(candidate.sceneFocus),
+    sceneTask: sanitizeString(candidate.sceneTask),
+    weakHint: sanitizeString(candidate.weakHint),
+  };
+}
+
+function normalizeSceneActorRefs(
+  value: unknown,
+  fallbackRole: ChapterSceneActorRef['role'] = 'support',
+  max = 12,
+) {
+  if (!Array.isArray(value)) {
+    return [] as ChapterSceneActorRef[];
+  }
+
+  return value
+    .map((item) => normalizeSceneActorRef(item, fallbackRole))
+    .filter((item): item is ChapterSceneActorRef => Boolean(item))
+    .slice(0, max);
+}
+
+function getSceneActorName(actor: Pick<ChapterSceneActorRef, 'characterId'> | string | null | undefined) {
+  return typeof actor === 'string' ? sanitizeString(actor) : sanitizeString(actor?.characterId);
+}
+
+function getSceneActorNames(
+  actors: Array<Pick<ChapterSceneActorRef, 'characterId'> | string | null | undefined> | undefined,
+) {
+  return createUniquePromptTextList((actors ?? []).map((actor) => getSceneActorName(actor)));
+}
+
+function formatSceneActorLabel(actor: ChapterSceneActorRef) {
+  const name = getSceneActorName(actor);
+
+  return name ? `${name}（${actor.role}）` : '';
+}
+
+function normalizePromptLookupKey(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function createUniquePromptTextList(values: Array<string | undefined | null>) {
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const sanitized = value?.trim() ?? '';
+    const lookupKey = normalizePromptLookupKey(sanitized);
+
+    if (!sanitized || seen.has(lookupKey)) {
+      continue;
+    }
+
+    seen.add(lookupKey);
+    result.push(sanitized);
+  }
+
+  return result;
+}
+
 function sanitizeStringList(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
@@ -381,6 +507,7 @@ function sanitizeLoreEntityFields(value: unknown) {
 
 function sanitizeLoreEntityType(value: unknown): LoreEntityType {
   return value === 'character' ||
+    value === 'functional_role' ||
     value === 'faction' ||
     value === 'location' ||
     value === 'magic_system' ||
@@ -423,6 +550,8 @@ function normalizeVolumeMilestones(value: unknown): VolumeMilestoneDraft[] {
         powerCeiling: sanitizeString(candidate.powerCeiling),
         requiredEntities: sanitizeOptionalStringList(candidate.requiredEntities),
         requiredForeshadows: sanitizeOptionalStringList(candidate.requiredForeshadows),
+        requiredForeshadowIds: sanitizeOptionalStringList(candidate.requiredForeshadowIds),
+        foreshadowRefs: normalizeForeshadowRefs(candidate.foreshadowRefs),
       };
     })
     .filter(
@@ -437,12 +566,14 @@ function normalizeVolumeMilestones(value: unknown): VolumeMilestoneDraft[] {
         milestone.phasePOV ||
         milestone.keyTurns.length > 0 ||
         milestone.mustPlant.length > 0 ||
-        milestone.mustPayoff.length > 0 ||
-        milestone.requiredEntities.length > 0 ||
-        milestone.requiredForeshadows.length > 0 ||
-        milestone.powerCeiling ||
-        milestone.targetChapterCount > 0,
-    )
+          milestone.mustPayoff.length > 0 ||
+          milestone.requiredEntities.length > 0 ||
+          milestone.requiredForeshadows.length > 0 ||
+          milestone.requiredForeshadowIds.length > 0 ||
+          milestone.foreshadowRefs.length > 0 ||
+          milestone.powerCeiling ||
+          milestone.targetChapterCount > 0,
+      )
     .slice(0, 6);
 }
 
@@ -473,14 +604,180 @@ function normalizeOutlineBeats(value: unknown) {
     .slice(0, 5);
 }
 
+function normalizeStringArray(value: unknown, max = 8) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+
+  return value
+    .map((item) => sanitizeString(item))
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function normalizeForeshadowRefs(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as ForeshadowRef[];
+  }
+
+  return value
+    .map((item) => {
+      const candidate = (item && typeof item === 'object' ? item : {}) as Partial<ForeshadowRef>;
+      const foreshadowId = sanitizeString(candidate.foreshadowId);
+      const foreshadowTitle = sanitizeString(candidate.foreshadowTitle);
+
+      if (!foreshadowId && !foreshadowTitle) {
+        return null;
+      }
+
+      return {
+        foreshadowId,
+        foreshadowTitle,
+        action:
+          candidate.action === 'shadow' ||
+          candidate.action === 'plant' ||
+          candidate.action === 'advance' ||
+          candidate.action === 'payoff'
+            ? candidate.action
+            : 'shadow',
+        intensity:
+          candidate.intensity === 'light' ||
+          candidate.intensity === 'medium' ||
+          candidate.intensity === 'heavy'
+            ? candidate.intensity
+            : 'light',
+        note: sanitizeString(candidate.note),
+      } satisfies ForeshadowRef;
+    })
+    .filter((item): item is ForeshadowRef => Boolean(item))
+    .slice(0, 8);
+}
+
+function normalizeOutlineBeatDrafts(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as ChapterOutlineBeatDraft[];
+  }
+
+  return value
+    .map((item) => {
+      const candidate = (item && typeof item === 'object' ? item : {}) as Partial<ChapterOutlineBeatDraft>;
+
+      const beatDraft = {
+        beatId: sanitizeString(candidate.beatId),
+        sceneId: sanitizeString(candidate.sceneId),
+        beatTitle: sanitizeString(candidate.beatTitle),
+        scene: sanitizeString(candidate.scene),
+        anchors: normalizeStringArray(candidate.anchors),
+        actors: normalizeStringArray(candidate.actors),
+        progress: sanitizeString(candidate.progress),
+        result: sanitizeString(candidate.result),
+        entityRefs: normalizeStringArray(candidate.entityRefs),
+        foreshadowRefs: normalizeForeshadowRefs(candidate.foreshadowRefs),
+        forbiddenNotes: normalizeStringArray(candidate.forbiddenNotes),
+      } satisfies ChapterOutlineBeatDraft;
+
+      if (!beatDraft.beatId && !beatDraft.beatTitle && !beatDraft.progress && !beatDraft.result && !beatDraft.scene) {
+        return null;
+      }
+
+      return beatDraft;
+    })
+    .filter((item): item is ChapterOutlineBeatDraft => Boolean(item))
+    .slice(0, 6);
+}
+
+function normalizeGenerationModeHint(value: unknown, sceneCount = 0) {
+  if (value === 'single-scene-chapter' || value === 'scene-by-scene') {
+    return value;
+  }
+
+  return sceneCount <= 1 ? 'single-scene-chapter' : 'scene-by-scene';
+}
+
+function normalizeSceneDrafts(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as ChapterSceneDraft[];
+  }
+
+  return value
+    .map((item) => {
+      const candidate = (item && typeof item === 'object' ? item : {}) as Partial<ChapterSceneDraft>;
+      const sceneDraft = {
+        sceneId: sanitizeString(candidate.sceneId),
+        sceneTitle: sanitizeString(candidate.sceneTitle),
+        macroScene: sanitizeString(candidate.macroScene),
+        sceneRole: sanitizeString(candidate.sceneRole),
+        sceneGoal: sanitizeString(candidate.sceneGoal),
+        sceneObstacle: sanitizeString(candidate.sceneObstacle),
+        sceneTimeSpan: sanitizeString(candidate.sceneTimeSpan),
+        scenePacing: sanitizeString(candidate.scenePacing),
+        sceneResult: sanitizeString(candidate.sceneResult),
+        sceneHook: sanitizeString(candidate.sceneHook),
+        estimatedWords:
+          typeof candidate.estimatedWords === 'number' && Number.isFinite(candidate.estimatedWords)
+            ? Math.max(0, Math.trunc(candidate.estimatedWords))
+            : 0,
+        actors: normalizeSceneActorRefs(candidate.actors, 'support', 12),
+        availableCharacters: normalizeSceneActorRefs(candidate.availableCharacters, 'candidate', 12),
+        sceneAnchors: normalizeStringArray(candidate.sceneAnchors, 12),
+        infoBudget: sanitizeString(candidate.infoBudget),
+        powerShift: sanitizeString(candidate.powerShift),
+        personalConflict: sanitizeString(candidate.personalConflict),
+        foreshadowRefs: normalizeForeshadowRefs(candidate.foreshadowRefs),
+        forbiddenNotes: normalizeStringArray(candidate.forbiddenNotes, 12),
+        beatRefs: normalizeStringArray(candidate.beatRefs, 12),
+      } satisfies ChapterSceneDraft;
+
+      if (
+        !sceneDraft.sceneId &&
+        !sceneDraft.sceneTitle &&
+        !sceneDraft.sceneGoal &&
+        !sceneDraft.sceneResult &&
+        !sceneDraft.sceneRole &&
+        !sceneDraft.macroScene
+      ) {
+        return null;
+      }
+
+      return sceneDraft;
+    })
+    .filter((item): item is ChapterSceneDraft => Boolean(item))
+    .slice(0, 8);
+}
+
+function summarizeSceneDraft(scene: ChapterSceneDraft) {
+  return [
+    scene.sceneTitle,
+    scene.sceneGoal,
+    scene.sceneResult,
+    scene.sceneRole,
+    scene.macroScene,
+  ].find(Boolean) ?? '';
+}
+
 function normalizeOutline(raw: unknown): ChapterOutlineDraft {
   const candidate = (raw && typeof raw === 'object' ? raw : {}) as Partial<ChapterOutlineDraft>;
+  const candidateRecord = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const sceneDrafts = normalizeSceneDrafts(candidate.sceneDrafts);
+  const beatDrafts = normalizeOutlineBeatDrafts(candidate.beatDrafts);
+  const beats = sceneDrafts.length > 0
+    ? sceneDrafts.map((item) => summarizeSceneDraft(item)).filter(Boolean)
+    : beatDrafts.length > 0
+    ? beatDrafts
+        .map((item) => [item.beatTitle, item.progress, item.result, item.scene].find(Boolean) ?? '')
+        .filter(Boolean)
+    : normalizeOutlineBeats(candidate.beats);
+  const normalizedForeshadowRefs = normalizeForeshadowRefs(candidate.foreshadowRefs);
+  const mergedSceneActors = Array.from(new Set(sceneDrafts.flatMap((item) => getSceneActorNames(item.actors)))).slice(0, 12);
+  const mergedSceneAvailableCharacters = Array.from(new Set(sceneDrafts.flatMap((item) => getSceneActorNames(item.availableCharacters)))).slice(0, 12);
+  const mergedSceneAnchors = Array.from(new Set(sceneDrafts.flatMap((item) => item.sceneAnchors))).slice(0, 12);
+  const mergedSceneForeshadowRefs = sceneDrafts.flatMap((item) => item.foreshadowRefs);
 
   return {
-    goal: sanitizeString(candidate.goal, '推动当前章节主冲突'),
+    goal: sanitizeString(candidate.goal || candidateRecord.chapterGoal, '推动当前章节主冲突'),
     obstacle: sanitizeString(candidate.obstacle, '外部阻力仍不明确'),
     cost: sanitizeString(candidate.cost, '需要付出时间或情绪代价'),
-    beats: normalizeOutlineBeats(candidate.beats),
+    beats,
     timeAnchor: sanitizeString(candidate.timeAnchor, '未明确'),
     chapterTimeSpan: sanitizeString(candidate.chapterTimeSpan, '未明确'),
     gapFromPrevious: sanitizeString(candidate.gapFromPrevious, '紧接上一章'),
@@ -488,6 +785,43 @@ function normalizeOutline(raw: unknown): ChapterOutlineDraft {
     hookType: sanitizeString(candidate.hookType, '悬念推进'),
     hookStrength: normalizeHookStrength(candidate.hookStrength),
     immutableFacts: sanitizeStringList(candidate.immutableFacts).slice(0, 8),
+    chapterFunction: sanitizeString(candidate.chapterFunction),
+    chapterBoundary: sanitizeString(candidate.chapterBoundary),
+    revealCeiling: sanitizeString(candidate.revealCeiling),
+    openingState: sanitizeString(candidate.openingState),
+    closingState: sanitizeString(candidate.closingState),
+    focusCharacter: sanitizeString(candidate.focusCharacter),
+    mustAppearCharacters: Array.from(
+      new Set([...normalizeStringArray(candidate.mustAppearCharacters), ...mergedSceneActors]),
+    ).slice(0, 12),
+    availableCharacters: Array.from(
+      new Set([...normalizeStringArray(candidate.availableCharacters), ...mergedSceneAvailableCharacters]),
+    ).slice(0, 12),
+    mainPlot: sanitizeString(candidate.mainPlot),
+    subPlot: sanitizeString(candidate.subPlot),
+    coreScene: sanitizeString(candidate.coreScene || sceneDrafts[0]?.sceneTitle || sceneDrafts[0]?.macroScene),
+    sceneAnchors: Array.from(new Set([...normalizeStringArray(candidate.sceneAnchors), ...mergedSceneAnchors])).slice(0, 12),
+    infoBudget: sanitizeString(candidate.infoBudget || sceneDrafts[0]?.infoBudget),
+    powerShift: sanitizeString(candidate.powerShift || sceneDrafts[0]?.powerShift),
+    personalConflict: sanitizeString(candidate.personalConflict || sceneDrafts[0]?.personalConflict),
+    emotionalOutcome: sanitizeString(candidate.emotionalOutcome),
+    chapterHook: sanitizeString(candidate.chapterHook || sceneDrafts[sceneDrafts.length - 1]?.sceneHook),
+    generationModeHint: normalizeGenerationModeHint(candidate.generationModeHint, sceneDrafts.length),
+    sceneDecisionNote: sanitizeString(candidate.sceneDecisionNote),
+    foreshadowRefs: normalizedForeshadowRefs.length > 0 ? normalizedForeshadowRefs : mergedSceneForeshadowRefs,
+    sceneDrafts,
+    beatDrafts,
+    promptModuleHints:
+      candidate.promptModuleHints && typeof candidate.promptModuleHints === 'object'
+        ? {
+            extraPrewriteModules: normalizeStringArray(
+              (candidate.promptModuleHints as { extraPrewriteModules?: unknown }).extraPrewriteModules,
+              4,
+            ).filter(
+              (item): item is 'strand_weave' | 'cool_points' => item === 'strand_weave' || item === 'cool_points',
+            ),
+          }
+        : undefined,
   };
 }
 
@@ -533,6 +867,8 @@ function normalizeVolumeOutline(raw: unknown): VolumeOutlineFields {
     foreshadowSeeds: sanitizeStringList(candidate.foreshadowSeeds).slice(0, 8),
     requiredEntities: sanitizeOptionalStringList(candidate.requiredEntities),
     requiredForeshadows: sanitizeOptionalStringList(candidate.requiredForeshadows),
+    requiredForeshadowIds: sanitizeOptionalStringList(candidate.requiredForeshadowIds),
+    foreshadowRefs: normalizeForeshadowRefs(candidate.foreshadowRefs),
     estimatedChapterCount: sanitizePositiveInteger(candidate.estimatedChapterCount, milestoneChapterCount),
     milestones,
   };
@@ -661,6 +997,7 @@ function normalizeVolumeBeatDraft(raw: unknown, slot: VolumeBeatChapterSlot): Vo
     focusCharacter: sanitizeString(candidate.focusCharacter, '主角'),
     mustAppearCharacters: sanitizeOptionalStringList(candidate.mustAppearCharacters),
     availableCharacters: sanitizeOptionalStringList(candidate.availableCharacters),
+    requiredForeshadows: sanitizeOptionalStringList(candidate.requiredForeshadows),
     mainPlot: sanitizeString(candidate.mainPlot, '推进当前卷主线并制造新的局势变化。'),
     subPlot: sanitizeString(candidate.subPlot),
     pacing: sanitizeString(candidate.pacing, '中速推进'),
@@ -1120,11 +1457,27 @@ function hasIdentityContextNearName(text: string, name: string) {
   return false;
 }
 
-function collectKnownCharacterNames(...sources: Array<string | undefined>) {
+function collectKnownCharacterNames(input: {
+  outline?: ChapterOutlineDraft | null;
+  currentScene?: ChapterSceneDraft | null;
+  requiredEntityNames?: string[];
+  fallbackSources?: Array<string | undefined>;
+}) {
+  const structuredNames = createUniquePromptTextList([
+    ...(input.requiredEntityNames ?? []),
+    input.outline?.focusCharacter ?? '',
+    ...(input.outline?.mustAppearCharacters ?? []),
+    ...getSceneActorNames(input.currentScene?.actors),
+  ]);
+
+  if (structuredNames.length > 0) {
+    return structuredNames.slice(0, 16);
+  }
+
   const names: string[] = [];
   const seen = new Set<string>();
 
-  for (const source of sources) {
+  for (const source of input.fallbackSources ?? []) {
     if (!source?.trim()) {
       continue;
     }
@@ -1148,6 +1501,329 @@ function buildKnownCharacterAnchorBlock(title: string, names: string[]) {
   }
 
   return `${title}\n- ${names.join('、')}`;
+}
+
+function buildEntitySnapshotLookup(entitySnapshots?: GenerationEntitySnapshot[]) {
+  const lookup = new Map<string, GenerationEntitySnapshot>();
+
+  for (const snapshot of entitySnapshots ?? []) {
+    const terms = [snapshot.name, ...(snapshot.aliases ?? [])]
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    for (const term of terms) {
+      const lookupKey = normalizePromptLookupKey(term);
+
+      if (lookupKey && !lookup.has(lookupKey)) {
+        lookup.set(lookupKey, snapshot);
+      }
+    }
+  }
+
+  return lookup;
+}
+
+function buildEntitySnapshotFieldEntries(
+  snapshot: GenerationEntitySnapshot,
+  orderedFieldKeys: string[],
+  maxEntries = 6,
+) {
+  const seenFieldKeys = new Set<string>();
+
+  return orderedFieldKeys
+    .filter((fieldKey) => {
+      if (seenFieldKeys.has(fieldKey)) {
+        return false;
+      }
+
+      seenFieldKeys.add(fieldKey);
+      return true;
+    })
+    .map((fieldKey) => [fieldKey, snapshot.fields?.[fieldKey]] as const)
+    .filter(([, value]) => value !== null && typeof value !== 'undefined' && String(value).trim())
+    .slice(0, maxEntries)
+    .map(([fieldKey, value]) => {
+      const label = ENTITY_CARD_FIELD_LABELS.find(([key]) => key === fieldKey)?.[1] ?? fieldKey;
+      return `${label}：${String(value).trim()}`;
+    });
+}
+
+function buildRequiredEntityCardBlock(
+  requiredEntityNames?: string[],
+  entitySnapshots?: GenerationEntitySnapshot[],
+) {
+  const orderedNames = createUniquePromptTextList(requiredEntityNames ?? []);
+
+  if (orderedNames.length === 0) {
+    return '';
+  }
+
+  const snapshotLookup = buildEntitySnapshotLookup(entitySnapshots);
+  const blocks = orderedNames.map((entityName) => {
+    const snapshot = snapshotLookup.get(normalizePromptLookupKey(entityName));
+
+    if (!snapshot) {
+      return `- ${entityName}`;
+    }
+
+    const fieldEntries = buildEntitySnapshotFieldEntries(
+      snapshot,
+      [
+        ...ENTITY_CARD_FIELD_LABELS.map(([fieldKey]) => fieldKey),
+        ...Object.keys(snapshot.fields ?? {}),
+      ],
+      6,
+    );
+    const lines = [`- ${snapshot.name}${snapshot.type ? `（${snapshot.type}）` : ''}`];
+
+    if (snapshot.description.trim()) {
+      lines.push(`卡片描述：${snapshot.description.trim()}`);
+    }
+
+    if ((snapshot.aliases ?? []).length > 0) {
+      lines.push(`别名：${(snapshot.aliases ?? []).slice(0, 4).join(' / ')}`);
+    }
+
+    if (fieldEntries.length > 0) {
+      lines.push(`卡片事实：${fieldEntries.join('；')}`);
+    }
+
+    if (snapshot.tags.length > 0) {
+      lines.push(`标签：${snapshot.tags.slice(0, 4).join(' / ')}`);
+    }
+
+    return lines.join('\n');
+  });
+
+  return ['【重点实体卡片】', ...blocks].join('\n');
+}
+
+function buildSceneRoleEntityCardBlock(
+  scene: ChapterSceneDraft | null,
+  entitySnapshots?: GenerationEntitySnapshot[],
+) {
+  if (!scene) {
+    return '';
+  }
+
+  const seenNames = new Set<string>();
+  const entries = [...scene.actors, ...scene.availableCharacters].filter((entry) => {
+    const characterName = getSceneActorName(entry);
+
+    if (!characterName || seenNames.has(characterName)) {
+      return false;
+    }
+
+    seenNames.add(characterName);
+    return true;
+  });
+
+  if (entries.length === 0) {
+    return '';
+  }
+
+  const snapshotLookup = buildEntitySnapshotLookup(entitySnapshots);
+  const blocks = entries
+    .map((entry) => {
+      const characterName = getSceneActorName(entry);
+
+      if (!characterName) {
+        return '';
+      }
+
+      const lines = [`- ${characterName}（${entry.role}）`];
+
+      if (entry.role === 'candidate') {
+        if (entry.weakHint?.trim()) {
+          lines.push(`弱提示：${entry.weakHint.trim()}`);
+        }
+
+        return lines.join('\n');
+      }
+
+      const snapshot = snapshotLookup.get(normalizePromptLookupKey(characterName));
+
+      if (snapshot?.description.trim()) {
+        lines.push(`卡片描述：${snapshot.description.trim()}`);
+      }
+
+      const fieldKeys = entry.role === 'focus' ? SCENE_ACTOR_FIELD_KEYS.focus : SCENE_ACTOR_FIELD_KEYS.support;
+      const fieldEntries = snapshot
+        ? buildEntitySnapshotFieldEntries(
+            snapshot,
+            fieldKeys,
+            fieldKeys.length,
+          )
+        : [];
+
+      if (fieldEntries.length > 0) {
+        lines.push(`卡片事实：${fieldEntries.join('；')}`);
+      }
+
+      if (entry.sceneFocus?.trim()) {
+        lines.push(`本场聚焦：${entry.sceneFocus.trim()}`);
+      }
+
+      if (entry.sceneTask?.trim()) {
+        lines.push(`本场任务：${entry.sceneTask.trim()}`);
+      }
+
+      return lines.join('\n');
+    })
+    .filter(Boolean);
+
+  return blocks.length > 0 ? ['【重点实体卡片】', ...blocks].join('\n') : '';
+}
+
+function buildForeshadowSnapshotLookup(foreshadowSnapshots?: GenerationForeshadowSnapshot[]) {
+  const lookup = new Map<string, GenerationForeshadowSnapshot>();
+
+  for (const snapshot of foreshadowSnapshots ?? []) {
+    const terms = [snapshot.title, snapshot.id, snapshot.foreshadowId ?? '']
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    for (const term of terms) {
+      const lookupKey = normalizePromptLookupKey(term);
+
+      if (lookupKey && !lookup.has(lookupKey)) {
+        lookup.set(lookupKey, snapshot);
+      }
+    }
+  }
+
+  return lookup;
+}
+
+function formatForeshadowStatusLabel(status: GenerationForeshadowSnapshot['status']) {
+  switch (status) {
+    case 'activated':
+      return '已激活';
+    case 'resolved':
+      return '已回收';
+    case 'overdue':
+      return '超期';
+    case 'planted':
+    default:
+      return '已埋设';
+  }
+}
+
+function formatForeshadowActionLabel(action: ForeshadowRef['action']) {
+  switch (action) {
+    case 'plant':
+      return '埋设';
+    case 'advance':
+      return '推进';
+    case 'payoff':
+      return '回收';
+    case 'shadow':
+    default:
+      return '暗示';
+  }
+}
+
+function formatForeshadowIntensityLabel(intensity: ForeshadowRef['intensity']) {
+  switch (intensity) {
+    case 'medium':
+      return '中度';
+    case 'heavy':
+      return '重度';
+    case 'light':
+    default:
+      return '轻度';
+  }
+}
+
+function buildForeshadowExecutionExpectation(ref?: ForeshadowRef) {
+  if (!ref) {
+    return '至少要让读者可感知这条伏笔正在被触及或推进，不能只挂名。';
+  }
+
+  const actionRule = (() => {
+    switch (ref.action) {
+      case 'plant':
+        return '本段要明确埋下该伏笔的可感知痕迹，不能只剩名字擦边。';
+      case 'advance':
+        return '本段要让该伏笔出现实质推进、信息加码或局势变化。';
+      case 'payoff':
+        return '本段要兑现或部分兑现该伏笔，不能继续只埋不收。';
+      case 'shadow':
+      default:
+        return '本段至少要给出读者可感知的暗示，不能完全隐没。';
+    }
+  })();
+  const intensityRule = (() => {
+    switch (ref.intensity) {
+      case 'heavy':
+        return '重度落地：必须成为当前 beat 的显性推进点之一，不能一笔带过。';
+      case 'medium':
+        return '中度落地：正文里必须有明确动作、信息或冲突承接。';
+      case 'light':
+      default:
+        return '轻度落地：篇幅可以短，但必须让读者清楚感知到。';
+    }
+  })();
+
+  return `${actionRule}${intensityRule}`;
+}
+
+function buildRequiredForeshadowConstraintBlock(input: {
+  requiredForeshadowTitles?: string[];
+  outline?: ChapterOutlineDraft | null;
+  foreshadowSnapshots?: GenerationForeshadowSnapshot[];
+}) {
+  const snapshotLookup = buildForeshadowSnapshotLookup(input.foreshadowSnapshots);
+  const refLookup = new Map<string, ForeshadowRef>();
+
+  for (const ref of input.outline?.foreshadowRefs ?? []) {
+    for (const key of [ref.foreshadowTitle?.trim() || '', ref.foreshadowId.trim()]) {
+      const lookupKey = normalizePromptLookupKey(key);
+
+      if (lookupKey && !refLookup.has(lookupKey)) {
+        refLookup.set(lookupKey, ref);
+      }
+    }
+  }
+
+  const orderedForeshadowKeys = createUniquePromptTextList([
+    ...(input.outline?.foreshadowRefs ?? []).map((ref) => ref.foreshadowTitle?.trim() || ref.foreshadowId.trim()),
+    ...(input.requiredForeshadowTitles ?? []),
+  ]);
+
+  if (orderedForeshadowKeys.length === 0) {
+    return '';
+  }
+
+  const blocks = orderedForeshadowKeys.map((titleOrId) => {
+    const lookupKey = normalizePromptLookupKey(titleOrId);
+    const ref = refLookup.get(lookupKey);
+    const snapshot = snapshotLookup.get(lookupKey)
+      ?? (ref?.foreshadowId ? snapshotLookup.get(normalizePromptLookupKey(ref.foreshadowId)) : null)
+      ?? (ref?.foreshadowTitle ? snapshotLookup.get(normalizePromptLookupKey(ref.foreshadowTitle)) : null)
+      ?? null;
+    const displayTitle = ref?.foreshadowTitle?.trim() || snapshot?.title?.trim() || titleOrId;
+    const summary = snapshot ? snapshot.excerpt.trim() || snapshot.notes.trim() : '';
+    const lines = [`- ${displayTitle}`];
+
+    if (ref) {
+      lines.push(`执行等级：${formatForeshadowActionLabel(ref.action)} / ${formatForeshadowIntensityLabel(ref.intensity)}`);
+    }
+
+    if (ref?.note?.trim()) {
+      lines.push(`备注：${ref.note.trim()}`);
+    }
+
+    if (snapshot) {
+      lines.push(`当前事实：${formatForeshadowStatusLabel(snapshot.status)}${summary ? `；${summary}` : ''}`);
+    }
+
+    lines.push(`落地要求：${buildForeshadowExecutionExpectation(ref)}`);
+
+    return lines.join('\n');
+  });
+
+  return ['【重点伏笔约束】', ...blocks].join('\n');
 }
 
 function validateVolumeBeats(
@@ -1468,18 +2144,56 @@ function detectRepeatedDialoguePatternIssue(content: string): ReviewIssue | null
   return null;
 }
 
+function resolvePlannedCharacterNamesForReview(input: {
+  outline?: ChapterOutlineDraft | null;
+  requiredEntityNames?: string[];
+  entitySnapshots?: GenerationEntitySnapshot[];
+}) {
+  const outlineNames = createUniquePromptTextList([
+    input.outline?.focusCharacter ?? '',
+    ...(input.outline?.mustAppearCharacters ?? []),
+    ...((input.outline?.sceneDrafts ?? []).flatMap((scene) => getSceneActorNames(scene.actors))),
+  ]);
+
+  if (outlineNames.length > 0) {
+    return outlineNames;
+  }
+
+  const characterSnapshotLookup = new Map<string, GenerationEntitySnapshot>();
+
+  for (const snapshot of input.entitySnapshots ?? []) {
+    if (snapshot.type !== 'character' && snapshot.type !== 'functional_role') {
+      continue;
+    }
+
+    const terms = [snapshot.name, ...(snapshot.aliases ?? [])]
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    for (const term of terms) {
+      const lookupKey = normalizePromptLookupKey(term);
+
+      if (lookupKey && !characterSnapshotLookup.has(lookupKey)) {
+        characterSnapshotLookup.set(lookupKey, snapshot);
+      }
+    }
+  }
+
+  return createUniquePromptTextList(input.requiredEntityNames ?? []).filter((name) =>
+    characterSnapshotLookup.has(normalizePromptLookupKey(name)),
+  );
+}
+
 function detectRequiredCharacterOmissionIssue(input: {
   content: string;
+  outline?: ChapterOutlineDraft | null;
   requiredEntityNames?: string[];
+  entitySnapshots?: GenerationEntitySnapshot[];
   previousSummary?: string;
 }): ReviewIssue | null {
-  const requiredNames = Array.from(
-    new Set(
-      (input.requiredEntityNames ?? [])
-        .map((item) => item.trim())
-        .filter((item) => item.length >= 2),
-    ),
-  );
+  const requiredNames = resolvePlannedCharacterNamesForReview(input)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2);
 
   if (requiredNames.length === 0) {
     return null;
@@ -1495,7 +2209,7 @@ function detectRequiredCharacterOmissionIssue(input: {
 
   return {
     severity: consecutiveMissing.length > 0 ? 'high' : 'medium',
-    title: consecutiveMissing.length > 0 ? '核心人物连续缺席' : '章节拍人物未按规划进场',
+    title: consecutiveMissing.length > 0 ? '核心人物连续缺席' : '章节规划人物未按要求出场',
     description:
       consecutiveMissing.length > 0
         ? `上章仍在承接的人物 ${consecutiveMissing.join('、')} 本章继续缺席，章节主功能可能没有真正落到对应人物身上。`
@@ -1559,17 +2273,25 @@ function detectExplicitRelationCoverageIssue(input: {
 }
 
 function detectCharacterAnchorDriftIssue(content: string, knownNames: string[]): ReviewIssue | null {
-  if (knownNames.length < 2) {
+  const normalizedKnownNames = createUniquePromptTextList(knownNames.map((name) => name.trim()).filter((name) => name.length >= 2));
+
+  if (normalizedKnownNames.length < 2) {
     return null;
   }
 
-  const contentNames = extractPotentialChineseNames(content);
+  const directlyMentionedKnownNames = normalizedKnownNames.filter((name) => content.includes(name));
+
+  if (directlyMentionedKnownNames.length > 0) {
+    return null;
+  }
+
+  const contentNames = extractPotentialChineseNames(content).filter((name) => hasIdentityContextNearName(content, name));
 
   if (contentNames.length < 2) {
     return null;
   }
 
-  const overlap = contentNames.filter((name) => knownNames.includes(name));
+  const overlap = contentNames.filter((name) => normalizedKnownNames.includes(name));
 
   if (overlap.length > 0) {
     return null;
@@ -1580,7 +2302,7 @@ function detectCharacterAnchorDriftIssue(content: string, knownNames: string[]):
     title: '人物名锚点漂移',
     description: '上下文已经给出一组明确人物名，但正文整段换成了另一组新名字，疑似无依据改名或临时造角。',
     suggestion: '优先复用上下文里已经出现的人物名；若必须新增人物，至少保留原有核心人物继续在场，并明确新人物身份与关系。',
-    evidence: `正文出现：${contentNames.slice(0, 4).join('、')}；已知锚点：${knownNames.slice(0, 4).join('、')}`,
+    evidence: `正文出现：${contentNames.slice(0, 4).join('、')}；已知锚点：${normalizedKnownNames.slice(0, 4).join('、')}`,
   };
 }
 
@@ -1678,9 +2400,48 @@ function normalizeCheckerResult(raw: unknown): ReviewCheckerResult {
   };
 }
 
+function normalizeReviewCheckerResults(raw: unknown): ReviewCheckerResult[] {
+  const rawItems = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === 'object'
+      ? Object.entries(raw as Record<string, unknown>).map(([checkerKey, value]) => {
+          const normalizedChecker = normalizeCheckerType(checkerKey);
+          const candidate =
+            value && typeof value === 'object'
+              ? value as Record<string, unknown>
+              : {};
+
+          return {
+            ...candidate,
+            checker:
+              typeof candidate.checker === 'string' && candidate.checker.trim()
+                ? candidate.checker
+                : normalizedChecker,
+          };
+        })
+      : [];
+
+  const normalizedResults = rawItems.map(normalizeCheckerResult);
+
+  if (normalizedResults.length === 0) {
+    return [];
+  }
+
+  const shouldUpscaleScores = normalizedResults.every((result) => result.score >= 0 && result.score <= 10);
+
+  if (!shouldUpscaleScores) {
+    return normalizedResults;
+  }
+
+  return normalizedResults.map((result) => ({
+    ...result,
+    score: sanitizeScore(result.score * 10),
+  }));
+}
+
 function normalizeReview(raw: unknown): ChapterReviewDraft {
   const candidate = (raw && typeof raw === 'object' ? raw : {}) as Partial<ChapterReviewDraft>;
-  const rawResults = Array.isArray(candidate.checkerResults) ? candidate.checkerResults.map(normalizeCheckerResult) : [];
+  const rawResults = normalizeReviewCheckerResults(candidate.checkerResults);
   const resultMap = new Map(rawResults.map((item) => [item.checker, item] as const));
   const checkerResults: ReviewCheckerResult[] = [
     resultMap.get('consistency') ?? createDefaultCheckerResult('consistency'),
@@ -1725,6 +2486,16 @@ function normalizePolish(raw: unknown): ChapterPolishDraft {
     summary: sanitizeString(candidate.summary, '已完成润色，但仍建议人工抽查最终措辞。'),
     antiAiForceCheck: candidate.antiAiForceCheck === 'fail' ? 'fail' : 'pass',
     appliedChanges: sanitizeStringList(candidate.appliedChanges).slice(0, 6),
+  };
+}
+
+function normalizeEditorRefine(raw: unknown): ChapterEditorRefineDraft {
+  const candidate = (raw && typeof raw === 'object' ? raw : {}) as Partial<ChapterEditorRefineDraft>;
+
+  return {
+    summary: sanitizeString(candidate.summary, '已完成整章统筹改稿。'),
+    antiAiForceCheck: candidate.antiAiForceCheck === 'fail' ? 'fail' : 'pass',
+    majorAdjustments: sanitizeStringList(candidate.majorAdjustments).slice(0, 6),
   };
 }
 
@@ -1853,6 +2624,125 @@ function extractToneGuideFromBookOutline(bookOutline?: string) {
     .find((line) => /^(整体基调|基调指引|toneGuide)\s*[:：]/i.test(line));
 
   return matchedLine ? matchedLine.replace(/^[^:：]+[:：]\s*/, '').trim() : '';
+}
+
+function parsePromptSections(prompt: string) {
+  const matches = [...prompt.matchAll(/^【([^\n】]+)】\n/gm)];
+
+  if (matches.length === 0) {
+    return [] as Array<{ title: string; content: string }>;
+  }
+
+  return matches
+    .map((match, index) => {
+      const title = match[1]?.trim() ?? '';
+      const start = (match.index ?? 0) + match[0].length;
+      const end = matches[index + 1]?.index ?? prompt.length;
+      const content = prompt.slice(start, end).trim();
+
+      return {
+        title,
+        content,
+      };
+    })
+    .filter((section) => section.title && section.content);
+}
+
+function extractStyleTransferPrompt(stylePrompt?: string) {
+  const normalized = stylePrompt?.trim() ?? '';
+
+  if (!normalized) {
+    return '';
+  }
+
+  const preferredTitles = new Set([
+    '创作模板文风约束',
+    '项目文风',
+    '项目文风 Prompt',
+    '项目文风Prompt',
+  ]);
+  const matchedSections = parsePromptSections(normalized)
+    .filter((section) => preferredTitles.has(section.title))
+    .map((section) => `【${section.title}】\n${section.content}`);
+
+  return matchedSections.length > 0 ? matchedSections.join('\n\n').trim() : normalized;
+}
+
+function buildStyleGuardBlock(outline?: ChapterOutlineDraft | null) {
+  if (!outline) {
+    return '';
+  }
+
+  const lines = [
+    outline.chapterBoundary?.trim() ? `章节边界：${outline.chapterBoundary.trim()}` : '',
+    outline.revealCeiling?.trim() ? `揭露上限：${outline.revealCeiling.trim()}` : '',
+    outline.focusCharacter?.trim() ? `焦点角色：${outline.focusCharacter.trim()}` : '',
+    outline.immutableFacts.length > 0 ? `不可变事实：${outline.immutableFacts.join('；')}` : '',
+  ].filter(Boolean);
+
+  return lines.length > 0 ? `【事实护栏】\n${lines.join('\n')}` : '';
+}
+
+function buildReviewGuardBlock(outline?: ChapterOutlineDraft | null) {
+  if (!outline) {
+    return '';
+  }
+
+  const lines = [
+    outline.goal?.trim() ? `章节目标：${outline.goal.trim()}` : '',
+    outline.chapterFunction?.trim() ? `本章功能：${outline.chapterFunction.trim()}` : '',
+    outline.chapterBoundary?.trim() ? `章节边界：${outline.chapterBoundary.trim()}` : '',
+    outline.revealCeiling?.trim() ? `揭露上限：${outline.revealCeiling.trim()}` : '',
+    outline.openingState?.trim() ? `开章状态：${outline.openingState.trim()}` : '',
+    outline.closingState?.trim() ? `收章状态：${outline.closingState.trim()}` : '',
+    outline.focusCharacter?.trim() ? `焦点角色：${outline.focusCharacter.trim()}` : '',
+    (outline.mustAppearCharacters?.length ?? 0) > 0 ? `必须出场：${outline.mustAppearCharacters!.join('、')}` : '',
+    outline.immutableFacts.length > 0 ? `不可变事实：${outline.immutableFacts.join('；')}` : '',
+  ].filter(Boolean);
+
+  return lines.length > 0 ? `【章节硬护栏】\n${lines.join('\n')}` : '';
+}
+
+function buildTerminologyWhitelistBlock(input: {
+  outline?: ChapterOutlineDraft | null;
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  requiredForeshadowTitles?: string[];
+  relationSnapshot?: GenerationRelationSnapshot[];
+}) {
+  const relationNames = (input.relationSnapshot ?? [])
+    .filter((relation) => !relation.draft)
+    .flatMap((relation) => [relation.sourceEntityName, relation.targetEntityName]);
+  const characterTerms = createUniquePromptTextList([
+    ...(input.requiredEntityNames ?? []),
+    input.outline?.focusCharacter ?? '',
+    ...(input.outline?.mustAppearCharacters ?? []),
+    ...(input.availableCharacterNames ?? []),
+    ...relationNames,
+  ]);
+  const keywordTerms = createUniquePromptTextList([
+    ...(input.requiredForeshadowTitles ?? []),
+  ]);
+  const lines = [
+    characterTerms.length > 0 ? `人物与称谓：${characterTerms.join('、')}` : '',
+    keywordTerms.length > 0 ? `关键术语：${keywordTerms.join('、')}` : '',
+  ].filter(Boolean);
+
+  return lines.length > 0 ? `【术语白名单】\n${lines.join('\n')}` : '';
+}
+
+function buildEditorRefineCharacterCardBlock(input: {
+  outline?: ChapterOutlineDraft | null;
+  requiredEntityNames?: string[];
+  entitySnapshots?: GenerationEntitySnapshot[];
+}) {
+  const names = createUniquePromptTextList([
+    ...(input.requiredEntityNames ?? []),
+    input.outline?.focusCharacter ?? '',
+    ...(input.outline?.mustAppearCharacters ?? []),
+  ]);
+
+  return buildRequiredEntityCardBlock(names, input.entitySnapshots);
 }
 
 function buildBookOutlinePrompt(request: AIBookOutlineRequest) {
@@ -2084,13 +2974,15 @@ function buildVolumeBeatsPrompt(
   },
 ) {
   const chapterSlots = resolveVolumeBeatChapterSlots(request);
-  const knownCharacterNames = collectKnownCharacterNames(
-    request.bookOutline,
-    request.volumeOutline,
-    request.currentMilestone,
-    ...(request.historySummaries ?? []).flatMap((item) => [item.chapterTitle, item.summary]),
-    request.hint,
-  );
+  const knownCharacterNames = collectKnownCharacterNames({
+    fallbackSources: [
+      request.bookOutline,
+      request.volumeOutline,
+      request.currentMilestone,
+      ...(request.historySummaries ?? []).flatMap((item) => [item.chapterTitle, item.summary]),
+      request.hint,
+    ],
+  });
   const knownCharacterBlock = buildKnownCharacterAnchorBlock('已知人物锚点：', knownCharacterNames);
   const slotLines = chapterSlots.map((slot) =>
     `- 第${slot.chapterNumber}章${slot.chapterTitle?.trim() ? `《${slot.chapterTitle.trim()}》` : ''}`,
@@ -2125,7 +3017,7 @@ function buildVolumeBeatsPrompt(
     '',
     '请为当前卷裂变出一组章节拍表，输出严格 JSON，不要输出 Markdown，不要解释。',
     'JSON 顶层字段为 beats，必须是与章节槽位等长的数组，且顺序严格对应章节槽位。',
-    '每个 beat 必须包含字段：chapterTitle, titleHint, scenePurpose, focusCharacter, mainPlot, subPlot, pacing, hookOut, noveltyRequirement, powerDelta, forbiddenPhrases, forbiddenScenePatterns, keyItems。',
+    '每个 beat 必须包含字段：chapterTitle, titleHint, scenePurpose, focusCharacter, mustAppearCharacters, availableCharacters, requiredForeshadows, mainPlot, subPlot, pacing, hookOut, noveltyRequirement, powerDelta, forbiddenPhrases, forbiddenScenePatterns, keyItems。',
     '约束要求：',
     hasPresetChapterTitles && !hasMissingChapterTitles
       ? '- 已提供的章节标题视为现成章节槽位，但你仍必须返回 chapterTitle：若认为现有标题已合适，可直接复用；若存在更贴合当前章节拍的短标题，也可返回新的推荐标题'
@@ -2161,29 +3053,41 @@ function buildVolumeBeatsPrompt(
     '- 可以主动输出 forbiddenScenePatterns，帮助后续写作避开重复场景',
     '- forbiddenPhrases 与 forbiddenScenePatterns 用数组返回，没有内容时返回空数组',
     '- keyItems 填本章必须出现或必须推进的关键物件、线索或符号',
+    '- mustAppearCharacters、availableCharacters、requiredForeshadows 都用数组返回；没有内容时返回空数组',
   ].filter(Boolean);
 
   return sections.join('\n');
 }
 
 function buildPlanPrompt(request: AIPlanRequest) {
-  const knownCharacterNames = collectKnownCharacterNames(
-    request.bookOutline,
-    request.volumeOutline,
-    request.volumeGoal,
-    request.chapterBeat,
-    request.nextChapterPreview,
-    request.previousSummary,
-    request.contextBundle,
-  );
+  const knownCharacterNames = collectKnownCharacterNames({
+    requiredEntityNames: request.requiredEntityNames,
+    fallbackSources: [
+      request.bookOutline,
+      request.volumeOutline,
+      request.volumeGoal,
+      request.chapterBeat,
+      request.nextChapterPreview,
+      request.previousSummary,
+      request.contextBundle,
+    ],
+  });
   const knownCharacterBlock = buildKnownCharacterAnchorBlock('已知人物锚点：', knownCharacterNames);
+  const requiredEntityCardBlock = buildRequiredEntityCardBlock(
+    request.requiredEntityNames,
+    request.entitySnapshot,
+  );
+  const requiredForeshadowBlock = buildRequiredForeshadowConstraintBlock({
+    requiredForeshadowTitles: request.requiredForeshadowTitles,
+    foreshadowSnapshots: request.foreshadowSnapshot,
+  });
   const sections = [
     `项目：${request.projectTitle || '未命名项目'}`,
     `章节标题：${request.chapterTitle || '未命名章节'}`,
     request.projectDescription ? `项目简介：${request.projectDescription}` : '',
-    request.bookOutline ? `【全书大纲】\n${request.bookOutline}` : '',
-    request.volumeOutline ? `【当前卷大纲】\n${request.volumeOutline}` : '',
-    request.volumeGoal ? `【当前卷目标】\n${request.volumeGoal}` : '',
+    request.bookOutline ? `【全书短摘要】\n${request.bookOutline}` : '',
+    request.volumeOutline ? `【当前卷短摘要】\n${request.volumeOutline}` : '',
+    request.volumeGoal ? `【当前阶段短摘要】\n${request.volumeGoal}` : '',
     request.chapterBeat ? `【本章节拍】\n${request.chapterBeat}` : '',
     request.nextChapterPreview ? `【下章预告】\n${request.nextChapterPreview}` : '',
     request.forbiddenZone ? `【本章禁区】\n${request.forbiddenZone}` : '',
@@ -2191,9 +3095,17 @@ function buildPlanPrompt(request: AIPlanRequest) {
     request.worldState ? `当前世界状态：${request.worldState}` : '',
     request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
     knownCharacterBlock,
+    request.requiredEntityNames && request.requiredEntityNames.length > 0
+      ? `本章必须重点落地实体：${request.requiredEntityNames.join('、')}`
+      : '',
+    request.requiredForeshadowTitles && request.requiredForeshadowTitles.length > 0
+      ? `本章必须重点落地伏笔：${request.requiredForeshadowTitles.join('、')}`
+      : '',
+    requiredEntityCardBlock,
+    requiredForeshadowBlock,
     '',
     '请输出一个严格的章节 Context Contract，使用 JSON 对象，不要输出 Markdown。',
-    '字段要求：goal, obstacle, cost, beats, timeAnchor, chapterTimeSpan, gapFromPrevious, strand, hookType, hookStrength, immutableFacts。',
+    '字段要求：goal, obstacle, cost, beats, timeAnchor, chapterTimeSpan, gapFromPrevious, strand, hookType, hookStrength, immutableFacts，以及 chapterFunction, chapterBoundary, revealCeiling, openingState, closingState, focusCharacter, mustAppearCharacters, availableCharacters, mainPlot, subPlot, coreScene, sceneAnchors, infoBudget, powerShift, personalConflict, emotionalOutcome, chapterHook, generationModeHint, sceneDecisionNote, foreshadowRefs, sceneDrafts, beatDrafts。',
     '其中：',
     '- goal / obstacle / cost 各控制在 20 字左右',
     '- beats 默认为 2 到 3 条；只有明确是复杂动作章、多方交锋章或高密度转换章时才允许写到 4 条',
@@ -2202,28 +3114,188 @@ function buildPlanPrompt(request: AIPlanRequest) {
     '- beats 必须服务于本章节拍中的场景功能、新意要求和章节钩子',
     '- 至少一条 beat 要对应可感知的有效变化，不能所有 beat 都停留在观察、试探、确认和收束',
     '- 一章内至少要落实两项可验证推进：信息揭晓、关系位移、资源变化、风险升级、行动决策、局势变化、地位变化，不能只在同一层情绪里打转',
-    knownCharacterNames.length > 0
-      ? `- 规划时优先复用已知人物锚点：${knownCharacterNames.join('、')}，不得无故改名或换一个新名字去承担原有人物功能`
-      : '- 若必须新增人物，请在 beats 中安排其身份、关系和进场动机，不要只抛姓名',
-    '- 如果本章是过渡章，可以没有硬爆点，但必须明确软推进已经完成了什么，以及下章行动是如何被推出去的',
-    '- 若本章节拍给出了能力变化幅度，beats 必须安排其触发条件、限制兑现与代价，不能只写“突然变强”的结果',
-    '- 若提供了下章预告，本章只负责把读者推向下章，不要提前写完下章的核心推进',
-    '- 若提供了本章禁区，beats 中不得安排禁区里的重复场景模板或高频表达',
-    '- 若上下文中出现“资源连续性”记录，beats 不得默认已见底、被扣或耗尽的物资依然可用',
-    '- strand 只能是 quest / fire / constellation',
-    '- hookStrength 只能是 soft / medium / strong',
-    '- immutableFacts 为本章绝不能违背的事实列表',
+      knownCharacterNames.length > 0
+        ? `- 规划时优先复用已知人物锚点：${knownCharacterNames.join('、')}，不得无故改名或换一个新名字去承担原有人物功能`
+        : '- 若必须新增人物，请在 beats 中安排其身份、关系和进场动机，不要只抛姓名',
+      requiredEntityCardBlock
+        ? '- 若【重点实体卡片】给出了身份、欲望、关系、限制或当前目标，相关 beat 必须把其中至少 1 到 2 条具体事实落成场景，不能只写名字'
+        : '',
+      '- 如果本章是过渡章，可以没有硬爆点，但必须明确软推进已经完成了什么，以及下章行动是如何被推出去的',
+      '- 若本章节拍给出了能力变化幅度，beats 必须安排其触发条件、限制兑现与代价，不能只写“突然变强”的结果',
+      '- 若本章更适合一场完整戏写完，请把 generationModeHint 设为 single-scene-chapter，并补一条 sceneDecisionNote 说明原因',
+      '- sceneDrafts 为正文生成的主控结构；若只规划一个 scene，也要明确其 goal / obstacle / result / hook / actors / availableCharacters / beatRefs',
+      '- 若提供了下章预告，本章只负责把读者推向下章，不要提前写完下章的核心推进',
+      '- 若提供了本章禁区，beats 中不得安排禁区里的重复场景模板或高频表达',
+      '- 若上下文中出现“资源连续性”记录，beats 不得默认已见底、被扣或耗尽的物资依然可用',
+      '- 若【当前卷短摘要】、里程碑、章纲控制或【重点伏笔约束】中已经给出“伏笔引用：某条伏笔（action/intensity | note）”，输出的 foreshadowRefs 与 beatDrafts.foreshadowRefs 必须继承这些 action / intensity / note，不能降级成只写标题',
+      '- 同一条伏笔如果卷纲、里程碑、章纲同时出现，优先级按章纲 > 里程碑 > 卷纲；越靠近本章的约束越优先',
+      '- heavy 强度的伏笔必须成为本章显性推进点之一；medium 必须有明确可感知推进；light 也必须让读者感知到，而不是完全消失',
+      '- strand 只能是 quest / fire / constellation',
+      '- hookStrength 只能是 soft / medium / strong',
+      '- immutableFacts 为本章绝不能违背的事实列表',
+    '- foreshadowRefs 为数组，每项字段包含 foreshadowId, foreshadowTitle, action, intensity, note；若只知道标题，也可以先给 foreshadowTitle，foreshadowId 留空字符串',
+    '- generationModeHint 只能是 single-scene-chapter 或 scene-by-scene',
+    '- sceneDecisionNote 用一句话说明为什么本章要按这个场景组织方式写',
+    '- sceneDrafts 为数组，每项字段包含 sceneId, sceneTitle, macroScene, sceneRole, sceneGoal, sceneObstacle, sceneTimeSpan, scenePacing, sceneResult, sceneHook, estimatedWords, actors, availableCharacters, sceneAnchors, infoBudget, powerShift, personalConflict, foreshadowRefs, forbiddenNotes, beatRefs',
+    '- sceneDrafts[].actors 为对象数组，每项字段包含 characterId, role, sceneFocus, sceneTask；role 只能是 focus 或 support',
+    '- sceneDrafts[].availableCharacters 为对象数组，每项字段包含 characterId, role, weakHint；role 固定为 candidate',
+    '- beatDrafts 为数组，每项字段包含 beatId, sceneId, beatTitle, scene, anchors, actors, progress, result, entityRefs, foreshadowRefs, forbiddenNotes',
   ].filter(Boolean);
 
   return sections.join('\n');
 }
 
+function formatForeshadowRefLine(ref: ForeshadowRef) {
+  const title = ref.foreshadowTitle?.trim() || ref.foreshadowId.trim();
+  const suffix = [`${ref.action}/${ref.intensity}`, sanitizeString(ref.note)].filter(Boolean).join(' | ');
+  return suffix ? `${title}（${suffix}）` : title;
+}
+
+function getOutlineSceneDrafts(outline: ChapterOutlineDraft) {
+  return outline.sceneDrafts ?? [];
+}
+
+function getSceneWriteBeatDrafts(outline: ChapterOutlineDraft, scene: ChapterSceneDraft | null) {
+  if (!scene) {
+    return [] as ChapterOutlineBeatDraft[];
+  }
+
+  const beatDrafts = outline.beatDrafts ?? [];
+
+  if (scene.beatRefs.length > 0) {
+    const beatRefSet = new Set(scene.beatRefs.map((item) => item.trim()).filter(Boolean));
+    const matchedByBeatId = beatDrafts.filter((beat) => beat.beatId && beatRefSet.has(beat.beatId));
+
+    if (matchedByBeatId.length > 0) {
+      return matchedByBeatId;
+    }
+  }
+
+  if (scene.sceneId) {
+    const matchedBySceneId = beatDrafts.filter((beat) => beat.sceneId === scene.sceneId);
+
+    if (matchedBySceneId.length > 0) {
+      return matchedBySceneId;
+    }
+  }
+
+  if (getOutlineSceneDrafts(outline).length <= 1) {
+    return beatDrafts;
+  }
+
+  return [] as ChapterOutlineBeatDraft[];
+}
+
+function buildSceneControlBlock(scene: ChapterSceneDraft | null, outline: ChapterOutlineDraft) {
+  if (!scene) {
+    return '';
+  }
+
+  return [
+    scene.sceneTitle ? `场景标题：${scene.sceneTitle}` : '',
+    scene.macroScene ? `场景空间：${scene.macroScene}` : '',
+    scene.sceneRole ? `场景作用：${scene.sceneRole}` : '',
+    scene.sceneGoal ? `场景目标：${scene.sceneGoal}` : '',
+    scene.sceneObstacle ? `场景阻力：${scene.sceneObstacle}` : '',
+    scene.sceneTimeSpan ? `场景跨度：${scene.sceneTimeSpan}` : '',
+    scene.scenePacing ? `场景节奏：${scene.scenePacing}` : '',
+    scene.sceneResult ? `预期结果：${scene.sceneResult}` : '',
+    scene.sceneHook ? `场景钩子：${scene.sceneHook}` : '',
+    scene.estimatedWords > 0 ? `预计字数：${scene.estimatedWords}` : '',
+    scene.actors.length > 0 ? `参与角色：${scene.actors.map((actor) => formatSceneActorLabel(actor)).filter(Boolean).join('、')}` : '',
+    scene.availableCharacters.length > 0
+      ? `可出场候选：${scene.availableCharacters.map((actor) => formatSceneActorLabel(actor)).filter(Boolean).join('、')}`
+      : '',
+    scene.sceneAnchors.length > 0 ? `场景锚点：${scene.sceneAnchors.join('；')}` : '',
+    scene.infoBudget ? `信息预算：${scene.infoBudget}` : '',
+    scene.powerShift ? `力量变化：${scene.powerShift}` : '',
+    scene.personalConflict ? `人身冲突点：${scene.personalConflict}` : '',
+    scene.forbiddenNotes.length > 0 ? `场景禁区：${scene.forbiddenNotes.join('；')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildOutlineControlBlock(outline: ChapterOutlineDraft) {
+  const hasSceneDrafts = (outline.sceneDrafts?.length ?? 0) > 0;
+  const lines = [
+    outline.goal?.trim() ? `章节目标：${outline.goal.trim()}` : '',
+    outline.chapterFunction?.trim() ? `本章功能：${outline.chapterFunction.trim()}` : '',
+    outline.generationModeHint === 'single-scene-chapter'
+      ? '写作模式：单场景直出整章'
+      : (outline.sceneDrafts?.length ?? 0) > 1 || outline.generationModeHint === 'scene-by-scene'
+        ? '写作模式：按场景推进'
+        : '',
+    outline.sceneDecisionNote?.trim() ? `场景决策说明：${outline.sceneDecisionNote.trim()}` : '',
+    outline.chapterBoundary?.trim() ? `章节边界：${outline.chapterBoundary.trim()}` : '',
+    outline.revealCeiling?.trim() ? `揭露上限：${outline.revealCeiling.trim()}` : '',
+    outline.openingState?.trim() ? `开章状态：${outline.openingState.trim()}` : '',
+    outline.closingState?.trim() ? `收章状态：${outline.closingState.trim()}` : '',
+    outline.focusCharacter?.trim() ? `焦点角色：${outline.focusCharacter.trim()}` : '',
+    (outline.mustAppearCharacters?.length ?? 0) > 0 ? `必须出场：${outline.mustAppearCharacters!.join('；')}` : '',
+    !hasSceneDrafts && (outline.availableCharacters?.length ?? 0) > 0 ? `可出场候选：${outline.availableCharacters!.join('；')}` : '',
+    outline.mainPlot?.trim() ? `主线推进：${outline.mainPlot.trim()}` : '',
+    outline.subPlot?.trim() ? `支线推进：${outline.subPlot.trim()}` : '',
+    !hasSceneDrafts && outline.coreScene?.trim() ? `核心场景：${outline.coreScene.trim()}` : '',
+    !hasSceneDrafts && (outline.sceneAnchors?.length ?? 0) > 0 ? `场景锚点：${outline.sceneAnchors!.join('；')}` : '',
+    !hasSceneDrafts && outline.infoBudget?.trim() ? `信息预算：${outline.infoBudget.trim()}` : '',
+    !hasSceneDrafts && outline.powerShift?.trim() ? `力量变化：${outline.powerShift.trim()}` : '',
+    !hasSceneDrafts && outline.personalConflict?.trim() ? `人身冲突点：${outline.personalConflict.trim()}` : '',
+    outline.emotionalOutcome?.trim() ? `情绪落点：${outline.emotionalOutcome.trim()}` : '',
+    !hasSceneDrafts && outline.chapterHook?.trim() ? `章节钩子：${outline.chapterHook.trim()}` : '',
+    !hasSceneDrafts && (outline.foreshadowRefs?.length ?? 0) > 0
+      ? `伏笔安排：${outline.foreshadowRefs!.map((item) => formatForeshadowRefLine(item)).join('；')}`
+      : '',
+  ].filter(Boolean);
+
+  if ((outline.sceneDrafts?.length ?? 0) > 0) {
+    const includeSceneList = (outline.sceneDrafts?.length ?? 0) > 1;
+
+    if (includeSceneList) {
+    lines.push(
+      [
+        '场景清单：',
+        ...outline.sceneDrafts!.map((scene, index) =>
+          `${index + 1}. ${[
+            scene.sceneTitle || `场景${index + 1}`,
+            scene.sceneGoal ? `目标：${scene.sceneGoal}` : '',
+            scene.sceneResult ? `结果：${scene.sceneResult}` : '',
+            scene.sceneHook ? `钩子：${scene.sceneHook}` : '',
+          ]
+            .filter(Boolean)
+            .join(' / ')}`,
+        ),
+      ].join('\n'),
+    );
+    }
+  }
+
+  if (!hasSceneDrafts && (outline.beatDrafts?.length ?? 0) > 0) {
+    lines.push(
+      [
+        '场景内部推进骨架：',
+        ...outline.beatDrafts!.map((beat, index) =>
+          `${index + 1}. ${[
+            beat.beatTitle,
+            beat.progress,
+            beat.result ? `结果：${beat.result}` : '',
+            beat.scene ? `场景：${beat.scene}` : '',
+          ]
+            .filter(Boolean)
+            .join(' / ')}`,
+        ),
+      ].join('\n'),
+    );
+  }
+
+  return lines.join('\n');
+}
+
 function buildExtractPrompt(request: AIExtractRequest) {
   const sections = [
     `章节标题：${request.chapterTitle || '未命名章节'}`,
-    request.chapterBeat ? `【本章节拍】\n${request.chapterBeat}` : '',
+    request.chapterBeat ? `【提取护栏】\n${request.chapterBeat}` : '',
     request.currentStateTable?.trim() ? request.currentStateTable.trim() : '',
-    request.loreSummary ? `当前设定摘要：${request.loreSummary}` : '',
     '',
     '请根据正文提取章节摘要、状态变更和主导 strand，输出 JSON，不要输出 Markdown。',
     'JSON 字段要求：summary, stateChanges, strand。',
@@ -2239,6 +3311,7 @@ function buildExtractPrompt(request: AIExtractRequest) {
     '- 如果正文里只是一次性爆发或短时增幅，不要误写成永久提升；应在 newValue 里保留其时效和代价',
     '- 对敌方或环境暴露出的限制条件，也应写入 stateChanges，例如“芦湾灰影 / 限制条件 / 无 / 被破渔网缠身，转身受阻”',
     '- strand 只能是 quest / fire / constellation',
+    '- 只根据正文与提取护栏提取，不要脑补正文里未写出的变化或额外设定',
     '',
     '正文如下：',
     request.content,
@@ -2250,49 +3323,98 @@ function buildExtractPrompt(request: AIExtractRequest) {
 function buildWritePrompt(request: AIWriteRequest) {
   const completedText = request.previousText?.trim() || '';
   const outline = request.outline;
-  const knownCharacterNames = collectKnownCharacterNames(
-    request.bookOutline,
-    request.volumeOutline,
-    request.volumeGoal,
-    request.chapterBeat,
-    request.nextChapterPreview,
-    request.previousSummary,
-    request.contextBundle,
-    completedText,
-  );
-  const knownCharacterBlock = buildKnownCharacterAnchorBlock('已知人物锚点：', knownCharacterNames);
+  const sceneDrafts = getOutlineSceneDrafts(outline);
+  const currentScene = sceneDrafts[request.beatIndex] ?? (sceneDrafts.length === 1 ? sceneDrafts[0] : null);
+  const currentSceneBeats = getSceneWriteBeatDrafts(outline, currentScene);
+  const isSceneDriven = sceneDrafts.length > 0;
+  const isSingleSceneChapter = currentScene !== null && sceneDrafts.length === 1;
+  const currentSceneLabel =
+    currentScene?.sceneTitle ||
+    currentScene?.sceneRole ||
+    (isSceneDriven ? `场景 ${request.beatIndex + 1}` : '');
+  const sceneControlBlock = buildSceneControlBlock(currentScene, outline);
+  const outlineControlBlock = buildOutlineControlBlock(outline);
+  const knownCharacterNames = collectKnownCharacterNames({
+    outline,
+    currentScene,
+    requiredEntityNames: request.requiredEntityNames,
+    fallbackSources: [
+      request.bookOutline,
+      request.volumeOutline,
+      request.volumeGoal,
+      request.chapterBeat,
+      outlineControlBlock,
+      request.nextChapterPreview,
+      request.previousSummary,
+      request.contextBundle,
+      completedText,
+    ],
+  });
+  const requiredEntityCardBlock =
+    buildSceneRoleEntityCardBlock(currentScene, request.entitySnapshot)
+    || buildRequiredEntityCardBlock(request.requiredEntityNames, request.entitySnapshot);
+  const knownCharacterBlock =
+    (request.requiredEntityNames?.length ?? 0) > 0 || requiredEntityCardBlock
+      ? ''
+      : buildKnownCharacterAnchorBlock('已知人物锚点：', knownCharacterNames);
+  const requiredForeshadowBlock = buildRequiredForeshadowConstraintBlock({
+    requiredForeshadowTitles: request.requiredForeshadowTitles,
+    outline: request.outline,
+    foreshadowSnapshots: request.foreshadowSnapshot,
+  });
   const sections = [
     `项目：${request.projectTitle || '未命名项目'}`,
     request.projectDescription ? `项目简介：${request.projectDescription}` : '',
-    request.bookOutline ? `【全书大纲】\n${request.bookOutline}` : '',
-    request.volumeOutline ? `【当前卷大纲】\n${request.volumeOutline}` : '',
-    request.volumeGoal ? `【当前卷目标】\n${request.volumeGoal}` : '',
+    request.bookOutline ? `【全书短摘要】\n${request.bookOutline}` : '',
+    request.volumeOutline ? `【当前卷短摘要】\n${request.volumeOutline}` : '',
+    request.volumeGoal ? `【当前阶段短摘要】\n${request.volumeGoal}` : '',
     request.chapterBeat ? `【本章节拍】\n${request.chapterBeat}` : '',
     request.nextChapterPreview ? `【下章预告】\n${request.nextChapterPreview}` : '',
     request.forbiddenZone ? `【本章禁区】\n${request.forbiddenZone}` : '',
+    outlineControlBlock ? `【章纲控制】\n${outlineControlBlock}` : '',
     request.currentStateTable?.trim() ? request.currentStateTable.trim() : '',
     `章节标题：${request.chapterTitle || '未命名章节'}`,
     `当前 Strand：${outline.strand}`,
-    `章节目标：${outline.goal}`,
-    `主要阻力：${outline.obstacle}`,
-    `代价：${outline.cost}`,
-    `时间锚点：${outline.timeAnchor}`,
-    `章节跨度：${outline.chapterTimeSpan}`,
-    `与上章间隔：${outline.gapFromPrevious}`,
+    outline.obstacle ? `主要阻力：${outline.obstacle}` : '',
+    outline.cost ? `代价：${outline.cost}` : '',
+    outline.timeAnchor ? `时间锚点：${outline.timeAnchor}` : '',
+    outline.chapterTimeSpan ? `章节跨度：${outline.chapterTimeSpan}` : '',
+    outline.gapFromPrevious ? `与上章间隔：${outline.gapFromPrevious}` : '',
     outline.immutableFacts.length > 0 ? `不可变事实：${outline.immutableFacts.join('；')}` : '',
     request.previousSummary ? `上一章摘要：${request.previousSummary}` : '',
     request.worldState ? `当前世界状态：${request.worldState}` : '',
     request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
     knownCharacterBlock,
-    request.availableCharacterNames && request.availableCharacterNames.length > 0
-      ? `可出场候选：${request.availableCharacterNames.join('、')}`
-      : '',
+    requiredEntityCardBlock,
+    requiredForeshadowBlock,
     request.rewriteGuidance
       ? ['上一轮审查打回反馈：', request.rewriteGuidance, '本轮重写必须优先修复以上问题，不能重复犯错。'].join('\n')
       : '',
     '',
-    `当前要写第 ${request.beatIndex + 1} 个 beat：${request.currentBeat}`,
-    `本章 beats 全列表：${outline.beats.join(' | ')}`,
+    isSceneDriven
+      ? `当前要写第 ${request.beatIndex + 1} 个场景：${currentSceneLabel || request.currentBeat}`
+      : `当前要写第 ${request.beatIndex + 1} 个 beat：${request.currentBeat}`,
+    isSceneDriven
+      ? sceneDrafts.length > 1
+        ? `本章场景全列表：${outline.beats.join(' | ')}`
+        : ''
+      : `本章 beats 全列表：${outline.beats.join(' | ')}`,
+    sceneControlBlock ? `【当前场景控制】\n${sceneControlBlock}` : '',
+    currentSceneBeats.length > 0
+      ? [
+          '【场景内部 beats 骨架】',
+          ...currentSceneBeats.map((beat, index) =>
+            `${index + 1}. ${[
+              beat.beatTitle || `Beat ${index + 1}`,
+              beat.progress ? `推进：${beat.progress}` : '',
+              beat.result ? `结果：${beat.result}` : '',
+              beat.scene ? `场景：${beat.scene}` : '',
+            ]
+              .filter(Boolean)
+              .join(' / ')}`,
+          ),
+        ].join('\n')
+      : '',
     '',
     completedText
       ? [
@@ -2302,34 +3424,23 @@ function buildWritePrompt(request: AIWriteRequest) {
       : '当前是本章开头，请直接进入场景与冲突。',
     '',
     '请输出这一段正文片段本身，不要解释，不要使用 Markdown，不要输出标题。',
-    '要求：',
-    '- 输出 2 到 4 段自然正文',
-    '- 单次长度控制在约 800 到 1200 字；除非本 beat 明确是极短过桥段，否则不要写成 600 字上下的轻量碎片',
-    '- 若本章共有 2 到 3 个 beats，整章累计字数通常应落在 2200 到 3200 字区间；宁可用新信息、新动作、新结果充实，也不要靠重复说明凑字数',
-    '- 必须推进当前 beat，但不要一次写完所有后续 beats',
-    '- 每个 beat 至少要落下一项硬结果或软结果，例如发现真相、逼出态度、拿到资源、失去筹码、关系偏移、危险坐实、行动条件改变，不能写完后局势与入场时几乎一样',
-    '- 如果当前要写的是章节开头，不要默认用“夜色 / 月光 / 油灯 / 门闩 / 米缸 / 守着器物 / 压低呼吸”这类模板起笔；优先从动作、对话、外部打断或结果切入',
-    '- 如果前文已经写过夜里守物、月下试法或缸边藏物，本章开头必须换一个入口，不得继续用同一套夜景与守物模板复写',
-    knownCharacterNames.length > 0
-      ? `- 已知人物锚点如下：${knownCharacterNames.join('、')}。正文优先复用这些名字，不得无故改名、换名、拆人或临时造出承担同一功能的新角色`
-      : '- 若当前上下文尚无固定人物名，新增具名人物时必须同步交代身份、关系与当下意图',
-    request.availableCharacterNames && request.availableCharacterNames.length > 0
-      ? `- 若本章提供了可出场候选 ${request.availableCharacterNames.join('、')}，不要让焦点角色独自承担全部信息揭示、对话冲突和动作执行；可让候选人物分担场面功能，但不得挤掉必须出场人物`
+    isSceneDriven
+      ? '本次生成单位是一个完整场景，不是单独 beat。'
       : '',
-    '- 同一角色在短距离内不要重复表达同一层命令、禁令、判断或立场；一句话说明后，下一句应推进动作、代价、分工或外部反应',
-    '- 一个结果一旦已经落地，下一段直接写连锁变化，不要再用大段旁白或心理活动重复解释“这意味着什么”',
-    '- 心理活动只负责给动作加一层压力或动机，不要连续两段都停在“他明白了 / 他知道了 / 他心里一沉 / 他终于意识到”这类解释性内心上',
-    '- 如果【本章节拍】写了能力变化幅度，只能在这个幅度内推进；小幅进步不能写成突然碾压，短时爆发不能写成稳定常态',
-    '- 如果【本章节拍】写了敌方或环境限制条件，正文必须让这些限制真实生效，不能写到一半就忘掉',
-    '- 如果本章出现吐血、脱力、伤势加重、器具过载等代价，后文必须延续，不得同章内无解释归零',
-    '- 每一段都必须有新的信息增量，禁止连续两段表达同一个判断或同一层情绪',
-    '- 若首次引入具名人物，首次出现后的 1 到 2 句内必须交代其身份、与主角关系、当下意图或为何此刻会出现在场',
-    '- 章节结尾必须把读者推向下一个更具体的问题、选择、风险或收益，不能只把前文担忧再说一遍',
-    '- 严禁复用【本章禁区】中的高频词、动作模板、重复模板和旧章法',
-    '- 尽量少用比喻、总结句、解释句，优先用具体动作、对话、环境反馈推进',
-    '- 若【当前状态表】里某个关键物件已经损毁、失效、遗失或被夺，正文不得直接祭出、挥动、催动、取出或继续使用它；除非先交代修复、找回、重铸或重新取得的过程',
-    '- 若上下文里写明盐、粮、药、钱、关键器具或关键物件已被扣、见底、耗尽、损毁、失效或丢失，正文不得直接继续使用；除非先交代补给、修复、找回或替代来源',
-    '- 输出前自检：如果出现“像 / 低声 / 伸手 / 抬手 / 没立刻”这类禁区词，或出现摸黑试探、发现异物后立刻封口、父辈收束总结等模板，必须先改写再输出',
+    isSceneDriven && currentSceneBeats.length > 0
+      ? '请以 scene 为主控完成正文。下列 beats 仅作为本场内部推进骨架，要求：\n1. 按顺序覆盖这些 beats；\n2. 每个 beat 都要落地其 progress 与 result；\n3. 但不要把 beats 写成小标题、分条作文或机械三段式；\n4. 允许多个 beats 在同一段内自然衔接；\n5. 场景节奏、气口和情绪连续性优先于 beat 的表面切分。'
+      : '',
+    '要求：',
+    isSingleSceneChapter ? '- 输出完整一章，约 2200 到 3200 字。' : '- 输出完整当前场景。',
+    isSceneDriven
+      ? isSingleSceneChapter
+        ? '- 当前这是本章唯一 scene，必须把这一场完整写完，并让章节自然收在 sceneResult / sceneHook 上。'
+        : '- 必须完整推进当前 scene，但不要越过后续 scene 的主要结果。'
+      : '- 必须推进当前 beat，但不要一次写完所有后续 beats',
+    '- beats 只是内部推进骨架，不要写成三段式作文。',
+    completedText ? '' : '- 当前是本章开头，直接进入场景与冲突。',
+    '- 不要标题、解释、Markdown。',
+    '- 自然收在 sceneResult / sceneHook。',
     '- 保持人物状态、设定边界、节奏与当前 strand 一致',
   ].filter(Boolean);
 
@@ -2337,61 +3448,48 @@ function buildWritePrompt(request: AIWriteRequest) {
 }
 
 function buildReviewPrompt(request: AIReviewRequest) {
-  const knownCharacterNames = collectKnownCharacterNames(
-    request.bookOutline,
-    request.volumeOutline,
-    request.chapterBeat,
-    request.previousSummary,
-    request.contextBundle,
+  const reviewGuardBlock = buildReviewGuardBlock(request.outline);
+  const terminologyWhitelistBlock = buildTerminologyWhitelistBlock({
+    outline: request.outline ?? null,
+    requiredEntityNames: request.requiredEntityNames,
+    availableCharacterNames: request.availableCharacterNames,
+    requiredForeshadowTitles: request.requiredForeshadowTitles,
+    relationSnapshot: request.relationSnapshot,
+  });
+  const requiredEntityCardBlock = buildRequiredEntityCardBlock(
+    request.requiredEntityNames,
+    request.entitySnapshot,
   );
-  const knownCharacterBlock = buildKnownCharacterAnchorBlock('已知人物锚点：', knownCharacterNames);
+  const requiredForeshadowBlock = buildRequiredForeshadowConstraintBlock({
+    requiredForeshadowTitles: request.requiredForeshadowTitles,
+    outline: request.outline ?? null,
+    foreshadowSnapshots: request.foreshadowSnapshot,
+  });
+  const relationBlock = request.relationSnapshot && request.relationSnapshot.some((relation) => !relation.draft)
+    ? `【显式关系约束】\n${request.relationSnapshot
+        .filter((relation) => !relation.draft)
+        .slice(0, 6)
+        .map((relation) => `${relation.sourceEntityName}-${relation.targetEntityName}（${relation.relationType}${relation.currentStance ? ` / ${relation.currentStance}` : ''}）`)
+        .join('；')}`
+    : '';
   const sections = [
-    `项目：${request.projectTitle || '未命名项目'}`,
     `章节标题：${request.chapterTitle || '未命名章节'}`,
-    request.projectDescription ? `项目简介：${request.projectDescription}` : '',
-    request.bookOutline ? `【全书大纲】\n${request.bookOutline}` : '',
-    request.volumeOutline ? `【当前卷大纲】\n${request.volumeOutline}` : '',
     request.chapterBeat ? `【本章节拍】\n${request.chapterBeat}` : '',
+    reviewGuardBlock,
     request.currentStateTable?.trim() ? request.currentStateTable.trim() : '',
     request.previousSummary ? `上一章摘要：${request.previousSummary}` : '',
-    request.worldState ? `当前世界状态：${request.worldState}` : '',
-    request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
-    knownCharacterBlock,
-    request.requiredEntityNames && request.requiredEntityNames.length > 0
-      ? `本章应重点落地人物：${request.requiredEntityNames.join('、')}`
-      : '',
-    request.availableCharacterNames && request.availableCharacterNames.length > 0
-      ? `可出场候选：${request.availableCharacterNames.join('、')}`
-      : '',
-    request.relationSnapshot && request.relationSnapshot.some((relation) => !relation.draft)
-      ? `已确认显式关系：${request.relationSnapshot
-          .filter((relation) => !relation.draft)
-          .slice(0, 4)
-          .map((relation) => `${relation.sourceEntityName}-${relation.targetEntityName}（${relation.relationType}${relation.currentStance ? ` / ${relation.currentStance}` : ''}）`)
-          .join('；')}`
-      : '',
-    request.outline
-      ? [
-          '章节契约：',
-          `- 目标：${request.outline.goal}`,
-          `- 阻力：${request.outline.obstacle}`,
-          `- 代价：${request.outline.cost}`,
-          `- Strand：${request.outline.strand}`,
-          `- Beats：${request.outline.beats.join(' | ')}`,
-          request.outline.immutableFacts.length > 0
-            ? `- 不可变事实：${request.outline.immutableFacts.join('；')}`
-            : '',
-        ]
-          .filter(Boolean)
-          .join('\n')
-      : '',
+    terminologyWhitelistBlock,
+    relationBlock,
+    requiredEntityCardBlock,
+    requiredForeshadowBlock,
     '',
     '你是小说生成流水线中的审查层，请以严格编辑视角评估本章草稿，输出 JSON，不要输出 Markdown。',
     'JSON 字段要求：summary, overallSeverity, needsRewrite, antiAiForceCheck, checkerResults。',
     '- overallSeverity 只能是 critical / high / medium / low',
     '- antiAiForceCheck 只能是 pass / fail',
-    '- checkerResults 固定包含 consistency / continuity / reader_pull 三项',
-    '- 每个 checker 字段包含 checker, score, summary, issues',
+    '- checkerResults 必须是数组，且固定按 consistency / continuity / reader_pull 顺序返回三项',
+    '- 每个 checker 对象字段包含 checker, score, summary, issues',
+    '- score 必须使用 0-100 整数分制，60 表示最低通过线，严禁使用 1-10 或 10 分制',
     '- issues 每项字段包含 severity, title, description, suggestion, evidence',
     '- 若没有明显问题，issues 返回空数组',
     '- 仅在必须打回重写时使用 critical 与 needsRewrite=true',
@@ -2413,15 +3511,21 @@ function buildReviewPrompt(request: AIReviewRequest) {
     '特别注意：如果同一角色在短距离内连续两句以上重复同一层命令、禁令、判断或立场，只是换个说法再讲一遍，应判为 continuity 或 reader_pull 问题。',
     '特别注意：如果一个结果已经明确成立，后续却连续用两段以上心理活动或旁白去反复解释其意义，而没有新的动作或局势变化，应判为 reader_pull 问题。',
     '特别注意：如果正文连续两段都主要由“他明白了 / 他知道了 / 他意识到 / 他心里一沉 / 他终于懂了”这类解释性心理活动组成，也应视为节奏空转。',
-    knownCharacterNames.length > 0
-      ? `特别注意：如果上下文已明确给出人物锚点 ${knownCharacterNames.join('、')}，正文却整段换成另一组新名字，或无故把原有人物改名、改姓、拆成功能重叠的新角色，应判为 consistency 或 continuity 问题。`
-      : '',
-    request.requiredEntityNames && request.requiredEntityNames.length > 0
-      ? `特别注意：如果本章规划要求 ${request.requiredEntityNames.join('、')} 出场，正文却完全没有落到这些人物，应判为 continuity 问题。`
-      : '',
-    request.relationSnapshot && request.relationSnapshot.some((relation) => !relation.draft)
-      ? '特别注意：如果已确认的显式关系角色在本章同场出现，却没有通过对白、动作、站位、选择或冲突体现关系状态，应判为 consistency 或 continuity 问题。'
-      : '',
+      terminologyWhitelistBlock
+        ? '特别注意：如果正文把【术语白名单】中的人物、称谓或关键术语无故改名、错写、替换或拆成另一组新名字，应判为 consistency 或 continuity 问题。'
+        : '',
+      requiredEntityCardBlock
+        ? '特别注意：如果正文只出现了重点实体的名字，却没有承接【重点实体卡片】中的身份、欲望、关系、限制或当前目标等具体事实，应判为 continuity 或 consistency 问题。'
+        : '',
+      request.requiredEntityNames && request.requiredEntityNames.length > 0
+        ? `特别注意：如果本章规划要求 ${request.requiredEntityNames.join('、')} 出场，正文却完全没有落到这些人物，应判为 continuity 问题。`
+        : '',
+      requiredForeshadowBlock
+        ? '特别注意：如果【章纲控制】或【重点伏笔约束】里把某条伏笔标成 advance / payoff / heavy，正文却只剩点名、完全不推进，或继续停在只埋不收，应判为 continuity 或 reader_pull 问题。'
+        : '',
+      request.relationSnapshot && request.relationSnapshot.some((relation) => !relation.draft)
+        ? '特别注意：如果已确认的显式关系角色在本章同场出现，却没有通过对白、动作、站位、选择或冲突体现关系状态，应判为 consistency 或 continuity 问题。'
+        : '',
     '特别注意：如果正文首次引入具名人物，却没有在首次出现后的 1 到 2 句内说明其身份、与主角关系、当下意图或为何在场，应判为 continuity 或 reader_pull 问题。',
     '特别注意：如果正文连续两段以上反复表达同一个判断、同一层情绪、同一条规矩或同一项担忧，即便措辞不同，也应判为 reader_pull 问题。',
     '特别注意：如果结尾只是把同一个问题再问一遍、只多出一个新名词、或只重复“危险还在后面”，没有形成新的行动压力、结果落点或外压升级，reader_pull 不得给高分。',
@@ -2435,26 +3539,17 @@ function buildReviewPrompt(request: AIReviewRequest) {
 }
 
 function buildLanguageQaPrompt(request: AILanguageQaRequest) {
+  const terminologyWhitelistBlock = buildTerminologyWhitelistBlock({
+    outline: request.outline ?? null,
+    requiredEntityNames: request.requiredEntityNames,
+    availableCharacterNames: request.availableCharacterNames,
+    requiredForeshadowTitles: request.requiredForeshadowTitles,
+    relationSnapshot: request.relationSnapshot,
+  });
   const sections = [
-    `项目：${request.projectTitle || '未命名项目'}`,
     `章节标题：${request.chapterTitle || '未命名章节'}`,
-    request.projectDescription ? `项目简介：${request.projectDescription}` : '',
-    request.bookOutline ? `【全书大纲】\n${request.bookOutline}` : '',
-    request.volumeOutline ? `【当前卷大纲】\n${request.volumeOutline}` : '',
-    request.chapterBeat ? `【本章节拍】\n${request.chapterBeat}` : '',
-    request.currentStateTable?.trim() ? request.currentStateTable.trim() : '',
+    terminologyWhitelistBlock,
     request.previousSummary ? `上一章摘要：${request.previousSummary}` : '',
-    request.worldState ? `当前世界状态：${request.worldState}` : '',
-    request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
-    request.outline
-      ? [
-          '章节契约：',
-          `- 目标：${request.outline.goal}`,
-          `- 阻力：${request.outline.obstacle}`,
-          `- 代价：${request.outline.cost}`,
-          `- Beats：${request.outline.beats.join(' | ')}`,
-        ].join('\n')
-      : '',
     '',
     '你是小说生成流水线中的独立语言校对检查器，只负责找语言层与局部逻辑层问题，不负责改文。',
     '请输出 JSON，不要输出 Markdown。',
@@ -2464,6 +3559,7 @@ function buildLanguageQaPrompt(request: AILanguageQaRequest) {
     '- issues 重点检查：错别字与误写、病句 / 残句 / 主语缺失、搭配不当 / 用词错误、局部逻辑矛盾、未铺垫专名突然出现、指代 / 称谓 / 局部关系错乱',
     '- 额外重点检查：感官搭配错误（例如把“听”用到“发亮”上）、语义冲突句、明显的口水句和僵硬搭配',
     '- 只报细粒度语言问题和局部幻觉，不要把整章节奏、爽点、钩子强度这类问题写进来',
+    '- 若正文出现【术语白名单】里的专名、称谓或关键术语，请把它们视为既有术语，不要误报为突兀新名词',
     '- evidence 尽量引用最短的原句片段，便于定位',
     '- 如果没有明显问题，issues 返回空数组，summary 简短说明即可',
     '',
@@ -2476,30 +3572,167 @@ function buildLanguageQaPrompt(request: AILanguageQaRequest) {
 
 function buildStylePrompt(request: AIStyleRequest) {
   const toneGuide = extractToneGuideFromBookOutline(request.bookOutline);
+  const styleGuardBlock = buildStyleGuardBlock(request.outline);
+  const normalizedStylePrompt = extractStyleTransferPrompt(request.stylePrompt);
   const sections = [
     `项目：${request.projectTitle || '未命名项目'}`,
     `章节标题：${request.chapterTitle || '未命名章节'}`,
-    request.projectDescription ? `项目简介：${request.projectDescription}` : '',
     toneGuide ? `全书基调：${toneGuide}` : '',
     request.previousSummary ? `上一章摘要：${request.previousSummary}` : '',
-    request.worldState ? `当前世界状态：${request.worldState}` : '',
-    request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
+    styleGuardBlock,
     '',
-    '你是小说流水线中的 Style Adaptation 层，请在不改变剧情事实、人物状态、信息顺序和核心冲突的前提下，对正文做文风转译。',
-    `目标文风要求：${request.stylePrompt}`,
+    '你是小说流水线中的 Style Adaptation 层，只负责对既有正文做文风转译，不负责续写、扩写或补剧情。',
+    '你只能调整句式节奏、叙述口吻、描写重心、对白气口与收束方式，不能改动事实层内容。',
+    `目标文风要求：${normalizedStylePrompt}`,
     '',
     '请输出 JSON，不要输出 Markdown。',
     '字段要求：content, summary, appliedChanges。',
     '- content 为转译后的完整正文',
     '- summary 为本次文风转译摘要',
     '- appliedChanges 为 1 到 6 条修改摘要',
-    '- 严禁新增设定、篡改事实、删掉关键剧情推进或改变人物关系',
+    '- 严禁新增设定、篡改事实、删掉关键剧情推进、重排信息顺序或改变人物关系',
+    '- 若目标文风要求与【事实护栏】冲突，以【事实护栏】为准',
     '',
     '原正文如下：',
     request.content,
   ].filter(Boolean);
 
   return sections.join('\n');
+}
+
+function buildEditorRefinePrompt(request: AIEditorRefineRequest) {
+  const reviewGuardBlock = buildReviewGuardBlock(request.outline);
+  const characterCardBlock = buildEditorRefineCharacterCardBlock({
+    outline: request.outline ?? null,
+    requiredEntityNames: request.requiredEntityNames,
+    entitySnapshots: request.entitySnapshot,
+  });
+  const sections = [
+    `章节标题：${request.chapterTitle || '未命名章节'}`,
+    '',
+    '请审阅并润色这章正文。',
+    '',
+    '要求：',
+    '1. 本章章纲 / 场景章纲是硬约束。',
+    '2. 卷纲、书纲、人物卡、上一章摘要只作为审阅参照，不得据此为本章新增设定、提前展开后文、提前兑现伏笔。',
+    '3. 如果原稿与本章章纲冲突，以本章章纲为准。',
+    '4. 如果原稿在异样、揭露、判断、伏笔落点、人物口气上写重、写早、写满了，请主动收回来。',
+    '5. 在不改变本章核心事实、事件顺序、人物状态和核心冲突的前提下，让整章更成熟、更自然、更像已出版成稿。',
+    '6. 不要解释分析，不要输出 Markdown。',
+    '',
+    '信息优先级：',
+    '1. 本章章纲 / 场景章纲',
+    '2. 原稿正文中已成立且未越线的事实',
+    '3. 当前出场人物卡',
+    '4. 卷纲',
+    '5. 书纲',
+    '6. 上一章摘要',
+    '若低优先级信息与高优先级信息冲突，一律服从高优先级信息。',
+    '',
+    '“已成立且未越线的事实”是指：',
+    '可直接由原稿观察到、且不与本章章纲 / 场景章纲冲突、且未超出本章揭示上限的信息。',
+    '',
+    '卷纲与书纲只用于：',
+    '- 判断本章在整卷、整书中的功能位置',
+    '- 判断人物当前阶段的认知、口气、成长刻度是否准确',
+    '- 判断伏笔、异样、揭示、能力、情绪是否写早、写重、写满',
+    '- 判断本章是否提前承担了后文章节才该承担的功能',
+    '',
+    '卷纲与书纲不得用于：',
+    '- 为本章新增原稿没有的设定',
+    '- 提前展开后文才该出现的关系、真相或世界说明',
+    '- 让角色说出当前阶段本不该知道的话',
+    '- 让本章抢写后文的高潮、反转或揭示',
+    '',
+    '上一章摘要只用于承接情绪、动作后势、关系状态，不得用于补设定、补世界说明或补隐含结论。',
+    '',
+    '你的判断顺序必须是：',
+    '1. 先检查本章是否完成本章章纲 / 场景章纲的功能',
+    '2. 再检查是否存在硬逻辑问题、证据不足却先下结论、信息支撑不够却判断过满',
+    '3. 再检查人物言行、判断尺度、说话方式是否符合本章出场人物的人设与当前成长阶段',
+    '4. 再检查伏笔揭示、异样力度、超自然感是否超出本章 reveal ceiling',
+    '5. 再检查节奏、段落推进、镜头稳定性与场景抓人效率',
+    '6. 最后统一语言风格、意象密度、句子着力点和尾音',
+    '',
+    '允许的编辑动作包括：',
+    '- 删去重复解释、过量判断、过满修辞',
+    '- 调整句序、段落衔接、镜头落点',
+    '- 收紧措辞，让判断更符合人物口径',
+    '- 微调细节以增强动作承载、场景抓手和职业质感',
+    '- 在不改变事实的前提下合并、压缩、提纯段落',
+    '',
+    '润色目标：',
+    '- 保留原稿已成立的情节、动作、信息顺序和作者气质',
+    '- 优先修复：逻辑口子、巧合感、解释过量、揭示过早、人物判断失真、文气失衡',
+    '- 让人物更像“在做事的人”，而不是“在替作者说话的人”',
+    '- 让文字更具体、更有承载物、更有场景抓手',
+    '- 让异样更像“隐约被听见”，而不是“超自然已经明示”',
+    '- 以提纯、收束、加固、压光为主，不以扩写篇幅为主',
+    '',
+    '硬性约束：',
+    '- 不新增重大设定',
+    '- 不新增后文才该出现的重要人物',
+    '- 不提前拔高超自然强度',
+    '- 不把含蓄改成解释',
+    '- 不把克制改成空灵文青腔',
+    '- 不把人物写成不符合本章人设的另一种人',
+    '- 不擅自改动本章核心功能和落点钩子',
+    '- 如果原稿已经越过本章章节边界或 reveal ceiling，必须主动收回，不得因“尊重原稿”而保留越线表达',
+    '- 除非必要，不扩写篇幅；以提纯、收束、加固为主',
+    '- 除非本章章纲缺失，否则不要依据卷级阶段信息、卷级伏笔规划或卷级边界改写本章',
+    '- 若本章章纲缺失，只能依据原稿正文与当前出场人物卡做保守润色，不得自行承担规划职责',
+    '- 若为第一章，不得因缺少上一章摘要而主动补设定、补世界说明、补人物前史',
+    '- 不得擅自改写、替换或统一原稿中已成立的专有名词、机构名、法器名、案名、人物名，除非本章章纲明确要求修正',
+    '',
+    '不要为了“出版感”把文字磨成均匀、平滑、无棱角的通用成稿。',
+    '优先保留原稿中有效的句子气口、动作节拍、冷感尾音和场景抓手；仅修失衡、重复、过满、越线之处。',
+    '',
+    '保留边界内的事实，回收边界外的表达。',
+    '',
+    '请输出 JSON。',
+    '字段要求：content, summary, antiAiForceCheck, majorAdjustments。',
+    '- content：润色后的正文',
+    '- antiAiForceCheck：pass / fail',
+    '- majorAdjustments：1 到 6 条重点调整',
+    '- majorAdjustments 只写真正影响成稿质量的调整，不写措辞级碎修，不重复 summary',
+    '- 只输出一个合法 JSON 对象，不要在前后附加说明文字',
+    '- 所有字段必须存在；majorAdjustments 无内容时返回空数组',
+    '',
+    reviewGuardBlock ? `【本章章纲 / 场景章纲】\n${reviewGuardBlock}` : '',
+    characterCardBlock ? `【当前出场人物卡】\n${characterCardBlock}` : '',
+    request.volumeOutline ? `【卷纲】\n${request.volumeOutline}` : '',
+    request.bookOutline ? `【书纲】\n${request.bookOutline}` : '',
+    request.previousSummary ? `【上一章摘要】\n${request.previousSummary}` : '',
+    '',
+    '【原稿正文】',
+    request.content,
+  ].filter(Boolean);
+
+  return sections.join('\n');
+}
+
+function resolveEditorRefineRequest(env: ServerEnv, request: AIEditorRefineRequest): AIEditorRefineRequest {
+  if (!env.editorRefineModel?.trim() && !env.editorRefineReasoningEffort) {
+    return request;
+  }
+
+  return {
+    ...request,
+    model: env.editorRefineModel?.trim() || request.model,
+    reasoningEffort: env.editorRefineReasoningEffort ?? request.reasoningEffort,
+  };
+}
+
+function resolveEditorRefineRuntimeOverride(env: ServerEnv): ChatRuntimeOverride | undefined {
+  if (!env.editorRefineApiKey?.trim() && !env.editorRefineBaseUrl?.trim() && !env.editorRefineProvider) {
+    return undefined;
+  }
+
+  return {
+    apiKey: env.editorRefineApiKey?.trim() || undefined,
+    baseUrl: env.editorRefineBaseUrl?.trim() || undefined,
+    provider: env.editorRefineProvider,
+  };
 }
 
 function buildPolishPrompt(request: AIPolishRequest) {
@@ -2543,32 +3776,30 @@ function buildPolishPrompt(request: AIPolishRequest) {
         .join('\n\n')
     : '暂无明确语言校对问题，但仍需人工顺读一遍语句。';
 
+  const polishGuardBlock = request.outline
+    ? [
+        request.outline.goal ? `章节目标：${request.outline.goal}` : '',
+        request.outline.chapterBoundary ? `章节边界：${request.outline.chapterBoundary}` : '',
+        request.outline.revealCeiling ? `揭露上限：${request.outline.revealCeiling}` : '',
+        request.outline.openingState ? `开章状态：${request.outline.openingState}` : '',
+        request.outline.closingState ? `收章状态：${request.outline.closingState}` : '',
+        request.outline.immutableFacts.length > 0
+          ? `不可变事实：${request.outline.immutableFacts.join('；')}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : '';
   const sections = [
-    `项目：${request.projectTitle || '未命名项目'}`,
     `章节标题：${request.chapterTitle || '未命名章节'}`,
-    request.projectDescription ? `项目简介：${request.projectDescription}` : '',
     request.previousSummary ? `上一章摘要：${request.previousSummary}` : '',
-    request.worldState ? `当前世界状态：${request.worldState}` : '',
-    request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
-    request.outline
-      ? [
-          '章节契约：',
-          `- 目标：${request.outline.goal}`,
-          `- 阻力：${request.outline.obstacle}`,
-          `- 代价：${request.outline.cost}`,
-          `- Strand：${request.outline.strand}`,
-          request.outline.immutableFacts.length > 0
-            ? `- 不可变事实：${request.outline.immutableFacts.join('；')}`
-            : '',
-        ]
-          .filter(Boolean)
-          .join('\n')
-      : '',
+    polishGuardBlock ? `【定稿护栏】\n${polishGuardBlock}` : '',
     '',
     '请对以下章节正文做定稿润色，目标是：',
     '1. 保留所有剧情事实、顺序、人物状态和核心冲突，不得新增设定或改写剧情走向。',
     '2. 优先修复审查问题和语言校对问题，让表达更自然、更像网文作者手写，而不是模型流水句。',
     '3. 做最终 Anti-AI 检查，尽量改掉机械重复、套话、空泛抒情与高危 AI 腔。',
+    '4. 延续当前稿件已经形成的叙述口吻，不要再次整体换风格。',
     '',
     '请输出 JSON，不要输出 Markdown。',
     '字段要求：content, summary, antiAiForceCheck, appliedChanges。',
@@ -2597,13 +3828,14 @@ function buildOneShotRequest(
   temperature: number,
   reasoningEffort: AIChatRequest['reasoningEffort'],
   userPrompt: string,
+  systemPrompt = buildWritingRulesPrompt(env.promptConfig),
 ): AIChatRequest {
   return {
     projectId,
     model,
     temperature,
     reasoningEffort,
-    systemPrompt: buildWritingRulesPrompt(env.promptConfig),
+    systemPrompt,
     messages: [
       {
         id: 'system-user',
@@ -2612,6 +3844,89 @@ function buildOneShotRequest(
       },
     ],
   };
+}
+
+function buildChapterStageOneShotRequest(
+  env: ServerEnv,
+  stage: Extract<GenerationPromptPreviewItem['stage'], 'plan' | 'write' | 'review' | 'language_qa' | 'style' | 'polish' | 'editor_refine' | 'extract'>,
+  request: {
+    projectId: string;
+    model: string;
+    temperature: number;
+    reasoningEffort?: AIChatRequest['reasoningEffort'];
+    outline?: ChapterOutlineDraft | null;
+  },
+  userPrompt: string,
+) {
+  return buildOneShotRequest(
+    env,
+    request.projectId,
+    request.model,
+    request.temperature,
+    request.reasoningEffort,
+    userPrompt,
+    buildGenerationStageWritingRulesPrompt(env.promptConfig, {
+      stage,
+      promptModuleHints: request.outline?.promptModuleHints,
+    }),
+  );
+}
+
+function buildPromptPreviewItem(
+  env: ServerEnv,
+  stage: GenerationPromptPreviewItem['stage'],
+  label: string,
+  request: AIChatRequest,
+  userPrompt: string,
+  runtimeOverride?: ChatRuntimeOverride,
+) {
+  const preview = previewOutgoingChatRequest(env, request, runtimeOverride);
+
+  return {
+    stage,
+    label,
+    model: preview.model,
+    transport: preview.transport,
+    requestUrl: preview.requestUrl,
+    systemPrompt: preview.systemPrompt,
+    userPrompt: userPrompt.trim(),
+    requestBody: preview.requestBody,
+  } satisfies GenerationPromptPreviewItem;
+}
+
+async function completeLoggedChatCompletion(
+  env: ServerEnv,
+  input: {
+    stage: string;
+    request: AIChatRequest;
+    chapterId?: string;
+    chapterTitle?: string;
+    runtimeOverride?: ChatRuntimeOverride;
+  },
+) {
+  try {
+    const rawText = await completeChatCompletion(env, input.request, input.runtimeOverride);
+    await appendGenerationStepLog(env, {
+      stage: input.stage,
+      request: input.request,
+      chapterId: input.chapterId,
+      chapterTitle: input.chapterTitle,
+      responseText: rawText,
+      runtimeOverride: input.runtimeOverride,
+    });
+    return rawText;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await appendGenerationStepLog(env, {
+      stage: input.stage,
+      request: input.request,
+      chapterId: input.chapterId,
+      chapterTitle: input.chapterTitle,
+      errorMessage: message,
+      runtimeOverride: input.runtimeOverride,
+    });
+    throw error;
+  }
 }
 
 function injectDeterministicReviewIssue(
@@ -2683,17 +3998,18 @@ export async function generateBookOutline(
   env: ServerEnv,
   request: AIBookOutlineRequest,
 ): Promise<AIBookOutlineResponse> {
-  const rawText = await completeChatCompletion(
+  const chatRequest = buildOneShotRequest(
     env,
-    buildOneShotRequest(
-      env,
-      'book-outline-generator',
-      request.model,
-      request.temperature,
-      request.reasoningEffort,
-      buildBookOutlinePrompt(request),
-    ),
+    'book-outline-generator',
+    request.model,
+    request.temperature,
+    request.reasoningEffort,
+    buildBookOutlinePrompt(request),
   );
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'book_outline',
+    request: chatRequest,
+  });
   const parsed = parseJson<unknown>(rawText);
 
   return normalizeBookOutline(parsed);
@@ -2703,23 +4019,24 @@ export async function generateInspirationBlueprint(
   env: ServerEnv,
   request: AIInspirationBlueprintRequest,
 ): Promise<AIInspirationBlueprint> {
-  const rawText = await completeChatCompletion(
-    env,
-    {
-      projectId: 'inspiration-blueprint-generator',
-      model: request.model,
-      temperature: request.temperature,
-      reasoningEffort: request.reasoningEffort,
-      systemPrompt: `${WRITING_RULES_MARKER}\n本次不是小说写作任务，而是结构化立项提炼。不要执行写作规则，只做信息整理并输出 JSON。`,
-      messages: [
-        {
-          id: 'inspiration-blueprint-user',
-          role: 'user',
-          content: buildInspirationBlueprintPrompt(request),
-        },
-      ],
-    },
-  );
+  const chatRequest: AIChatRequest = {
+    projectId: 'inspiration-blueprint-generator',
+    model: request.model,
+    temperature: request.temperature,
+    reasoningEffort: request.reasoningEffort,
+    systemPrompt: `${WRITING_RULES_MARKER}\n本次不是小说写作任务，而是结构化立项提炼。不要执行写作规则，只做信息整理并输出 JSON。`,
+    messages: [
+      {
+        id: 'inspiration-blueprint-user',
+        role: 'user',
+        content: buildInspirationBlueprintPrompt(request),
+      },
+    ],
+  };
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'inspiration_blueprint',
+    request: chatRequest,
+  });
   const parsed = parseJson<unknown>(rawText);
 
   return normalizeInspirationBlueprint(parsed);
@@ -2729,17 +4046,18 @@ export async function generateVolumeOutline(
   env: ServerEnv,
   request: AIVolumeOutlineRequest,
 ): Promise<AIVolumeOutlineResponse> {
-  const rawText = await completeChatCompletion(
+  const chatRequest = buildOneShotRequest(
     env,
-    buildOneShotRequest(
-      env,
-      'volume-outline-generator',
-      request.model,
-      request.temperature,
-      request.reasoningEffort,
-      buildVolumeOutlinePrompt(request),
-    ),
+    'volume-outline-generator',
+    request.model,
+    request.temperature,
+    request.reasoningEffort,
+    buildVolumeOutlinePrompt(request),
   );
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'volume_outline',
+    request: chatRequest,
+  });
   const parsed = parseJson<unknown>(rawText);
 
   return normalizeVolumeOutline(parsed);
@@ -2749,17 +4067,18 @@ export async function generateVolumeMilestones(
   env: ServerEnv,
   request: AIVolumeMilestonesRequest,
 ): Promise<AIVolumeMilestonesResponse> {
-  const rawText = await completeChatCompletion(
+  const chatRequest = buildOneShotRequest(
     env,
-    buildOneShotRequest(
-      env,
-      'volume-milestones-generator',
-      request.model,
-      request.temperature,
-      request.reasoningEffort,
-      buildVolumeMilestonesPrompt(request),
-    ),
+    'volume-milestones-generator',
+    request.model,
+    request.temperature,
+    request.reasoningEffort,
+    buildVolumeMilestonesPrompt(request),
   );
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'volume_milestones',
+    request: chatRequest,
+  });
   const parsed = parseJson<unknown>(rawText);
   const normalized = normalizeVolumeOutline(parsed);
 
@@ -2773,23 +4092,24 @@ export async function reconcileVolumePlan(
   env: ServerEnv,
   request: AIVolumePlanReconcileRequest,
 ): Promise<AIVolumePlanReconcileResponse> {
-  const rawText = await completeChatCompletion(
-    env,
-    {
-      projectId: 'volume-plan-reconcile',
-      model: request.model,
-      temperature: request.temperature,
-      reasoningEffort: request.reasoningEffort,
-      systemPrompt: `${WRITING_RULES_MARKER}\n本次不是正文写作任务，而是规划修正任务。不要执行写作规则，只做卷规划分析并输出 JSON。`,
-      messages: [
-        {
-          id: 'volume-plan-reconcile-user',
-          role: 'user',
-          content: buildVolumePlanReconcilePrompt(request),
-        },
-      ],
-    },
-  );
+  const chatRequest: AIChatRequest = {
+    projectId: 'volume-plan-reconcile',
+    model: request.model,
+    temperature: request.temperature,
+    reasoningEffort: request.reasoningEffort,
+    systemPrompt: `${WRITING_RULES_MARKER}\n本次不是正文写作任务，而是规划修正任务。不要执行写作规则，只做卷规划分析并输出 JSON。`,
+    messages: [
+      {
+        id: 'volume-plan-reconcile-user',
+        role: 'user',
+        content: buildVolumePlanReconcilePrompt(request),
+      },
+    ],
+  };
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'volume_plan_reconcile',
+    request: chatRequest,
+  });
   const parsed = parseJson<unknown>(rawText);
 
   return normalizeVolumePlanReconcileResponse(parsed);
@@ -2810,20 +4130,21 @@ export async function generateVolumeBeats(
   let bestValidation: VolumeBeatValidationResult | null = null;
 
   for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
-    const rawText = await completeChatCompletion(
+    const chatRequest = buildOneShotRequest(
       env,
-      buildOneShotRequest(
-        env,
-        'volume-beats-generator',
-        request.model,
-        request.temperature,
-        request.reasoningEffort,
-        buildVolumeBeatsPrompt(request, {
-          validationFeedback,
-          attemptIndex: attemptIndex + 1,
-        }),
-      ),
+      'volume-beats-generator',
+      request.model,
+      request.temperature,
+      request.reasoningEffort,
+      buildVolumeBeatsPrompt(request, {
+        validationFeedback,
+        attemptIndex: attemptIndex + 1,
+      }),
     );
+    const rawText = await completeLoggedChatCompletion(env, {
+      stage: 'volume_beats',
+      request: chatRequest,
+    });
     const parsed = parseJson<unknown>(rawText);
     const normalized = normalizeVolumeBeats(parsed, chapterSlots);
     const candidate: AIVolumeBeatsResponse = {
@@ -2898,7 +4219,9 @@ async function resolveRequestContextBundle(
       outline: request.outline,
       fallbackContextBundle: request.contextBundle,
       preferStoredForeshadows: Array.isArray(request.foreshadowSnapshot),
+      entitySnapshot: request.entitySnapshot,
       relationSnapshot: request.relationSnapshot,
+      foreshadowSnapshot: request.foreshadowSnapshot,
       allowDraftContext: Boolean(options?.allowDraftContext),
       lightweightRecallConfig: request.gateConfigOverride?.lightweightRecall,
       requiredEntityNames: request.requiredEntityNames,
@@ -2908,6 +4231,220 @@ async function resolveRequestContextBundle(
   ).bundle;
 }
 
+function getPromptPreviewDefaultLabel(stage: GenerationPromptPreviewItem['stage']) {
+  switch (stage) {
+    case 'plan':
+      return 'Plan';
+    case 'write':
+      return 'Write';
+    case 'review':
+      return 'Review';
+    case 'language_qa':
+      return 'Language QA';
+    case 'style':
+      return 'Style';
+    case 'polish':
+      return 'Polish';
+    case 'editor_refine':
+      return 'Editor Refine';
+    case 'extract':
+      return 'Extract';
+    default:
+      return 'Prompt Preview';
+  }
+}
+
+export async function previewGenerationPrompts(
+  env: ServerEnv,
+  input: GenerationPromptPreviewRequest,
+) {
+  const previews: GenerationPromptPreviewItem[] = [];
+
+  for (const stageInput of input.stages) {
+    const label = stageInput.label?.trim() || getPromptPreviewDefaultLabel(stageInput.stage);
+
+    switch (stageInput.stage) {
+      case 'plan': {
+        const request = stageInput.request as AIPlanRequest;
+        const resolvedRequest: AIPlanRequest = {
+          ...request,
+          contextBundle: await resolveRequestContextBundle(env, request, {
+            allowDraftContext: true,
+          }),
+        };
+        const userPrompt = buildPlanPrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'plan',
+            label,
+            buildChapterStageOneShotRequest(env, 'plan', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+
+      case 'write': {
+        const request = stageInput.request as AIWriteRequest;
+        const resolvedRequest: AIWriteRequest = {
+          ...request,
+          currentStateTable: buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder, 10),
+          contextBundle: await resolveRequestContextBundle(env, request),
+        };
+        const userPrompt = buildWritePrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'write',
+            label,
+            buildChapterStageOneShotRequest(env, 'write', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+
+      case 'review': {
+        const request = stageInput.request as AIReviewRequest;
+        const currentStateEntries = foldCurrentStateTable(env, request.projectId, request.chapterOrder);
+        const inferredRepairChanges = inferItemRepairStateChanges({
+          content: request.content,
+          stateEntries: currentStateEntries,
+        });
+        const candidateStateBlock = buildItemStateCandidateBlock(inferredRepairChanges);
+        const resolvedRequest: AIReviewRequest = {
+          ...request,
+          currentStateTable: [
+            buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder),
+            candidateStateBlock,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          contextBundle: await resolveRequestContextBundle(env, request),
+        };
+        const userPrompt = buildReviewPrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'review',
+            label,
+            buildChapterStageOneShotRequest(env, 'review', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+
+      case 'language_qa': {
+        const request = stageInput.request as AILanguageQaRequest;
+        const resolvedRequest: AILanguageQaRequest = {
+          ...request,
+          currentStateTable: buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder),
+          contextBundle: await resolveRequestContextBundle(env, request),
+        };
+        const userPrompt = buildLanguageQaPrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'language_qa',
+            label,
+            buildChapterStageOneShotRequest(env, 'language_qa', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+
+      case 'style': {
+        const request = stageInput.request as AIStyleRequest;
+        const resolvedRequest: AIStyleRequest = {
+          ...request,
+          contextBundle: await resolveRequestContextBundle(env, request),
+        };
+        const userPrompt = buildStylePrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'style',
+            label,
+            buildChapterStageOneShotRequest(env, 'style', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+
+      case 'polish': {
+        const request = stageInput.request as AIPolishRequest;
+        const resolvedRequest: AIPolishRequest = {
+          ...request,
+          contextBundle: await resolveRequestContextBundle(env, request),
+        };
+        const userPrompt = buildPolishPrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'polish',
+            label,
+            buildChapterStageOneShotRequest(env, 'polish', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+
+      case 'editor_refine': {
+        const request = resolveEditorRefineRequest(env, stageInput.request as AIEditorRefineRequest);
+        const userPrompt = buildEditorRefinePrompt(request);
+        const runtimeOverride = resolveEditorRefineRuntimeOverride(env);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'editor_refine',
+            label,
+            buildChapterStageOneShotRequest(env, 'editor_refine', request, userPrompt),
+            userPrompt,
+            runtimeOverride,
+          ),
+        );
+        break;
+      }
+
+      case 'extract': {
+        const request = stageInput.request as AIExtractRequest;
+        const resolvedRequest: AIExtractRequest = {
+          ...request,
+          currentStateTable: buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder),
+        };
+        const userPrompt = buildExtractPrompt(resolvedRequest);
+
+        previews.push(
+          buildPromptPreviewItem(
+            env,
+            'extract',
+            label,
+            buildChapterStageOneShotRequest(env, 'extract', resolvedRequest, userPrompt),
+            userPrompt,
+          ),
+        );
+        break;
+      }
+    }
+  }
+
+  return {
+    previews,
+  };
+}
+
 export async function generateChapterOutline(env: ServerEnv, request: AIPlanRequest): Promise<AIPlanResponse> {
   const resolvedRequest: AIPlanRequest = {
     ...request,
@@ -2915,17 +4452,13 @@ export async function generateChapterOutline(env: ServerEnv, request: AIPlanRequ
       allowDraftContext: true,
     }),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildPlanPrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'plan', resolvedRequest, buildPlanPrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'plan',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
   const parsed = parseJson<unknown>(rawText);
 
   return {
@@ -2939,17 +4472,13 @@ export async function extractChapterArtifacts(env: ServerEnv, request: AIExtract
     ...request,
     currentStateTable: buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildExtractPrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'extract', resolvedRequest, buildExtractPrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'extract',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
   const parsed = parseJson<{
     summary?: unknown;
     stateChanges?: unknown;
@@ -2988,17 +4517,13 @@ export async function generateBeatDraft(env: ServerEnv, request: AIWriteRequest)
     currentStateTable: buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder, 10),
     contextBundle: await resolveRequestContextBundle(env, request),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildWritePrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'write', resolvedRequest, buildWritePrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'write',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
 
   return {
     content: stripMarkdownCodeFence(rawText),
@@ -3008,13 +4533,18 @@ export async function generateBeatDraft(env: ServerEnv, request: AIWriteRequest)
 
 export async function reviewChapterDraft(env: ServerEnv, request: AIReviewRequest): Promise<AIReviewResponse> {
   const currentStateEntries = foldCurrentStateTable(env, request.projectId, request.chapterOrder);
-  const knownCharacterNames = collectKnownCharacterNames(
-    request.bookOutline,
-    request.volumeOutline,
-    request.chapterBeat,
-    request.previousSummary,
-    request.contextBundle,
-  );
+  const knownCharacterNames = collectKnownCharacterNames({
+    outline: request.outline ?? null,
+    currentScene: request.outline?.sceneDrafts?.[0] ?? null,
+    requiredEntityNames: request.requiredEntityNames,
+    fallbackSources: [
+      request.bookOutline,
+      request.volumeOutline,
+      request.chapterBeat,
+      request.previousSummary,
+      request.contextBundle,
+    ],
+  });
   const inferredRepairChanges = inferItemRepairStateChanges({
     content: request.content,
     stateEntries: currentStateEntries,
@@ -3030,17 +4560,13 @@ export async function reviewChapterDraft(env: ServerEnv, request: AIReviewReques
       .join('\n'),
     contextBundle: await resolveRequestContextBundle(env, request),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildReviewPrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'review', resolvedRequest, buildReviewPrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'review',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
   const parsed = parseJson<unknown>(rawText);
   const normalizedReview = normalizeReview(parsed);
   const resourceIssue = detectResourceContinuityIssue({
@@ -3068,7 +4594,9 @@ export async function reviewChapterDraft(env: ServerEnv, request: AIReviewReques
   );
   const requiredCharacterOmissionIssue = detectRequiredCharacterOmissionIssue({
     content: resolvedRequest.content,
+    outline: resolvedRequest.outline,
     requiredEntityNames: resolvedRequest.requiredEntityNames,
+    entitySnapshots: resolvedRequest.entitySnapshot,
     previousSummary: resolvedRequest.previousSummary,
   });
   const explicitRelationCoverageIssue = detectExplicitRelationCoverageIssue({
@@ -3120,17 +4648,13 @@ export async function checkChapterLanguageQa(
     currentStateTable: buildCurrentStateTableBlock(env, request.projectId, request.chapterOrder),
     contextBundle: await resolveRequestContextBundle(env, request),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildLanguageQaPrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'language_qa', resolvedRequest, buildLanguageQaPrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'language_qa',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
   const parsed = parseJson<unknown>(rawText);
   const normalized = normalizeLanguageQa(parsed);
   const sensoryMismatchIssues = detectSensoryMismatchIssues(resolvedRequest.content);
@@ -3146,17 +4670,13 @@ export async function styleChapterDraft(env: ServerEnv, request: AIStyleRequest)
     ...request,
     contextBundle: await resolveRequestContextBundle(env, request),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildStylePrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'style', resolvedRequest, buildStylePrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'style',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
   const parsed = parseJson<{
     content?: unknown;
     summary?: unknown;
@@ -3175,17 +4695,13 @@ export async function polishChapterDraft(env: ServerEnv, request: AIPolishReques
     ...request,
     contextBundle: await resolveRequestContextBundle(env, request),
   };
-  const rawText = await completeChatCompletion(
-    env,
-    buildOneShotRequest(
-      env,
-      resolvedRequest.projectId,
-      resolvedRequest.model,
-      resolvedRequest.temperature,
-      resolvedRequest.reasoningEffort,
-      buildPolishPrompt(resolvedRequest),
-    ),
-  );
+  const chatRequest = buildChapterStageOneShotRequest(env, 'polish', resolvedRequest, buildPolishPrompt(resolvedRequest));
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'polish',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+  });
   const parsed = parseJson<{
     content?: unknown;
     summary?: unknown;
@@ -3196,6 +4712,39 @@ export async function polishChapterDraft(env: ServerEnv, request: AIPolishReques
   return {
     content: sanitizeString(parsed.content, resolvedRequest.content),
     polish: normalizePolish(parsed),
+    rawText,
+  };
+}
+
+export async function editorRefineChapterDraft(
+  env: ServerEnv,
+  request: AIEditorRefineRequest,
+): Promise<AIEditorRefineResponse> {
+  const resolvedRequest = resolveEditorRefineRequest(env, request);
+  const runtimeOverride = resolveEditorRefineRuntimeOverride(env);
+  const chatRequest = buildChapterStageOneShotRequest(
+    env,
+    'editor_refine',
+    resolvedRequest,
+    buildEditorRefinePrompt(resolvedRequest),
+  );
+  const rawText = await completeLoggedChatCompletion(env, {
+    stage: 'editor_refine',
+    request: chatRequest,
+    chapterId: resolvedRequest.chapterId,
+    chapterTitle: resolvedRequest.chapterTitle,
+    runtimeOverride,
+  });
+  const parsed = parseJson<{
+    content?: unknown;
+    summary?: unknown;
+    antiAiForceCheck?: unknown;
+    majorAdjustments?: unknown;
+  }>(rawText);
+
+  return {
+    content: sanitizeString(parsed.content, resolvedRequest.content),
+    editorRefine: normalizeEditorRefine(parsed),
     rawText,
   };
 }

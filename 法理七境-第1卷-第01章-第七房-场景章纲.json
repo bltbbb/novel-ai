@@ -1,0 +1,207 @@
+{
+  "version": 1,
+  "type": "chapter-scene-outline",
+  "projectTitle": "法理七境",
+  "exportedAt": "2026-04-20T00:00:00+08:00",
+  "data": {
+    "chapterRef": "章纲/法理七境-第1卷-第01章-第七房-章纲.json",
+    "chapterGoal": "立住许明与第七房，并让秦不孤旧案作为全卷第一根钩子正式入场",
+    "chapterFunction": "立许明，立第七房，立秦不孤旧案，立“前人来过而未写完”的大气质",
+    "generationModeHint": "single-scene-chapter",
+    "promptModuleHints": {
+      "extraPrewriteModules": []
+    },
+    "sceneDecisionNote": "本章三拍在时间、空间、人物与情绪上高度连续，更适合作为一个完整场景生成，beat 仅承担场景内部推进骨架。",
+    "focusCharacter": "许明",
+    "chapterBoundary": "不进入正面翻案，不让秦小昭提前正面入局，不让外部冲突和程序战提前爆开，不让关键伏笔重度兑现",
+    "revealCeiling": "只揭到“这案不对、前人来过、卷宗像在听”，不解释更深追查链，不展开身份链与制度链",
+    "openingState": "许明仍是刑律司第七房普通经手文书，做事细，少说话，只把不顺眼之处记进私人速记",
+    "closingState": "许明与秦不孤旧案建立私人连接，开始意识到这份卷宗不是普通旧卷",
+    "sceneDrafts": [
+      {
+        "sceneId": "scene_01",
+        "sceneTitle": "第七房旧卷桌前",
+        "macroScene": "刑律司第七房",
+        "sceneRole": "开篇立人、立场景、立旧案入口",
+        "sceneGoal": "通过许明的日常抄卷、老邹送卷与秦不孤旧案入手，让第七房、许明与旧案三者在同一场戏里正式接上。",
+        "sceneObstacle": "旧卷残缺、旧案积压、第七房长期被边缘化，无人愿意真正多看一眼；许明的认真与第七房“先搁那儿”的旧习之间存在隐性冲突。",
+        "sceneTimeSpan": "半天内连续推进，无明显切场。",
+        "scenePacing": "冷压慢起，先立职业细节与屋内气质，再让旧案接人，最后以极轻异样收钩。",
+        "sceneResult": "读者先记住第七房与许明的职业手感；秦不孤旧案作为卷一第一根钩子正式落地；“慎之”与门后轻响形成下一章继续翻看的动力。",
+        "sceneHook": "“如何慎之”落下去以后，许明觉得门后像有什么听见了。",
+        "estimatedWords": 2600,
+        "actors": [
+          {
+            "characterId": "许明",
+            "role": "focus",
+            "sceneFocus": "本场重点体现他的克制、细致、职业感和会把不顺眼之处记下来的习惯，不要提前写成主动翻案者。",
+            "sceneTask": "承担主视角、日常抄卷细节、发现旧案并与“慎之”建立第一层私人连接。"
+          },
+          {
+            "characterId": "老邹",
+            "role": "support",
+            "sceneFocus": "本场重点体现他嘴上劝退、手上抬人的旧吏气，以及对第七房规矩和风险边界的熟悉。",
+            "sceneTask": "承担送卷、提醒、点出门槛与旧饭逻辑的功能，不替许明做判断。"
+          }
+        ],
+        "availableCharacters": [
+          {
+            "characterId": "灵茶铺老板",
+            "role": "candidate",
+            "weakHint": "可用于补一笔第七房外缘的人情气或旧司气息，但本场不宜正面抢戏。"
+          },
+          {
+            "characterId": "无名旧吏员批注痕迹",
+            "role": "candidate",
+            "weakHint": "可作为旧卷边角痕迹出现，承担前人来过的极轻提示。"
+          },
+          {
+            "characterId": "余化及的名字",
+            "role": "candidate",
+            "weakHint": "可仅以名字远远压一下威势，不要展开现实连接。"
+          },
+          {
+            "characterId": "秦小昭的间接影子",
+            "role": "candidate",
+            "weakHint": "可只留案外仍有人追索的轻影，不宜正面入场。"
+          }
+        ],
+        "sceneAnchors": [
+          "灰尘",
+          "旧纸",
+          "冷灯",
+          "镇纸",
+          "边角批注",
+          "桌面凉意",
+          "封皮积灰",
+          "旧案案名",
+          "门槛",
+          "将灭未灭的纸响"
+        ],
+        "infoBudget": "本场只给旧案入口、前人留字和极轻异样，不给完整身份链、不掉出手札残页、不布置明确调查任务。",
+        "powerShift": "不正式开能力，只允许一次极轻异样感；法理异动必须依附旧卷、旧批语与许明的私人回应，不可外放。",
+        "personalConflict": "许明的认真、细致与第七房“收旧话等它烂掉”的环境形成隐性冲突；老邹的提点既是劝退，也是替他标出门槛。",
+        "foreshadowRefs": [
+          {
+            "foreshadowId": "ff_qin_case",
+            "foreshadowTitle": "秦不孤灭门旧案",
+            "action": "plant",
+            "intensity": "medium",
+            "note": "作为全卷第一根钩子正式入章。"
+          },
+          {
+            "foreshadowId": "ff_shenzhi_glow",
+            "foreshadowTitle": "慎之发光",
+            "action": "shadow",
+            "intensity": "light",
+            "note": "本章只出现“慎之”与极轻异样，不正式发光。"
+          },
+          {
+            "foreshadowId": "ff_previous_writers_in_room7",
+            "foreshadowTitle": "第七房前代写字者",
+            "action": "shadow",
+            "intensity": "light",
+            "note": "通过极淡旧批、旧痕或无名批注留影。"
+          },
+          {
+            "foreshadowId": "ff_bukeyan_underlayer",
+            "foreshadowTitle": "卷宗底层的“不可言”",
+            "action": "shadow",
+            "intensity": "light",
+            "note": "只留“这卷里像还有没说完的话”的感觉，不显完整内容。"
+          }
+        ],
+        "forbiddenNotes": [
+          "不要写成热血开篇",
+          "不要一上来就暴露重大案情",
+          "不要让许明像天才侦探一样立刻看穿所有问题",
+          "不要掉出秦不孤手札残页",
+          "不要直接进入主动查案节奏",
+          "不要提前把“慎之”的意义说透",
+          "不要把异样写成大惊悚",
+          "不要让卷宗明确开口说话",
+          "不要在章尾布置具体调查任务单"
+        ],
+        "beatRefs": [
+          "beat_01",
+          "beat_02",
+          "beat_03"
+        ]
+      }
+    ],
+    "beatDrafts": [
+      {
+        "beatId": "beat_01",
+        "sceneId": "scene_01",
+        "beatTitle": "立第七房",
+        "scene": "第七房",
+        "anchors": [
+          "灰尘",
+          "旧纸",
+          "冷灯",
+          "镇纸",
+          "桌面凉意"
+        ],
+        "actors": [
+          "许明",
+          "老邹"
+        ],
+        "progress": "通过抄卷、补页、归档和私记习惯，立住许明的职业感与第七房的边缘属性",
+        "result": "读者先记住第七房这地方，也记住许明是会把不对记下来的人",
+        "entityRefs": [
+          "许明",
+          "老邹",
+          "刑律司第七房",
+          "第七房那张桌"
+        ]
+      },
+      {
+        "beatId": "beat_02",
+        "sceneId": "scene_01",
+        "beatTitle": "旧案接人",
+        "scene": "旧卷桌前",
+        "anchors": [
+          "封皮积灰",
+          "旧案案名",
+          "边角批注"
+        ],
+        "actors": [
+          "许明",
+          "老邹"
+        ],
+        "progress": "许明从杂案堆里单独抽出《秦不孤灭门旧案》，读到前人留下的“慎之”",
+        "result": "旧案不再只是档册上的一宗旧卷，而开始和许明本人发生关系",
+        "entityRefs": [
+          "许明",
+          "秦不孤灭门旧案",
+          "老修士残纸"
+        ]
+      },
+      {
+        "beatId": "beat_03",
+        "sceneId": "scene_01",
+        "beatTitle": "门后听见",
+        "scene": "第七房门槛处",
+        "anchors": [
+          "门槛",
+          "冷灯",
+          "将灭未灭的纸响"
+        ],
+        "actors": [
+          "许明"
+        ],
+        "progress": "许明写下“如何慎之”，收卷出门，意识到门后像有什么被这一句问话惊醒",
+        "result": "本章从旧案入口收在卷宗异样，形成下一章继续翻看的动力",
+        "entityRefs": [
+          "许明",
+          "刑律司第七房",
+          "案内异议"
+        ]
+      }
+    ]
+  },
+  "meta": {
+    "chapterTitle": "第七房",
+    "sourceType": "chapter-outline"
+  }
+}

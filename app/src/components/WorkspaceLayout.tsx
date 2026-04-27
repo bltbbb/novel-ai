@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BookOpen, FlaskConical, PenSquare, Settings2 } from 'lucide-react';
+import { BookOpen, FlaskConical, PenSquare } from 'lucide-react';
 import { EditorView } from '@/components/EditorView';
 import { GenerationView } from '@/components/GenerationView';
 import { OutlineView } from '@/components/OutlineView';
@@ -24,10 +24,8 @@ interface WorkspaceLayoutProps {
   projectDescription?: string;
   genre?: string[];
   onOpenSettings: () => void;
-  onOpenProjectSettings: () => void;
   onOpenForeshadow: () => void;
   onOpenStructureMemory?: (sectionKey: StructureWorkspaceSectionKey) => void;
-  onOpenAdvancedGeneration?: () => void;
   initialTab?: WorkspaceTabKey;
 }
 
@@ -35,10 +33,11 @@ const tabItems: Array<{
   key: WorkspaceTabKey;
   label: string;
   icon: typeof BookOpen;
+  note: string;
 }> = [
-  { key: 'outline', label: '大纲', icon: BookOpen },
-  { key: 'generation', label: '生成', icon: FlaskConical },
-  { key: 'editor', label: '编辑', icon: PenSquare },
+  { key: 'outline', label: '大纲', icon: BookOpen, note: '结构拆解与卷纲推进' },
+  { key: 'generation', label: '生成', icon: FlaskConical, note: '调度 AI 生成与审核' },
+  { key: 'editor', label: '编辑', icon: PenSquare, note: '落正文与局部润色' },
 ];
 
 export function WorkspaceLayout({
@@ -47,10 +46,8 @@ export function WorkspaceLayout({
   projectDescription = '',
   genre = [],
   onOpenSettings,
-  onOpenProjectSettings,
   onOpenForeshadow,
   onOpenStructureMemory,
-  onOpenAdvancedGeneration,
   initialTab = 'outline',
 }: WorkspaceLayoutProps) {
   const chapters = useEditorStore((state) => state.chapters);
@@ -98,6 +95,12 @@ export function WorkspaceLayout({
     [activeChapterId, chapters],
   );
 
+  const confirmedChapterCount = useMemo(
+    () => chapters.filter((chapter) => chapter.status === 'revised' || chapter.status === 'published').length,
+    [chapters],
+  );
+  const isOutlineTab = activeTab === 'outline';
+
   async function handleCreateVolume() {
     const nextOrder = volumes.length + 1;
     const draftTitle = window.prompt('输入新卷标题', nextOrder === 1 ? DEFAULT_VOLUME_TITLE : `第${nextOrder}卷`)?.trim();
@@ -138,104 +141,108 @@ export function WorkspaceLayout({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 gap-5 overflow-hidden">
-      <WorkspaceSidebar
-        className="hidden w-80 flex-shrink-0 lg:flex"
-        projectId={projectId}
-        chapters={chapters}
-        volumes={volumes}
-        selectedChapterId={selectedChapter?.id ?? null}
-        onSelectChapter={(chapterId) => setActiveChapter(chapterId)}
-        onOpenVolumeOutline={(volumeId) => {
-          setFocusedVolumeId(volumeId);
-          setActiveTab('outline');
-        }}
-        onCreateChapter={() => void handleCreateChapter()}
-        onCreateVolume={() => void handleCreateVolume()}
-      />
+    <div className="flex min-h-0 flex-1 gap-4 overflow-hidden">
+      {!isOutlineTab ? (
+        <WorkspaceSidebar
+          className="hidden w-[284px] flex-shrink-0 lg:flex xl:w-[304px]"
+          projectId={projectId}
+          chapters={chapters}
+          volumes={volumes}
+          selectedChapterId={selectedChapter?.id ?? null}
+          onSelectChapter={(chapterId) => setActiveChapter(chapterId)}
+          onOpenVolumeOutline={(volumeId) => {
+            setFocusedVolumeId(volumeId);
+            setActiveTab('outline');
+          }}
+          onCreateChapter={() => void handleCreateChapter()}
+          onCreateVolume={() => void handleCreateVolume()}
+        />
+      ) : null}
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
-        <section className="rounded-3xl border border-neutral-800 bg-neutral-900/70 px-5 py-4">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-indigo-300">创作工作台</p>
-              <div className="mt-2 flex flex-wrap items-center gap-3">
-                <h2 className="text-2xl font-semibold text-neutral-100">{projectTitle}</h2>
-                <span className="rounded-full bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
-                  {genre.length > 0 ? genre.join(' / ') : '小说项目'}
-                </span>
-              </div>
-              <p className="mt-2 text-sm leading-6 text-neutral-400">
-                {projectDescription || '当前项目暂无简介。'}
-              </p>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
+        <section className={`studio-shell px-4 md:px-5 ${isOutlineTab ? 'py-2.5' : 'py-3'}`}>
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex flex-wrap gap-2">
+              {tabItems.map((item) => {
+                const Icon = item.icon;
+                const active = item.key === activeTab;
+
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    data-active={active ? 'true' : 'false'}
+                    onClick={() => setActiveTab(item.key)}
+                    className="studio-tab-button"
+                    title={item.note}
+                  >
+                    <Icon size={16} />
+                    {item.label}
+                  </button>
+                );
+              })}
             </div>
 
-            <button
-              type="button"
-              onClick={onOpenProjectSettings}
-              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-300 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
-            >
-              <Settings2 size={16} />
-              项目设置
-            </button>
-          </div>
-
-          <div className="mt-5 flex flex-wrap gap-2">
-            {tabItems.map((item) => {
-              const Icon = item.icon;
-              const active = item.key === activeTab;
-
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() => setActiveTab(item.key)}
-                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm transition-colors ${
-                    active
-                      ? 'bg-indigo-500/15 text-indigo-200'
-                      : 'border border-neutral-800 bg-neutral-950/70 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200'
-                  }`}
+            {!isOutlineTab ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="studio-chip studio-chip--compact">章节 {chapters.length}</span>
+                <span className="studio-chip studio-chip--compact">分卷 {volumes.length}</span>
+                <span className="studio-chip studio-chip--compact">已确认 {confirmedChapterCount}</span>
+                <span
+                  className="studio-chip studio-chip--compact studio-chip--secondary max-w-full md:max-w-[420px]"
+                  title={selectedChapter?.title ?? '尚未选择章节'}
                 >
-                  <Icon size={16} />
-                  {item.label}
-                </button>
-              );
-            })}
+                  <span className="truncate">
+                    当前聚焦：{selectedChapter?.title ?? '尚未选择章节'}
+                  </span>
+                </span>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="studio-chip studio-chip--compact">卷 {volumes.length}</span>
+                <span className="studio-chip studio-chip--compact">已确认 {confirmedChapterCount}</span>
+                <span className="studio-chip studio-chip--compact studio-chip--secondary">
+                  大纲独占工作区
+                </span>
+              </div>
+            )}
           </div>
 
-          <div className="mt-4 grid gap-3 lg:hidden">
-            <label className="space-y-2">
-              <span className="text-xs uppercase tracking-[0.18em] text-neutral-500">当前章节</span>
-              <select
-                value={selectedChapter?.id ?? ''}
-                onChange={(event) => {
-                  if (event.target.value) {
-                    setActiveChapter(event.target.value);
-                  }
-                }}
-                className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-3 py-3 text-sm text-neutral-200 outline-none transition focus:border-indigo-400"
-              >
-                {chapters.length === 0 ? <option value="">暂无章节</option> : null}
-                {chapters.map((chapter) => (
-                  <option key={chapter.id} value={chapter.id}>
-                    {chapter.title}
-                  </option>
-                ))}
-              </select>
-            </label>
+          <div className={`grid gap-3 lg:hidden ${isOutlineTab ? 'mt-2 hidden' : 'mt-3'}`}>
+            <div className="studio-panel-soft p-4">
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-[0.18em] text-[color:var(--studio-subtle)]">当前章节</span>
+                <select
+                  value={selectedChapter?.id ?? ''}
+                  onChange={(event) => {
+                    if (event.target.value) {
+                      setActiveChapter(event.target.value);
+                    }
+                  }}
+                  className="w-full rounded-[18px] border border-[color:var(--studio-line)] bg-black/10 px-3 py-3 text-sm text-[color:var(--studio-text)] outline-none transition focus:border-[color:var(--studio-line-strong)]"
+                >
+                  {chapters.length === 0 ? <option value="">暂无章节</option> : null}
+                  {chapters.map((chapter) => (
+                    <option key={chapter.id} value={chapter.id}>
+                      {chapter.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
 
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => void handleCreateChapter()}
-                className="rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                className="studio-action-button"
               >
                 新建章节
               </button>
               <button
                 type="button"
                 onClick={() => void handleCreateVolume()}
-                className="rounded-2xl border border-indigo-500/40 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-200 transition-colors hover:bg-indigo-500/20"
+                className="studio-action-button studio-action-button--primary"
               >
                 新建卷
               </button>
@@ -259,7 +266,6 @@ export function WorkspaceLayout({
               projectId={projectId}
               projectTitle={projectTitle}
               projectDescription={projectDescription}
-              onOpenAdvancedConsole={onOpenAdvancedGeneration}
               onOpenEditor={() => setActiveTab('editor')}
               onOpenOutline={() => setActiveTab('outline')}
             />

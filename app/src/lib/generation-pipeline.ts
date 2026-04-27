@@ -2,10 +2,12 @@ import { buildGenerationContextBundle } from '@/lib/generation-context';
 import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { DEFAULT_GENERATION_GATE_CONFIG, normalizeGenerationGateConfig } from '@/lib/generation-gate-defaults';
 import { collectPlanningRequirements } from '@/lib/planning-requirements';
+import { createChapterOutlineDraft, getChapterWriteUnitLabels } from '@/lib/chapter-outline';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import {
   checkChapterLanguageQa,
   createChapterPlan,
+  editorRefineChapterDraft,
   extractChapterState,
   polishChapterDraft,
   reviewChapterDraft,
@@ -17,6 +19,7 @@ import type {
   AppSettings,
   Chapter,
   ChapterLanguageQaDraft,
+  ChapterEditorRefineDraft,
   ChapterOutline,
   ChapterOutlineDraft,
   ChapterPolishDraft,
@@ -40,6 +43,7 @@ export type GenerationPipelineStage =
   | 'style'
   | 'review'
   | 'polish'
+  | 'editor_refine'
   | 'extract';
 
 interface StageChangePayload {
@@ -72,6 +76,7 @@ interface RunGenerationPipelineInput {
   forbiddenZone?: string;
   foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   chapterHint?: string;
+  enableEditorRefine?: boolean;
   outlineOverride?: ChapterOutline | ChapterOutlineDraft | null;
   gateConfig?: GenerationGateConfig | null;
   signal?: AbortSignal;
@@ -85,25 +90,14 @@ export interface GenerationPipelineResult {
   review: ChapterReviewDraft;
   languageQa: ChapterLanguageQaDraft | null;
   polish: ChapterPolishDraft | null;
+  editorRefine: ChapterEditorRefineDraft | null;
   summary: ChapterSummaryDraft | null;
   stateChanges: StateChangeDraft[];
   strand: StrandType | null;
 }
 
 function normalizeOutlineDraft(outline: ChapterOutline | ChapterOutlineDraft): ChapterOutlineDraft {
-  return {
-    goal: outline.goal,
-    obstacle: outline.obstacle,
-    cost: outline.cost,
-    beats: [...outline.beats],
-    timeAnchor: outline.timeAnchor,
-    chapterTimeSpan: outline.chapterTimeSpan,
-    gapFromPrevious: outline.gapFromPrevious,
-    strand: outline.strand,
-    hookType: outline.hookType,
-    hookStrength: outline.hookStrength,
-    immutableFacts: [...outline.immutableFacts],
-  };
+  return createChapterOutlineDraft(outline);
 }
 
 const REVIEW_SEVERITY_WEIGHTS: Record<ReviewSeverity, number> = {
@@ -120,6 +114,24 @@ function dedupeTextList(values: Array<string | undefined>) {
         .map((value) => value?.trim() ?? '')
         .filter(Boolean),
     ),
+  );
+}
+
+function hasStrictChapterOutlineControl(outline: ChapterOutline | ChapterOutlineDraft | null | undefined) {
+  if (!outline) {
+    return false;
+  }
+
+  return Boolean(
+    outline.goal?.trim() ||
+      outline.chapterFunction?.trim() ||
+      outline.focusCharacter?.trim() ||
+      outline.sceneDecisionNote?.trim() ||
+      (outline.mustAppearCharacters?.length ?? 0) > 0 ||
+      (outline.availableCharacters?.length ?? 0) > 0 ||
+      (outline.foreshadowRefs?.length ?? 0) > 0 ||
+      (outline.sceneDrafts?.length ?? 0) > 0 ||
+      (outline.beatDrafts?.length ?? 0) > 0,
   );
 }
 
@@ -229,32 +241,43 @@ export async function runGenerationPipeline(
     .filter(Boolean)
     .join('\n\n');
   const effectiveGateConfig = normalizeGenerationGateConfig(input.gateConfig ?? DEFAULT_GENERATION_GATE_CONFIG);
+  const hasStrictOutlineControl = hasStrictChapterOutlineControl(input.outlineOverride ?? null);
   const derivedPlanningRequirements = collectPlanningRequirements({
     volumeOutline: input.volumeOutlineDraft,
     milestoneIndex: input.milestoneIndex ?? undefined,
+    foreshadows: input.foreshadowSnapshot,
   });
   const planningRequirements = {
-    requiredEntityNames: dedupeTextList([
-      ...(input.requiredEntityNames ?? []),
-      ...derivedPlanningRequirements.requiredEntityNames,
-    ]),
-    availableCharacterNames: dedupeTextList([
-      ...(input.availableCharacterNames ?? []),
-      ...derivedPlanningRequirements.availableCharacterNames,
-    ]),
-    requiredForeshadowTitles: dedupeTextList([
-      ...(input.requiredForeshadowTitles ?? []),
-      ...derivedPlanningRequirements.requiredForeshadowTitles,
-    ]),
+    requiredEntityNames: hasStrictOutlineControl
+      ? dedupeTextList([...(input.requiredEntityNames ?? [])])
+      : dedupeTextList([
+          ...(input.requiredEntityNames ?? []),
+          ...derivedPlanningRequirements.requiredEntityNames,
+        ]),
+    availableCharacterNames: hasStrictOutlineControl
+      ? dedupeTextList([...(input.availableCharacterNames ?? [])])
+      : dedupeTextList([
+          ...(input.availableCharacterNames ?? []),
+          ...derivedPlanningRequirements.availableCharacterNames,
+        ]),
+    requiredForeshadowTitles: hasStrictOutlineControl
+      ? dedupeTextList([...(input.requiredForeshadowTitles ?? [])])
+      : dedupeTextList([
+          ...(input.requiredForeshadowTitles ?? []),
+          ...derivedPlanningRequirements.requiredForeshadowTitles,
+        ]),
   };
   const entitySnapshot = buildGenerationEntitySnapshot(input.entities);
+  const hasOutlineOverride = Boolean(input.outlineOverride);
 
-  await input.onStageChange?.({
-    stage: 'plan',
-    label: '生成章节契约',
-  });
+  if (!hasOutlineOverride) {
+    await input.onStageChange?.({
+      stage: 'plan',
+      label: '生成章节契约',
+    });
+  }
 
-  const outline = input.outlineOverride
+  const outline = hasOutlineOverride
     ? normalizeOutlineDraft(input.outlineOverride)
     : (
         await createChapterPlan(input.settings.serverUrl, {
@@ -288,6 +311,7 @@ export async function runGenerationPipeline(
           signal: input.signal,
         })
       ).outline;
+  const chapterBeatForExecution = undefined;
 
   let generatedText = '';
   let style: ChapterStyleDraft | null = null;
@@ -299,6 +323,7 @@ export async function runGenerationPipeline(
   while (true) {
     generatedText = '';
     style = null;
+    const writeUnitLabels = getChapterWriteUnitLabels(outline);
 
     if (rewriteCount > 0) {
       await input.onStageChange?.({
@@ -307,13 +332,19 @@ export async function runGenerationPipeline(
       });
     }
 
-    for (let index = 0; index < outline.beats.length; index += 1) {
-      const beat = outline.beats[index];
+    if (writeUnitLabels.length === 0) {
+      throw new Error('章节契约没有可执行的写作单元');
+    }
+
+    const unitLabel = (outline.sceneDrafts?.length ?? 0) > 0 ? '场景' : '拍';
+
+    for (let index = 0; index < writeUnitLabels.length; index += 1) {
+      const beat = writeUnitLabels[index];
       await input.onStageChange?.({
         stage: 'write',
-        label: `撰写第 ${index + 1}/${outline.beats.length} 个 beat`,
+        label: `撰写第 ${index + 1}/${writeUnitLabels.length} 个${unitLabel}`,
         beatIndex: index,
-        beatCount: outline.beats.length,
+        beatCount: writeUnitLabels.length,
       });
 
       const response = await writeChapterBeat(input.settings.serverUrl, {
@@ -329,7 +360,7 @@ export async function runGenerationPipeline(
         bookOutline: input.bookOutline,
         volumeOutline: input.volumeOutline,
         volumeGoal: input.volumeGoal,
-        chapterBeat: input.chapterBeat,
+        chapterBeat: chapterBeatForExecution,
         nextChapterPreview: input.nextChapterPreview,
         forbiddenZone: input.forbiddenZone,
         outline,
@@ -412,7 +443,7 @@ export async function runGenerationPipeline(
       projectDescription: input.projectDescription,
       bookOutline: input.bookOutline,
       volumeOutline: input.volumeOutline,
-      chapterBeat: input.chapterBeat,
+      chapterBeat: chapterBeatForExecution,
       outline,
       previousSummary,
       worldState: input.worldState,
@@ -445,7 +476,7 @@ export async function runGenerationPipeline(
       projectDescription: input.projectDescription,
       bookOutline: input.bookOutline,
       volumeOutline: input.volumeOutline,
-      chapterBeat: input.chapterBeat,
+      chapterBeat: chapterBeatForExecution,
       outline,
       previousSummary,
       worldState: input.worldState,
@@ -481,6 +512,7 @@ export async function runGenerationPipeline(
   }
 
   let polish: ChapterPolishDraft | null = null;
+  let editorRefine: ChapterEditorRefineDraft | null = null;
   let summary: ChapterSummaryDraft | null = null;
   let stateChanges: StateChangeDraft[] = [];
   let strand: StrandType | null = null;
@@ -524,6 +556,37 @@ export async function runGenerationPipeline(
     generatedText = polishResponse.content;
     polish = polishResponse.polish;
 
+    if (input.enableEditorRefine) {
+      await input.onStageChange?.({
+        stage: 'editor_refine',
+        label: '执行整章统筹改稿',
+      });
+
+      const editorRefineResponse = await editorRefineChapterDraft(input.settings.serverUrl, {
+        projectId: input.projectId,
+        chapterId: input.chapter.id,
+        chapterTitle: input.chapter.title,
+        chapterOrder: input.chapter.order,
+        volumeTitle: input.chapter.volumeTitle,
+        previousChapterId: previousChapter?.id,
+        previousChapterTitle: previousChapter?.title,
+        bookOutline: input.bookOutline,
+        volumeOutline: input.volumeOutline,
+        previousSummary,
+        outline,
+        entitySnapshot,
+        requiredEntityNames: planningRequirements.requiredEntityNames,
+        availableCharacterNames: planningRequirements.availableCharacterNames,
+        content: generatedText,
+        ...buildModelRequestConfig(input.settings),
+      }, {
+        signal: input.signal,
+      });
+
+      generatedText = editorRefineResponse.content;
+      editorRefine = editorRefineResponse.editorRefine;
+    }
+
     await input.onStageChange?.({
       stage: 'extract',
       label: '提取摘要与状态变更',
@@ -534,7 +597,7 @@ export async function runGenerationPipeline(
       chapterId: input.chapter.id,
       chapterTitle: input.chapter.title,
       chapterOrder: input.chapter.order,
-      chapterBeat: input.chapterBeat,
+      chapterBeat: chapterBeatForExecution,
       content: generatedText,
       loreSummary: input.worldState,
       ...buildModelRequestConfig(input.settings),
@@ -554,6 +617,7 @@ export async function runGenerationPipeline(
     review: reviewResponse.review,
     languageQa: languageQaResponse.languageQa,
     polish,
+    editorRefine,
     summary,
     stateChanges,
     strand,

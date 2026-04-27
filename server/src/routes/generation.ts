@@ -3,6 +3,7 @@ import type { ServerEnv } from '../config/env.js';
 import {
   extractChapterArtifacts,
   checkChapterLanguageQa,
+  editorRefineChapterDraft,
   generateInspirationBlueprint,
   generateBookOutline,
   generateBeatDraft,
@@ -15,6 +16,10 @@ import {
   reviewChapterDraft,
   styleChapterDraft,
 } from '../services/generation.js';
+import {
+  generateBookOutlineSummary,
+  generateVolumeOutlineSummary,
+} from '../services/outline-summary.js';
 import { analyzeBookTemplate } from '../services/template-analysis.js';
 import { extractEpubText } from '../services/epub-extract.js';
 import {
@@ -30,6 +35,8 @@ import type {
   AIEpubExtractRequest,
   AIInspirationBlueprintRequest,
   AIBookOutlineRequest,
+  AIBookOutlineSummaryRequest,
+  AIEditorRefineRequest,
   AIExtractRequest,
   AILanguageQaRequest,
   AIPolishRequest,
@@ -39,6 +46,7 @@ import type {
   AIVolumeBeatsRequest,
   AIVolumeMilestonesRequest,
   AIVolumeOutlineRequest,
+  AIVolumeOutlineSummaryRequest,
   AIVolumePlanReconcileRequest,
   AIWriteRequest,
   GenerationArtifactSyncRequest,
@@ -70,6 +78,23 @@ function isAIBookOutlineRequest(body: unknown): body is AIBookOutlineRequest {
     typeof candidate.projectTitle === 'string' &&
     typeof candidate.projectDescription === 'string' &&
     Array.isArray(candidate.genre) &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIBookOutlineSummaryRequest(body: unknown): body is AIBookOutlineSummaryRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIBookOutlineSummaryRequest>;
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    Array.isArray(candidate.genre) &&
+    candidate.outline !== null &&
+    typeof candidate.outline === 'object' &&
     typeof candidate.model === 'string' &&
     typeof candidate.temperature === 'number'
   );
@@ -140,6 +165,24 @@ function isAIVolumeOutlineRequest(body: unknown): body is AIVolumeOutlineRequest
     typeof candidate.bookOutline === 'string' &&
     typeof candidate.volumeTitle === 'string' &&
     typeof candidate.volumeOrder === 'number' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIVolumeOutlineSummaryRequest(body: unknown): body is AIVolumeOutlineSummaryRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIVolumeOutlineSummaryRequest>;
+
+  return (
+    typeof candidate.projectTitle === 'string' &&
+    typeof candidate.volumeTitle === 'string' &&
+    typeof candidate.volumeOrder === 'number' &&
+    candidate.outline !== null &&
+    typeof candidate.outline === 'object' &&
     typeof candidate.model === 'string' &&
     typeof candidate.temperature === 'number'
   );
@@ -254,6 +297,23 @@ function isAIExtractRequest(body: unknown): body is AIExtractRequest {
   }
 
   const candidate = body as Partial<AIExtractRequest>;
+
+  return (
+    typeof candidate.projectId === 'string' &&
+    typeof candidate.chapterId === 'string' &&
+    typeof candidate.chapterTitle === 'string' &&
+    typeof candidate.content === 'string' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  );
+}
+
+function isAIEditorRefineRequest(body: unknown): body is AIEditorRefineRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<AIEditorRefineRequest>;
 
   return (
     typeof candidate.projectId === 'string' &&
@@ -519,6 +579,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
     }
   });
 
+  app.post('/api/ai/book-outline-summary', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIBookOutlineSummaryRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIBookOutlineSummaryRequest 结构',
+      });
+    }
+
+    try {
+      return await generateBookOutlineSummary(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
   app.post('/api/ai/volume-outline', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!isAIVolumeOutlineRequest(request.body)) {
       return reply.status(400).send({
@@ -528,6 +605,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
 
     try {
       return await generateVolumeOutline(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/volume-outline-summary', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIVolumeOutlineSummaryRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIVolumeOutlineSummaryRequest 结构',
+      });
+    }
+
+    try {
+      return await generateVolumeOutlineSummary(env, request.body);
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       return reply.status(500).send({
@@ -613,6 +707,23 @@ export async function registerGenerationRoutes(app: FastifyInstance, env: Server
 
     try {
       return await extractChapterArtifacts(env, request.body);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      return reply.status(500).send({
+        message,
+      });
+    }
+  });
+
+  app.post('/api/ai/editor-refine', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isAIEditorRefineRequest(request.body)) {
+      return reply.status(400).send({
+        message: '请求体不符合 AIEditorRefineRequest 结构',
+      });
+    }
+
+    try {
+      return await editorRefineChapterDraft(env, request.body);
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       return reply.status(500).send({

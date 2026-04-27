@@ -160,7 +160,7 @@ function buildCharacterRelationGraph(input: {
       sourceId: createRelationNodeId(relation.sourceEntityId),
       targetId: createRelationNodeId(relation.targetEntityId),
       label: [relation.relationType.trim(), relation.currentStance.trim()].filter(Boolean).join(' / ') || '未命名关系',
-      meta: relation.draft ? '显式关系草案' : '显式关系',
+      meta: relation.draft ? '显式关系草案（候选）' : '显式关系真源',
       kind: 'explicit' as const,
       draft: relation.draft,
     }));
@@ -189,7 +189,7 @@ function buildCharacterRelationGraph(input: {
       sourceId: createRelationNodeId(sourceEntity.id),
       targetId: createRelationNodeId(targetEntity.id),
       label: item.relationshipType || '关系',
-      meta: [item.sourceKind, item.chapterTitle].filter(Boolean).join(' / '),
+      meta: ['运行态观察', item.sourceKind, item.chapterTitle].filter(Boolean).join(' / '),
       kind: 'automatic',
     });
   }
@@ -399,7 +399,7 @@ export function GraphWorkspace({
         <EmptyState
           icon={<Network size={22} />}
           title="图谱还没有可展示的节点"
-          description="至少需要章节、伏笔或设定数据中的一种，才能在这里自动推导关系图谱。"
+          description="至少需要章节、伏笔或设定数据中的一种，才能在这里生成关系展示视图。"
           details={
             <OnboardingChecklist
               title="推荐起步顺序"
@@ -421,14 +421,17 @@ export function GraphWorkspace({
         <div className="border-b border-neutral-800 px-5 py-4">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">关系图谱</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">关系图谱展示</p>
               <p className="mt-1 text-sm text-neutral-400">
                 {isRelationView
-                  ? `当前共 ${relationGraph.nodes.length} 位人物，${relationGraph.explicitEdgeCount} 条显式关系，${relationGraph.automaticEdgeCount} 条运行态关系。`
-                  : `当前共 ${graph.nodes.length} 个节点，${graph.edges.length} 条关系。`}
+                  ? `当前共 ${relationGraph.nodes.length} 位人物，${relationGraph.explicitEdgeCount} 条显式关系真源，${relationGraph.automaticEdgeCount} 条运行态观察关系。`
+                  : `当前共 ${graph.nodes.length} 个节点，${graph.edges.length} 条展示关系。`}
               </p>
             </div>
             <div className="flex flex-col items-start gap-2 lg:items-end">
+              <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 px-3 py-2 text-xs leading-6 text-neutral-500">
+                这里是展示 / 观察 / 诊断视图，不是正式关系维护台账。显式关系优先，运行态关系只作观察补充。
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -472,8 +475,8 @@ export function GraphWorkspace({
                 </div>
               ) : (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1">显式关系</span>
-                  <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1">运行态关系</span>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1">显式关系真源</span>
+                  <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1">运行态关系观察</span>
                 </div>
               )}
             </div>
@@ -578,8 +581,8 @@ export function GraphWorkspace({
           <p className="text-sm font-medium text-neutral-100">节点详情</p>
           <p className="mt-2 text-xs leading-6 text-neutral-500">
             {isRelationView
-              ? '关系视图会把人物作为主节点，并把显式关系与运行态关系拆开显示，方便直接检查人物关系层。'
-              : '当前图谱会自动推导章节、伏笔和设定之间的关系，帮助你快速回看结构。'}
+              ? '关系视图会把人物作为主节点，并把显式关系真源与运行态观察关系拆开显示，方便直接检查人物关系层。'
+              : '当前页面只负责把章节、伏笔和设定之间的关联展示出来，帮助你观察结构与诊断问题。'}
           </p>
         </div>
 
@@ -652,14 +655,14 @@ export function GraphWorkspace({
                   {isRelationView ? (
                     <>
                       <p>1. 人物节点只保留 `character` 条目，避免综合图谱的章节与伏笔噪音干扰人物关系判断。</p>
-                      <p>2. 显式关系使用实体关系表直连，边标签显示“关系类型 / 当前态度”。</p>
-                      <p>3. 运行态关系来自服务端已沉淀的章节关系抽取，用虚线与显式关系区分。</p>
+                      <p>2. 显式关系使用实体关系表直连，是当前正式关系真源，边标签显示“关系类型 / 当前态度”。</p>
+                      <p>3. 运行态关系来自服务端已沉淀的章节关系抽取，用虚线与显式关系区分，只作为观察层补充。</p>
                     </>
                   ) : (
                     <>
                       <p>1. 章节命中设定名称或字段值，会连接章节与设定。</p>
                       <p>2. 伏笔会连接来源章节、回收章节以及提到的设定。</p>
-                      <p>3. 设定之间若共享标签或互相提及，会自动建立关联。</p>
+                      <p>3. 设定之间若共享标签或互相提及，会自动建立展示关系；这仍是观察视图，不等于正式维护台账。</p>
                     </>
                   )}
                 </div>
@@ -667,14 +670,14 @@ export function GraphWorkspace({
 
               {(runtimeRelationships.length > 0 || runtimeEntities.length > 0 || runtimeForeshadows.length > 0) ? (
                 <section className="rounded-3xl border border-indigo-500/20 bg-indigo-500/5 p-4">
-                  <p className="text-sm text-neutral-200">运行态知识层</p>
+                  <p className="text-sm text-neutral-200">运行态观察层</p>
                   <p className="mt-2 text-xs leading-6 text-neutral-500">
-                    这里展示的是生成系统内部已经沉淀但尚未完全同步到前台台账的关系、设定和伏笔。
+                    这里展示的是生成系统内部已经沉淀的运行态关系、设定和伏笔，用于观察与排查，不替代正式维护台账。
                   </p>
 
                   {runtimeRelationships.length > 0 ? (
                     <div className="mt-4 space-y-2">
-                      <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">运行态关系</p>
+                      <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">运行态关系观察</p>
                       {runtimeRelationships
                         .filter((item) => !isExplicitSnapshotSourceKind(item.sourceKind))
                         .slice(0, 6)

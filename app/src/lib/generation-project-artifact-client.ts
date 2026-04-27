@@ -1,4 +1,5 @@
 import { db } from '@/lib/db';
+import { createChapterOutlineDraft } from '@/lib/chapter-outline';
 import { richTextToPlainText } from '@/lib/editor-content';
 import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
@@ -26,19 +27,7 @@ function sortChapters(chapters: Chapter[]) {
 }
 
 function normalizeOutlineDraft(outline: ChapterOutline | ChapterOutlineDraft): ChapterOutlineDraft {
-  return {
-    goal: outline.goal,
-    obstacle: outline.obstacle,
-    cost: outline.cost,
-    beats: [...outline.beats],
-    timeAnchor: outline.timeAnchor,
-    chapterTimeSpan: outline.chapterTimeSpan,
-    gapFromPrevious: outline.gapFromPrevious,
-    strand: outline.strand,
-    hookType: outline.hookType,
-    hookStrength: outline.hookStrength,
-    immutableFacts: [...outline.immutableFacts],
-  };
+  return createChapterOutlineDraft(outline);
 }
 
 export async function buildProjectArtifactRebuildRequest(

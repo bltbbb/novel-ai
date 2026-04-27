@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "type": "lore-functional-role-card",
+  "exportedAt": "2026-04-17T19:05:00+08:00",
+  "data": {
+    "name": "无名旧吏员",
+    "description": "许明在旧卷边缘看到的一道极淡批注的留下者，内容只是“此处日期与签押不符”。他没有名字、没有后续，只以一笔极普通的校勘痕迹存在。",
+    "tags": [
+      "功能角色",
+      "无名者",
+      "前代痕迹",
+      "卷一状态"
+    ],
+    "aliases": [
+      "日期与签押不符批注者"
+    ],
+    "draft": true,
+    "fields": {
+      "static_desire": "把自己看见的不对顺手写下来，哪怕没人会记住是谁写的。",
+      "static_fear": "怕这点不对终究没人再看，也怕自己连留下这一笔的机会都没有。",
+      "static_values": "经手要校、看见要记、哪怕只留一笔也比完全沉默强。",
+      "static_trueNature": "极普通、极安静，不是英雄，只是某个坐在第七房旧桌前认真看过卷的人。",
+      "static_speechStyle": "无，从头到尾只剩一笔批注。",
+      "static_decisionStyle": "发现不符，就顺手记下，不假装没看到。",
+      "static_conflictResponse": "以一笔最普通的校勘痕迹，对抗被写定的整份卷宗。",
+      "static_taboos": "不肯把明显不符的地方硬当作无事发生。"
+    }
+  }
+}

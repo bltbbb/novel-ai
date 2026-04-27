@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
   BookOpen,
   CheckCircle2,
-  CircleAlert,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   Compass,
+  Download,
   GitBranch,
   Globe2,
   KeyRound,
@@ -18,18 +19,55 @@ import {
   Save,
   Shield,
   Sparkles,
+  Trash2,
+  Upload,
   X,
 } from 'lucide-react';
+import { ChapterBeatCompactList } from '@/components/outline-workspace/ChapterBeatCompactList';
+import { OutlineModeTabs, type OutlineWorkspaceMode } from '@/components/outline-workspace/OutlineModeTabs';
+import { OutlineWorkspaceSidebar } from '@/components/outline-workspace/OutlineWorkspaceSidebar';
 import { useToast } from '@/components/Toast';
+import {
+  createChapterOutlineDraft,
+  createEmptyChapterSceneDraft,
+  createEmptyChapterOutlineDraft,
+  createEmptyForeshadowRef,
+  createEmptyOutlineBeatDraft,
+  getSceneActorNames,
+  getChapterWriteUnitCount,
+  normalizeChapterOutlineDraft,
+  normalizeForeshadowRefs,
+  normalizeForeshadowRef,
+  normalizeSceneActorRefs,
+  readChapterOutlineDraft,
+  serializeChapterOutlineDraft,
+} from '@/lib/chapter-outline';
 import { db } from '@/lib/db';
+import { sanitizeFileName } from '@/lib/export';
 import { buildVolumeForeshadowPlanBundle } from '@/lib/foreshadow-plan';
-import { createBookOutline, createVolumeBeats, createVolumeMilestones, createVolumeOutline, reconcileVolumePlan } from '@/lib/generation-client';
+import {
+  createBookOutline,
+  createVolumeBeats,
+  createVolumeMilestones,
+  createVolumeOutline,
+  reconcileVolumePlan,
+} from '@/lib/generation-client';
 import {
   buildHistorySummaries,
   computeMilestoneEndChapter,
   computeMilestoneStartChapter,
 } from '@/lib/history-summary';
+import { saveChapterOutline } from '@/lib/generation-storage';
 import { serializeSingleMilestone, serializeBookOutline, serializeVolumeOutline } from '@/lib/outline-serializer';
+import {
+  resolveBookOutlineWithAiSummary,
+  resolveVolumeOutlineWithAiSummary,
+} from '@/lib/outline-summary-client';
+import {
+  buildBookOutlineSummary,
+  buildVolumeMilestoneSummary,
+  buildVolumeOutlineSummary,
+} from '@/lib/outline-summary';
 import { collectPlanningRequirements } from '@/lib/planning-requirements';
 import { buildVolumeQuestionPoolBundle } from '@/lib/question-pool';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
@@ -57,7 +95,12 @@ import type {
   BookOutlineFields,
   ChapterBeat,
   ChapterBeatFields,
+  ChapterOutline,
+  ChapterOutlineBeatDraft,
+  ChapterSceneDraft,
+  ForeshadowRef,
   Id,
+  PromptModuleKey,
   VolumeInheritedThreadDraft,
   VolumeMilestoneDraft,
   VolumeOutlineFields,
@@ -121,7 +164,17 @@ interface ChapterBeatRowModel {
   chapterId?: Id;
   chapterLabel: string;
   chapterNumber: number;
+  displayChapterNumber: number | null;
   beat: ChapterBeat | null;
+}
+
+interface ChapterOutlineRowModel {
+  chapterId: Id;
+  volumeId: Id;
+  chapterTitle: string;
+  chapterNumber: number;
+  milestoneIndex: number | null;
+  outline: ChapterOutline | null;
 }
 
 interface StructureMemorySummaryCardProps {
@@ -143,8 +196,38 @@ interface VolumePlanReconcilePreview {
   response: AIVolumePlanReconcileResponse;
 }
 
+type OutlineJsonExportType =
+  | 'book-outline'
+  | 'volume-outline'
+  | 'volume-milestone'
+  | 'chapter-beats'
+  | 'chapter-outline'
+  | 'chapter-scene-outline';
+type ChapterBeatExportScope = 'volume' | 'milestone';
+type OutlineImportTarget =
+  | { type: 'book-outline' }
+  | { type: 'volume-outline'; volumeId: Id }
+  | { type: 'volume-milestone'; volumeId: Id; milestoneIndex: number }
+  | { type: 'chapter-beats'; volumeId: Id; milestoneIndex: number | null }
+  | { type: 'chapter-outline'; chapterId: Id };
+
+interface OutlineJsonEnvelope<T> {
+  version: 1;
+  type: OutlineJsonExportType;
+  projectTitle: string;
+  exportedAt: string;
+  data: T;
+  meta?: Record<string, unknown>;
+}
+
 type MilestoneProgressStatus = 'empty' | 'planned' | 'progressed';
 type FissionDialogMode = 'milestone' | 'volume';
+type BeatFilterStatus = 'all' | MilestoneProgressStatus;
+type OutlineSummaryDialogState = {
+  title: string;
+  summary: string;
+  description: string;
+} | null;
 
 function createEmptyBookDraft(): BookOutlineFields {
   return {
@@ -161,6 +244,7 @@ function createEmptyBookDraft(): BookOutlineFields {
     worldRules: [],
     endgameHint: '',
     toneGuide: '',
+    summary: '',
   };
 }
 
@@ -182,8 +266,11 @@ function createEmptyVolumeDraft(): VolumeOutlineFields {
     foreshadowSeeds: [],
     requiredEntities: [],
     requiredForeshadows: [],
+    requiredForeshadowIds: [],
+    foreshadowRefs: [],
     estimatedChapterCount: 0,
     milestones: [],
+    summary: '',
   };
 }
 
@@ -198,6 +285,9 @@ function cloneVolumeMilestoneDraft(milestone: VolumeMilestoneDraft): VolumeMiles
     mustPayoff: [...milestone.mustPayoff],
     requiredEntities: [...(milestone.requiredEntities ?? [])],
     requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
+    requiredForeshadowIds: [...(milestone.requiredForeshadowIds ?? [])],
+    foreshadowRefs: normalizeForeshadowRefs(milestone.foreshadowRefs),
+    summary: milestone.summary ?? '',
   };
 }
 
@@ -209,7 +299,10 @@ function cloneVolumeDraft(draft: VolumeOutlineFields): VolumeOutlineFields {
     inheritedThreads: draft.inheritedThreads.map((item) => ({ ...item })),
     requiredEntities: [...(draft.requiredEntities ?? [])],
     requiredForeshadows: [...(draft.requiredForeshadows ?? [])],
+    requiredForeshadowIds: [...(draft.requiredForeshadowIds ?? [])],
+    foreshadowRefs: normalizeForeshadowRefs(draft.foreshadowRefs),
     milestones: draft.milestones.map(cloneVolumeMilestoneDraft),
+    summary: draft.summary ?? '',
   };
 }
 
@@ -230,6 +323,9 @@ function createEmptyVolumeMilestoneDraft(): VolumeMilestoneDraft {
     powerCeiling: '',
     requiredEntities: [],
     requiredForeshadows: [],
+    requiredForeshadowIds: [],
+    foreshadowRefs: [],
+    summary: '',
   };
 }
 
@@ -241,6 +337,7 @@ function createEmptyChapterBeatDraft(orderInVolume = 1): ChapterBeatFields {
     focusCharacter: '',
     mustAppearCharacters: [],
     availableCharacters: [],
+    requiredForeshadows: [],
     mainPlot: '',
     subPlot: '',
     pacing: '',
@@ -253,11 +350,234 @@ function createEmptyChapterBeatDraft(orderInVolume = 1): ChapterBeatFields {
   };
 }
 
+function asRecord(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function readString(value: unknown, fallback = '') {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function readInteger(value: unknown, fallback = 0) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback;
+}
+
+function readStringList(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function readBookCharacterArcs(value: unknown): BookCharacterArcDraft[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          if (!record) {
+            return null;
+          }
+
+          return {
+            characterId: typeof record.characterId === 'string' ? record.characterId : null,
+            characterName: readString(record.characterName),
+            arc: readString(record.arc),
+          } satisfies BookCharacterArcDraft;
+        })
+        .filter((item): item is BookCharacterArcDraft => item !== null)
+    : [];
+}
+
+function readInheritedThreads(value: unknown): VolumeInheritedThreadDraft[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => {
+          const record = asRecord(item);
+          if (!record) {
+            return null;
+          }
+
+          return {
+            threadId: typeof record.threadId === 'string' ? record.threadId : null,
+            threadName: readString(record.threadName),
+            note: readString(record.note),
+          } satisfies VolumeInheritedThreadDraft;
+        })
+        .filter((item): item is VolumeInheritedThreadDraft => item !== null)
+    : [];
+}
+
+function readVolumeMilestoneDraft(value: unknown): VolumeMilestoneDraft {
+  const record = asRecord(value);
+
+  return {
+    title: readString(record?.title),
+    targetChapterCount: readInteger(record?.targetChapterCount),
+    phaseGoal: readString(record?.phaseGoal),
+    phaseConflict: readString(record?.phaseConflict),
+    entryState: readString(record?.entryState),
+    exitState: readString(record?.exitState),
+    phasePacing: readString(record?.phasePacing),
+    phaseEmotionShift: readString(record?.phaseEmotionShift),
+    phasePOV: readString(record?.phasePOV),
+    keyTurns: readStringList(record?.keyTurns),
+    mustPlant: readStringList(record?.mustPlant),
+    mustPayoff: readStringList(record?.mustPayoff),
+    powerCeiling: readString(record?.powerCeiling),
+    requiredEntities: readStringList(record?.requiredEntities),
+    requiredForeshadows: readStringList(record?.requiredForeshadows),
+    requiredForeshadowIds: readStringList(record?.requiredForeshadowIds),
+    foreshadowRefs: normalizeForeshadowRefs(record?.foreshadowRefs as Array<Partial<ForeshadowRef>> | undefined),
+    summary: readString(record?.summary),
+  };
+}
+
+function readVolumeMilestoneDrafts(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => readVolumeMilestoneDraft(item)) : [];
+}
+
+function readBookOutlineFields(value: unknown): BookOutlineFields {
+  const record = asRecord(value);
+
+  return {
+    premise: readString(record?.premise),
+    centralConflict: readString(record?.centralConflict),
+    protagonistArc: readString(record?.protagonistArc),
+    thematicCore: readString(record?.thematicCore),
+    subPlots: readStringList(record?.subPlots),
+    characterArcs: readBookCharacterArcs(record?.characterArcs),
+    powerSystem: readString(record?.powerSystem),
+    antagonistSystem: readString(record?.antagonistSystem),
+    narrativeArc: readString(record?.narrativeArc),
+    logline: readString(record?.logline),
+    worldRules: readStringList(record?.worldRules),
+    endgameHint: readString(record?.endgameHint),
+    toneGuide: readString(record?.toneGuide),
+    summary: readString(record?.summary),
+  };
+}
+
+function readVolumeOutlineFields(value: unknown): VolumeOutlineFields {
+  const record = asRecord(value);
+
+  return {
+    goal: readString(record?.goal),
+    keyConflict: readString(record?.keyConflict),
+    arcSummary: readString(record?.arcSummary),
+    entryState: readString(record?.entryState),
+    exitState: readString(record?.exitState),
+    antagonist: readString(record?.antagonist),
+    subPlot: readString(record?.subPlot),
+    inheritedThreads: readInheritedThreads(record?.inheritedThreads),
+    protagonistGrowth: readString(record?.protagonistGrowth),
+    emotionalArc: readString(record?.emotionalArc),
+    estimatedWordCount: readInteger(record?.estimatedWordCount),
+    povPlan: readString(record?.povPlan),
+    keyEvents: readStringList(record?.keyEvents),
+    foreshadowSeeds: readStringList(record?.foreshadowSeeds),
+    requiredEntities: readStringList(record?.requiredEntities),
+    requiredForeshadows: readStringList(record?.requiredForeshadows),
+    requiredForeshadowIds: readStringList(record?.requiredForeshadowIds),
+    foreshadowRefs: normalizeForeshadowRefs(record?.foreshadowRefs as Array<Partial<ForeshadowRef>> | undefined),
+    estimatedChapterCount: readInteger(record?.estimatedChapterCount),
+    milestones: readVolumeMilestoneDrafts(record?.milestones),
+    summary: readString(record?.summary),
+  };
+}
+
+function readChapterBeatFields(value: unknown, fallbackOrderInVolume: number): ChapterBeatFields {
+  const record = asRecord(value);
+
+  return {
+    orderInVolume: readInteger(record?.orderInVolume, fallbackOrderInVolume) || fallbackOrderInVolume,
+    titleHint: readString(record?.titleHint),
+    scenePurpose: readString(record?.scenePurpose),
+    focusCharacter: readString(record?.focusCharacter),
+    mustAppearCharacters: readStringList(record?.mustAppearCharacters),
+    availableCharacters: readStringList(record?.availableCharacters),
+    requiredForeshadows: readStringList(record?.requiredForeshadows),
+    mainPlot: readString(record?.mainPlot),
+    subPlot: readString(record?.subPlot),
+    pacing: readString(record?.pacing),
+    hookOut: readString(record?.hookOut),
+    noveltyRequirement: readString(record?.noveltyRequirement),
+    powerDelta: readString(record?.powerDelta),
+    forbiddenPhrases: readStringList(record?.forbiddenPhrases),
+    forbiddenScenePatterns: readStringList(record?.forbiddenScenePatterns),
+    keyItems: readStringList(record?.keyItems),
+    milestoneIndex:
+      typeof record?.milestoneIndex === 'number' && Number.isFinite(record.milestoneIndex) && record.milestoneIndex >= 0
+        ? Math.trunc(record.milestoneIndex)
+        : undefined,
+  };
+}
+
+function readChapterBeatFieldList(value: unknown, startOrderInVolume: number) {
+  if (Array.isArray(value)) {
+    return value.map((item, index) => readChapterBeatFields(item, startOrderInVolume + index));
+  }
+
+  const record = asRecord(value);
+  if (record && Array.isArray(record.beats)) {
+    return record.beats.map((item, index) => readChapterBeatFields(item, startOrderInVolume + index));
+  }
+
+  return [];
+}
+
+function unwrapOutlineJsonData(value: unknown, expectedType: OutlineJsonExportType | OutlineJsonExportType[]) {
+  const record = asRecord(value);
+
+  if (!record || !('type' in record) || !('data' in record)) {
+    return value;
+  }
+
+  const expectedTypes = Array.isArray(expectedType) ? expectedType : [expectedType];
+
+  if (!expectedTypes.includes(record.type as OutlineJsonExportType)) {
+    throw new Error(`导入文件类型不匹配，当前需要 ${expectedTypes.join(' / ')}`);
+  }
+
+  return record.data;
+}
+
+function hasChapterBeatDraftContent(draft: ChapterBeatFields) {
+  return Boolean(
+    draft.titleHint.trim() ||
+      draft.scenePurpose.trim() ||
+      draft.focusCharacter.trim() ||
+      draft.mainPlot.trim() ||
+      draft.subPlot.trim() ||
+      draft.pacing.trim() ||
+      draft.hookOut.trim() ||
+      draft.noveltyRequirement.trim() ||
+      draft.powerDelta.trim() ||
+      (draft.mustAppearCharacters ?? []).length > 0 ||
+      (draft.availableCharacters ?? []).length > 0 ||
+      (draft.requiredForeshadows ?? []).length > 0 ||
+      draft.forbiddenPhrases.length > 0 ||
+      draft.forbiddenScenePatterns.length > 0 ||
+      draft.keyItems.length > 0 ||
+      typeof draft.milestoneIndex === 'number'
+  );
+}
+
 function parseMultilineList(raw: string) {
   return raw
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function dedupeTextList(values: Array<string | undefined | null>) {
+  return Array.from(
+    new Set(
+      values
+        .map((item) => item?.trim() || '')
+        .filter(Boolean),
+    ),
+  );
 }
 
 function parseExpectedVolumeOrderHint(windowText: string) {
@@ -429,6 +749,7 @@ function extractChapterBeatDraft(beat: ChapterBeat): ChapterBeatFields {
     focusCharacter: beat.focusCharacter,
     mustAppearCharacters: [...(beat.mustAppearCharacters ?? [])],
     availableCharacters: [...(beat.availableCharacters ?? [])],
+    requiredForeshadows: [...(beat.requiredForeshadows ?? [])],
     mainPlot: beat.mainPlot,
     subPlot: beat.subPlot,
     pacing: beat.pacing,
@@ -490,6 +811,22 @@ function getMilestoneStatusLabel(status: MilestoneProgressStatus) {
   }
 }
 
+function getChapterBeatProgressStatus(input: {
+  beat: ChapterBeat | null;
+  chapterId?: Id;
+  chapterSummaryChapterIds: Set<Id>;
+}): MilestoneProgressStatus {
+  if (input.chapterId && input.chapterSummaryChapterIds.has(input.chapterId)) {
+    return 'progressed' satisfies MilestoneProgressStatus;
+  }
+
+  if (input.beat) {
+    return 'planned' satisfies MilestoneProgressStatus;
+  }
+
+  return 'empty' satisfies MilestoneProgressStatus;
+}
+
 function isPlaceholderChapterTitle(title: string) {
   return /^第\s*\d+\s*章$/u.test(title.trim());
 }
@@ -533,6 +870,29 @@ function findFirstMissingChapterNumberInRange(
   }
 
   return null;
+}
+
+function reconcileSceneActorRefs(
+  existing: ChapterSceneDraft['actors'] | ChapterSceneDraft['availableCharacters'],
+  nextNames: string[],
+  fallbackRole: 'support' | 'candidate',
+) {
+  const existingMap = new Map(
+    (existing ?? [])
+      .map((item) => {
+        const characterId = item.characterId.trim();
+        return characterId ? [characterId, item] as const : null;
+      })
+      .filter(Boolean) as Array<readonly [string, ChapterSceneDraft['actors'][number]]>,
+  );
+
+  return normalizeSceneActorRefs(
+    nextNames.map((name) => {
+      const characterId = name.trim();
+      return existingMap.get(characterId) ?? { characterId, role: fallbackRole };
+    }),
+    fallbackRole,
+  );
 }
 
 function TextAreaField({
@@ -791,6 +1151,7 @@ export function OutlineView({
     (state) => state.replaceVolumeChapterBeatsInRange,
   );
   const moveChapterBeat = useChapterBeatStore((state) => state.moveChapterBeat);
+  const deleteChapterBeat = useChapterBeatStore((state) => state.deleteChapterBeat);
 
   const bookOutline = useOutlineStore((state) => state.bookOutline);
   const volumeOutlines = useOutlineStore((state) => state.volumeOutlines);
@@ -807,17 +1168,26 @@ export function OutlineView({
   const [generatingMilestonesVolumeId, setGeneratingMilestonesVolumeId] = useState<Id | null>(null);
   const [savingBeatKey, setSavingBeatKey] = useState<string | null>(null);
   const [generatingBeatVolumeId, setGeneratingBeatVolumeId] = useState<Id | null>(null);
+  const [outlineMode, setOutlineMode] = useState<OutlineWorkspaceMode>(focusVolumeId ? 'beats' : 'volume');
+  const [showStructureMemoryOverview, setShowStructureMemoryOverview] = useState(false);
   const [expandedVolumeId, setExpandedVolumeId] = useState<Id | null>(null);
-  const [openVolumeMenuId, setOpenVolumeMenuId] = useState<Id | null>(null);
   const [bookHint, setBookHint] = useState('');
   const [bookDraft, setBookDraft] = useState<BookOutlineFields>(createEmptyBookDraft());
+  const [outlineSummaryDialog, setOutlineSummaryDialog] = useState<OutlineSummaryDialogState>(null);
   const [volumeDraftMap, setVolumeDraftMap] = useState<Record<string, VolumeOutlineFields>>({});
   const [chapterBeatDraftMap, setChapterBeatDraftMap] = useState<Record<string, ChapterBeatFields>>({});
+  const [chapterOutlines, setChapterOutlines] = useState<ChapterOutline[]>([]);
+  const [chapterOutlineDraftMap, setChapterOutlineDraftMap] = useState<Record<string, ReturnType<typeof createEmptyChapterOutlineDraft>>>({});
   const [volumeHintMap, setVolumeHintMap] = useState<Record<string, string>>({});
   const [beatHintMap, setBeatHintMap] = useState<Record<string, string>>({});
   const [beatChapterCountMap, setBeatChapterCountMap] = useState<Record<string, string>>({});
   const [selectedMilestoneIndexMap, setSelectedMilestoneIndexMap] = useState<Record<string, number | null>>({});
+  const [selectedBeatRowKeyMap, setSelectedBeatRowKeyMap] = useState<Record<string, string | null>>({});
+  const [selectedOutlineChapterIdMap, setSelectedOutlineChapterIdMap] = useState<Record<string, Id | null>>({});
+  const [beatFilterStatus, setBeatFilterStatus] = useState<BeatFilterStatus>('all');
+  const [chapterJumpValue, setChapterJumpValue] = useState('');
   const [chapterSummaryChapterIds, setChapterSummaryChapterIds] = useState<Set<Id>>(new Set());
+  const [openVolumeMenuId, setOpenVolumeMenuId] = useState<Id | null>(null);
   const [fissionDialogVolumeId, setFissionDialogVolumeId] = useState<Id | null>(null);
   const [fissionDialogMode, setFissionDialogMode] = useState<FissionDialogMode>('volume');
   const [fissionDialogMilestoneIndex, setFissionDialogMilestoneIndex] = useState<number | null>(null);
@@ -828,6 +1198,7 @@ export function OutlineView({
   const [listFieldInputs, setListFieldInputs] = useState<Record<string, string>>({});
   const [reconcilingVolumeId, setReconcilingVolumeId] = useState<Id | null>(null);
   const [volumePlanReconcilePreview, setVolumePlanReconcilePreview] = useState<VolumePlanReconcilePreview | null>(null);
+  const [savingOutlineChapterId, setSavingOutlineChapterId] = useState<Id | null>(null);
 
   function buildTemplateHint(...sections: Array<string | null | undefined>) {
     return mergePromptSections(...sections);
@@ -835,6 +1206,9 @@ export function OutlineView({
 
   const volumeCardRefs = useRef<Record<string, HTMLElement | null>>({});
   const volumeMenuRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const beatRowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingImportTargetRef = useRef<OutlineImportTarget | null>(null);
 
   const sortedVolumes = useMemo(
     () => [...volumes].sort((left, right) => left.order - right.order),
@@ -897,6 +1271,7 @@ export function OutlineView({
           chapterId: beat?.chapterId ?? chapter?.id,
           chapterLabel: chapter?.title ?? '未绑定章节',
           chapterNumber: order,
+          displayChapterNumber: chapter?.order ?? null,
           beat,
         });
       }
@@ -1087,6 +1462,312 @@ export function OutlineView({
     return next;
   }, [chapterBeatRowsByVolumeId, chapterSummaryChapterIds, chaptersByVolumeId, sortedVolumes, volumeDraftMap]);
   const isBookGuideVisible = useMemo(() => isBookDraftEmpty(bookDraft), [bookDraft]);
+  const hasVolumes = sortedVolumes.length > 0;
+  const activeVolume = activeStructureVolume;
+  const activeVolumeDraft = useMemo(
+    () => (activeVolume ? volumeDraftMap[activeVolume.id] ?? createEmptyVolumeDraft() : createEmptyVolumeDraft()),
+    [activeVolume, volumeDraftMap],
+  );
+  const activeVolumeChapters = useMemo(
+    () => (activeVolume ? chaptersByVolumeId.get(activeVolume.id) ?? [] : []),
+    [activeVolume, chaptersByVolumeId],
+  );
+  const activeVolumeBeatRows = useMemo(
+    () => (activeVolume ? chapterBeatRowsByVolumeId.get(activeVolume.id) ?? [] : []),
+    [activeVolume, chapterBeatRowsByVolumeId],
+  );
+  const activeSelectedMilestoneIndex = useMemo(() => {
+    if (!activeVolume) {
+      return null;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(selectedMilestoneIndexMap, activeVolume.id)) {
+      return selectedMilestoneIndexMap[activeVolume.id];
+    }
+
+    return null;
+  }, [activeVolume, selectedMilestoneIndexMap]);
+  const chapterOutlineByChapterId = useMemo(
+    () => new Map(chapterOutlines.map((outline) => [outline.chapterId, outline] as const)),
+    [chapterOutlines],
+  );
+  const activeVolumeOutlineRows = useMemo(
+    () =>
+      activeVolumeChapters
+        .map((chapter, index): ChapterOutlineRowModel => {
+          const chapterNumber = index + 1;
+          const milestoneIndex = getMilestoneIndexForChapterNumber(activeVolumeDraft.milestones, chapterNumber);
+
+          return {
+            chapterId: chapter.id,
+            volumeId: chapter.volumeId as Id,
+            chapterTitle: chapter.title,
+            chapterNumber,
+            milestoneIndex: typeof milestoneIndex === 'number' ? milestoneIndex : null,
+            outline: chapterOutlineByChapterId.get(chapter.id) ?? null,
+          };
+        })
+        .filter((row) =>
+          typeof activeSelectedMilestoneIndex === 'number'
+            ? row.milestoneIndex === activeSelectedMilestoneIndex
+            : true,
+        ),
+    [activeSelectedMilestoneIndex, activeVolumeChapters, activeVolumeDraft.milestones, chapterOutlineByChapterId],
+  );
+  const activeMilestoneStatuses = useMemo(
+    () => (activeVolume ? milestoneStatusMapByVolumeId.get(activeVolume.id) ?? [] : []),
+    [activeVolume, milestoneStatusMapByVolumeId],
+  );
+  const activeFilteredMilestone =
+    typeof activeSelectedMilestoneIndex === 'number'
+      ? activeVolumeDraft.milestones[activeSelectedMilestoneIndex] ?? null
+      : null;
+  const activeVolumeDefaultChapterCount =
+    activeVolumeDraft.estimatedChapterCount > 0
+      ? activeVolumeDraft.estimatedChapterCount
+      : activeVolumeDraft.milestones.reduce((sum, milestone) => sum + Math.max(0, milestone.targetChapterCount), 0) || 12;
+  const activeVolumeBeatRowsWithMeta = useMemo(
+    () =>
+      activeVolumeBeatRows.map((row, rowIndex, rows) => {
+        const draft = chapterBeatDraftMap[row.key] ?? createEmptyChapterBeatDraft(row.chapterNumber);
+        const milestoneIndex =
+          row.beat?.milestoneIndex ?? getMilestoneIndexForChapterNumber(activeVolumeDraft.milestones, row.chapterNumber);
+        const milestone =
+          typeof milestoneIndex === 'number' ? activeVolumeDraft.milestones[milestoneIndex] ?? null : null;
+        const status = getChapterBeatProgressStatus({
+          beat: row.beat,
+          chapterId: row.chapterId,
+          chapterSummaryChapterIds,
+        });
+        const previousMilestoneIndex =
+          rowIndex > 0
+            ? rows[rowIndex - 1]?.beat?.milestoneIndex ??
+              getMilestoneIndexForChapterNumber(
+                activeVolumeDraft.milestones,
+                rows[rowIndex - 1]?.chapterNumber ?? 0,
+              )
+            : undefined;
+
+        return {
+          row,
+          rowIndex,
+          rowCount: rows.length,
+          draft,
+          milestoneIndex,
+          milestone,
+          status,
+          isMilestoneStart:
+            typeof milestoneIndex === 'number' && milestoneIndex !== previousMilestoneIndex,
+        };
+      }),
+    [activeVolumeBeatRows, activeVolumeDraft.milestones, chapterBeatDraftMap, chapterSummaryChapterIds],
+  );
+  const filteredBeatRows = useMemo(
+    () =>
+      activeVolumeBeatRowsWithMeta.filter((item) => {
+        if (
+          typeof activeSelectedMilestoneIndex === 'number' &&
+          item.milestoneIndex !== activeSelectedMilestoneIndex
+        ) {
+          return false;
+        }
+
+        if (beatFilterStatus !== 'all' && item.status !== beatFilterStatus) {
+          return false;
+        }
+
+        return true;
+      }),
+    [activeSelectedMilestoneIndex, activeVolumeBeatRowsWithMeta, beatFilterStatus],
+  );
+  const selectedBeatRowKey = activeVolume ? selectedBeatRowKeyMap[activeVolume.id] ?? null : null;
+  const selectedBeatRow = useMemo(() => {
+    const fromFiltered =
+      selectedBeatRowKey === null ? null : filteredBeatRows.find((item) => item.row.key === selectedBeatRowKey) ?? null;
+
+    if (fromFiltered) {
+      return fromFiltered;
+    }
+
+    const fromAll =
+      selectedBeatRowKey === null
+        ? null
+        : activeVolumeBeatRowsWithMeta.find((item) => item.row.key === selectedBeatRowKey) ?? null;
+
+    return fromAll ?? filteredBeatRows[0] ?? activeVolumeBeatRowsWithMeta[0] ?? null;
+  }, [activeVolumeBeatRowsWithMeta, filteredBeatRows, selectedBeatRowKey]);
+  const beatStatusCounts = useMemo(() => {
+    return activeVolumeBeatRowsWithMeta.reduce(
+      (totals, item) => {
+        totals.all += 1;
+        totals[item.status] += 1;
+        return totals;
+      },
+      {
+        all: 0,
+        empty: 0,
+        planned: 0,
+        progressed: 0,
+      } satisfies Record<BeatFilterStatus, number>,
+    );
+  }, [activeVolumeBeatRowsWithMeta]);
+  const showBeatInspector = outlineMode === 'beats';
+  const selectedOutlineChapterId = activeVolume ? selectedOutlineChapterIdMap[activeVolume.id] ?? null : null;
+  const selectedOutlineRow = useMemo(() => {
+    if (activeVolumeOutlineRows.length === 0) {
+      return null;
+    }
+
+    return (
+      activeVolumeOutlineRows.find((item) => item.chapterId === selectedOutlineChapterId) ??
+      activeVolumeOutlineRows[0]
+    );
+  }, [activeVolumeOutlineRows, selectedOutlineChapterId]);
+  const selectedOutlineDraft = useMemo(
+    () =>
+      selectedOutlineRow
+        ? chapterOutlineDraftMap[selectedOutlineRow.chapterId] ?? createEmptyChapterOutlineDraft()
+        : null,
+    [chapterOutlineDraftMap, selectedOutlineRow],
+  );
+  const volumeSummaryItems = useMemo(
+    () =>
+      sortedVolumes.map((volume) => {
+        const draft = volumeDraftMap[volume.id] ?? createEmptyVolumeDraft();
+        const volumeRows = chapterBeatRowsByVolumeId.get(volume.id) ?? [];
+
+        return {
+          id: volume.id,
+          order: volume.order,
+          title: volume.title,
+          progressLabel: getVolumeProgressLabel(draft),
+          chapterCount: (chaptersByVolumeId.get(volume.id) ?? []).length,
+          beatCount: volumeRows.filter((row) => row.beat !== null).length,
+          milestoneCount: draft.milestones.length,
+          selected: activeVolume?.id === volume.id,
+        };
+      }),
+    [activeVolume?.id, chapterBeatRowsByVolumeId, chaptersByVolumeId, sortedVolumes, volumeDraftMap],
+  );
+  const milestoneSummaryItems = useMemo(
+    () =>
+      activeVolumeDraft.milestones.map((milestone, milestoneIndex) => ({
+        index: milestoneIndex,
+        title: milestone.title,
+        targetChapterCount: milestone.targetChapterCount,
+        startChapterNumber: computeMilestoneStartChapter(activeVolumeDraft.milestones, milestoneIndex),
+        endChapterNumber: computeMilestoneEndChapter(activeVolumeDraft.milestones, milestoneIndex),
+        status: activeMilestoneStatuses[milestoneIndex] ?? 'empty',
+        selected: activeSelectedMilestoneIndex === milestoneIndex,
+      })),
+    [activeMilestoneStatuses, activeSelectedMilestoneIndex, activeVolumeDraft.milestones],
+  );
+
+  function openBookSummaryDialog() {
+    setOutlineSummaryDialog({
+      title: '全书摘要',
+      summary: bookDraft.summary?.trim() || '当前还没有模型摘要，请先保存全书大纲。',
+      description: '这份摘要会在保存或导入全书大纲时由模型生成并固化，正文生成只读取这份摘要，不再塞完整书纲。',
+    });
+  }
+
+  function openVolumeSummaryDialog(volumeId: Id) {
+    const volume = sortedVolumes.find((item) => item.id === volumeId) ?? null;
+    const draft = volumeDraftMap[volumeId] ?? volumeOutlineById.get(volumeId) ?? createEmptyVolumeDraft();
+
+    setOutlineSummaryDialog({
+      title: volume ? `《${volume.title}》卷摘要` : '当前卷摘要',
+      summary: draft.summary?.trim() || '当前还没有模型摘要，请先保存当前卷纲。',
+      description: '这份摘要会在保存或导入卷纲时由模型生成并固化，章节生成只读取这份卷级摘要。',
+    });
+  }
+
+  function openMilestoneSummaryDialog(milestoneIndex: number) {
+    const milestone = activeVolumeDraft.milestones[milestoneIndex] ?? null;
+
+    if (!milestone) {
+      toast('未找到目标阶段摘要', 'warning');
+      return;
+    }
+
+    setOutlineSummaryDialog({
+      title: milestone.title.trim()
+        ? `阶段 ${milestoneIndex + 1} · ${milestone.title.trim()}`
+        : `阶段 ${milestoneIndex + 1} 摘要`,
+      summary: milestone.summary?.trim() || '当前还没有模型摘要，请先保存当前卷纲。',
+      description: '这份摘要会在保存卷纲或导入里程碑时由模型生成并固化，章节生成只读取当前阶段摘要，不再整段灌入阶段结构。',
+    });
+  }
+
+  async function resolveBookOutlineWithSummary(fields: BookOutlineFields) {
+    const result = await resolveBookOutlineWithAiSummary({
+      serverUrl: settings.serverUrl,
+      modelConfig: buildModelRequestConfig(settings),
+      projectTitle,
+      projectDescription,
+      genre,
+      fields,
+    });
+
+    if (result.usedFallback) {
+      toast(`模型摘要失败，已回退本地摘要：${result.errorMessage || '未知错误'}`, 'warning');
+    }
+
+    return result.fields;
+  }
+
+  async function resolveVolumeOutlineWithSummary(volumeId: Id, fields: VolumeOutlineFields) {
+    const volume = sortedVolumes.find((item) => item.id === volumeId) ?? null;
+
+    if (!volume) {
+      return {
+        ...fields,
+        summary: buildVolumeOutlineSummary(fields),
+        milestones: fields.milestones.map((milestone, index) => ({
+          ...milestone,
+          summary: buildVolumeMilestoneSummary(milestone, index),
+        })),
+      } satisfies VolumeOutlineFields;
+    }
+
+    const result = await resolveVolumeOutlineWithAiSummary({
+      serverUrl: settings.serverUrl,
+      modelConfig: buildModelRequestConfig(settings),
+      projectTitle,
+      projectDescription,
+      volumeTitle: volume.title,
+      volumeOrder: volume.order,
+      bookOutlineSummary: buildBookOutlineSummary(bookDraft),
+      fields,
+    });
+
+    if (result.usedFallback) {
+      toast(`卷级模型摘要失败，已回退本地摘要：${result.errorMessage || '未知错误'}`, 'warning');
+    }
+
+    return result.fields;
+  }
+
+  const chapterBeatListItems = useMemo(
+    () =>
+      filteredBeatRows.map((item) => ({
+        key: item.row.key,
+        chapterNumber: item.row.chapterNumber,
+        displayChapterNumber: item.row.displayChapterNumber,
+        chapterLabel: item.row.chapterLabel,
+        focusCharacter: item.draft.focusCharacter,
+        mainPlot: item.draft.mainPlot,
+        hookOut: item.draft.hookOut,
+        milestoneLabel:
+          typeof item.milestoneIndex === 'number'
+            ? `阶段 ${item.milestoneIndex + 1}${item.milestone?.title?.trim() ? ` · ${item.milestone.title.trim()}` : ''}`
+            : '',
+        status: item.status,
+        selected: selectedBeatRow?.row.key === item.row.key,
+        isBoundChapter: Boolean(item.row.chapterId),
+      })),
+    [filteredBeatRows, selectedBeatRow],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -1134,6 +1815,7 @@ export function OutlineView({
       worldRules: [...bookOutline.worldRules],
       endgameHint: bookOutline.endgameHint,
       toneGuide: bookOutline.toneGuide,
+      summary: bookOutline.summary ?? '',
     });
   }, [bookOutline?.id, bookOutline?.updatedAt]);
 
@@ -1154,6 +1836,24 @@ export function OutlineView({
       mounted = false;
     };
   }, [projectId, chapters.length, chapterBeats.length]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    void (async () => {
+      const outlines = await db.chapterOutlines.where('projectId').equals(projectId).toArray();
+
+      if (!mounted) {
+        return;
+      }
+
+      setChapterOutlines(outlines);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [projectId, chapters.length]);
 
   useEffect(() => {
     setVolumeDraftMap((previous) => {
@@ -1179,6 +1879,8 @@ export function OutlineView({
               foreshadowSeeds: [...persisted.foreshadowSeeds],
               requiredEntities: [...(persisted.requiredEntities ?? [])],
               requiredForeshadows: [...(persisted.requiredForeshadows ?? [])],
+              requiredForeshadowIds: [...(persisted.requiredForeshadowIds ?? [])],
+              foreshadowRefs: normalizeForeshadowRefs(persisted.foreshadowRefs),
               estimatedChapterCount: persisted.estimatedChapterCount,
               milestones: persisted.milestones.map((milestone) => ({
                 ...milestone,
@@ -1190,7 +1892,11 @@ export function OutlineView({
                 mustPayoff: [...milestone.mustPayoff],
                 requiredEntities: [...(milestone.requiredEntities ?? [])],
                 requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
+                requiredForeshadowIds: [...(milestone.requiredForeshadowIds ?? [])],
+                foreshadowRefs: normalizeForeshadowRefs(milestone.foreshadowRefs),
+                summary: milestone.summary ?? '',
               })),
+              summary: persisted.summary ?? '',
             }
           : previous[volume.id] ?? createEmptyVolumeDraft();
       }
@@ -1216,6 +1922,22 @@ export function OutlineView({
   }, [chapterBeatRowsByVolumeId]);
 
   useEffect(() => {
+    setChapterOutlineDraftMap((previous) => {
+      const next = { ...previous };
+      const outlineByChapterId = new Map(chapterOutlines.map((outline) => [outline.chapterId, outline] as const));
+
+      for (const chapter of chapters) {
+        const persisted = outlineByChapterId.get(chapter.id);
+        next[chapter.id] = persisted
+          ? createChapterOutlineDraft(persisted)
+          : previous[chapter.id] ?? createEmptyChapterOutlineDraft();
+      }
+
+      return next;
+    });
+  }, [chapterOutlines, chapters]);
+
+  useEffect(() => {
     setSelectedMilestoneIndexMap((previous) => {
       const next = { ...previous };
 
@@ -1230,7 +1952,7 @@ export function OutlineView({
         }
 
         if (!hasStoredSelection) {
-          next[volume.id] = 0;
+          next[volume.id] = null;
           continue;
         }
 
@@ -1242,7 +1964,7 @@ export function OutlineView({
               currentSelected < 0 ||
               currentSelected >= milestones.length))
         ) {
-          next[volume.id] = 0;
+          next[volume.id] = null;
         }
       }
 
@@ -1256,6 +1978,7 @@ export function OutlineView({
     }
 
     setExpandedVolumeId(focusVolumeId);
+    setOutlineMode('beats');
     const timer = window.setTimeout(() => {
       const target = volumeCardRefs.current[focusVolumeId];
 
@@ -1275,27 +1998,12 @@ export function OutlineView({
   }, [focusVolumeId, sortedVolumes.length]);
 
   useEffect(() => {
-    if (!openVolumeMenuId) {
+    if (hasVolumes) {
       return;
     }
 
-    function handlePointerDown(event: PointerEvent) {
-      const currentMenuId = openVolumeMenuId;
-      const currentMenu = currentMenuId ? volumeMenuRefs.current[currentMenuId] : null;
-
-      if (!currentMenu || !(event.target instanceof Node) || currentMenu.contains(event.target)) {
-        return;
-      }
-
-      setOpenVolumeMenuId(null);
-    }
-
-    window.addEventListener('pointerdown', handlePointerDown);
-
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown);
-    };
-  }, [openVolumeMenuId]);
+    setOutlineMode('book');
+  }, [hasVolumes]);
 
   useEffect(() => {
     if (!fissionDialogVolumeId) {
@@ -1315,6 +2023,36 @@ export function OutlineView({
     };
   }, [fissionDialogVolumeId]);
 
+  useEffect(() => {
+    if (!activeVolume) {
+      return;
+    }
+
+    setSelectedBeatRowKeyMap((previous) => {
+      const currentSelected = previous[activeVolume.id] ?? null;
+
+      if (filteredBeatRows.length === 0) {
+        if (currentSelected === null) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          [activeVolume.id]: null,
+        };
+      }
+
+      if (currentSelected && filteredBeatRows.some((item) => item.row.key === currentSelected)) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        [activeVolume.id]: filteredBeatRows[0]?.row.key ?? null,
+      };
+    });
+  }, [activeVolume, filteredBeatRows]);
+
   function setListFieldMode(fieldKey: string, nextMode: 'cards' | 'text') {
     setListFieldModes((previous) => ({
       ...previous,
@@ -1333,7 +2071,9 @@ export function OutlineView({
     setIsSavingBook(true);
 
     try {
-      await saveBookOutline(projectId, bookDraft);
+      const summarizedBookDraft = await resolveBookOutlineWithSummary(bookDraft);
+      setBookDraft(summarizedBookDraft);
+      await saveBookOutline(projectId, summarizedBookDraft);
       toast('全书大纲已保存', 'success');
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -1361,9 +2101,10 @@ export function OutlineView({
         ...buildModelRequestConfig(settings),
       });
 
-      setBookDraft(generated);
+      const summarizedBookDraft = await resolveBookOutlineWithSummary(generated);
+      setBookDraft(summarizedBookDraft);
       setBookHint('');
-      await saveBookOutline(projectId, generated);
+      await saveBookOutline(projectId, summarizedBookDraft);
       toast('AI 全书大纲已生成并保存', 'success');
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -1378,7 +2119,9 @@ export function OutlineView({
     setSavingVolumeId(volumeId);
 
     try {
-      await saveVolumeOutline(projectId, volumeId, draft);
+      const summarizedDraft = await resolveVolumeOutlineWithSummary(volumeId, draft);
+      updateVolumeDraft(volumeId, summarizedDraft);
+      await saveVolumeOutline(projectId, volumeId, summarizedDraft);
       toast('卷大纲已保存', 'success');
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -1414,9 +2157,13 @@ export function OutlineView({
 
     try {
       const seedOutline = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+      const seedPlanningRequirements = collectPlanningRequirements({
+        volumeOutline: seedOutline,
+        foreshadows,
+      });
       const foreshadowPlanBundle = await resolveVolumeForeshadowPlanBundle(
         volume.order,
-        seedOutline.requiredForeshadows,
+        seedPlanningRequirements.requiredForeshadowTitles,
       );
       const questionPoolBundle = await resolveVolumeQuestionPoolBundle(volume.order);
       const generated = await createVolumeOutline(settings.serverUrl, {
@@ -1438,44 +2185,53 @@ export function OutlineView({
         ...buildModelRequestConfig(settings),
       });
 
+      const nextDraft: VolumeOutlineFields = {
+        goal: generated.goal,
+        keyConflict: generated.keyConflict,
+        arcSummary: generated.arcSummary,
+        entryState: generated.entryState,
+        exitState: generated.exitState,
+        antagonist: generated.antagonist,
+        subPlot: generated.subPlot,
+        inheritedThreads: generated.inheritedThreads.map((item) => ({ ...item })),
+        protagonistGrowth: generated.protagonistGrowth,
+        emotionalArc: generated.emotionalArc,
+        estimatedWordCount: generated.estimatedWordCount,
+        povPlan: generated.povPlan,
+        keyEvents: [...generated.keyEvents],
+        foreshadowSeeds: [...generated.foreshadowSeeds],
+        requiredEntities: [...(generated.requiredEntities ?? [])],
+        requiredForeshadows: [...(generated.requiredForeshadows ?? [])],
+        requiredForeshadowIds: [...(generated.requiredForeshadowIds ?? [])],
+        foreshadowRefs: normalizeForeshadowRefs(generated.foreshadowRefs),
+        estimatedChapterCount: generated.estimatedChapterCount,
+        milestones: generated.milestones.map((milestone) => ({
+          ...milestone,
+          phasePacing: milestone.phasePacing,
+          phaseEmotionShift: milestone.phaseEmotionShift,
+          phasePOV: milestone.phasePOV,
+          keyTurns: [...milestone.keyTurns],
+          mustPlant: [...milestone.mustPlant],
+          mustPayoff: [...milestone.mustPayoff],
+          requiredEntities: [...(milestone.requiredEntities ?? [])],
+          requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
+          requiredForeshadowIds: [...(milestone.requiredForeshadowIds ?? [])],
+          foreshadowRefs: normalizeForeshadowRefs(milestone.foreshadowRefs),
+          summary: milestone.summary ?? '',
+        })),
+        summary: generated.summary ?? '',
+      };
+      const summarizedDraft = await resolveVolumeOutlineWithSummary(volumeId, nextDraft);
+
       setVolumeDraftMap((previous) => ({
         ...previous,
-        [volumeId]: {
-          goal: generated.goal,
-          keyConflict: generated.keyConflict,
-          arcSummary: generated.arcSummary,
-          entryState: generated.entryState,
-          exitState: generated.exitState,
-          antagonist: generated.antagonist,
-          subPlot: generated.subPlot,
-          inheritedThreads: generated.inheritedThreads.map((item) => ({ ...item })),
-          protagonistGrowth: generated.protagonistGrowth,
-          emotionalArc: generated.emotionalArc,
-          estimatedWordCount: generated.estimatedWordCount,
-          povPlan: generated.povPlan,
-          keyEvents: [...generated.keyEvents],
-          foreshadowSeeds: [...generated.foreshadowSeeds],
-          requiredEntities: [...(generated.requiredEntities ?? [])],
-          requiredForeshadows: [...(generated.requiredForeshadows ?? [])],
-          estimatedChapterCount: generated.estimatedChapterCount,
-          milestones: generated.milestones.map((milestone) => ({
-            ...milestone,
-            phasePacing: milestone.phasePacing,
-            phaseEmotionShift: milestone.phaseEmotionShift,
-            phasePOV: milestone.phasePOV,
-            keyTurns: [...milestone.keyTurns],
-            mustPlant: [...milestone.mustPlant],
-            mustPayoff: [...milestone.mustPayoff],
-            requiredEntities: [...(milestone.requiredEntities ?? [])],
-            requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
-          })),
-        },
+        [volumeId]: summarizedDraft,
       }));
       setVolumeHintMap((previous) => ({
         ...previous,
         [volumeId]: '',
       }));
-      await saveVolumeOutline(projectId, volumeId, generated);
+      await saveVolumeOutline(projectId, volumeId, summarizedDraft);
       toast(`《${volume.title}》卷大纲已生成并保存`, 'success');
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -1519,9 +2275,13 @@ export function OutlineView({
     setGeneratingMilestonesVolumeId(volumeId);
 
     try {
+      const milestonePlanningRequirements = collectPlanningRequirements({
+        volumeOutline: currentDraft,
+        foreshadows,
+      });
       const foreshadowPlanBundle = await resolveVolumeForeshadowPlanBundle(
         volume.order,
-        currentDraft.requiredForeshadows,
+        milestonePlanningRequirements.requiredForeshadowTitles,
       );
       const questionPoolBundle = await resolveVolumeQuestionPoolBundle(volume.order);
       const generated = await createVolumeMilestones(settings.serverUrl, {
@@ -1553,14 +2313,16 @@ export function OutlineView({
           mustPayoff: [...milestone.mustPayoff],
           requiredEntities: [...(milestone.requiredEntities ?? [])],
           requiredForeshadows: [...(milestone.requiredForeshadows ?? [])],
+          requiredForeshadowIds: [...(milestone.requiredForeshadowIds ?? [])],
         })),
       };
 
+      const summarizedDraft = await resolveVolumeOutlineWithSummary(volumeId, mergedDraft);
       setVolumeDraftMap((previous) => ({
         ...previous,
-        [volumeId]: mergedDraft,
+        [volumeId]: summarizedDraft,
       }));
-      await saveVolumeOutline(projectId, volumeId, mergedDraft);
+      await saveVolumeOutline(projectId, volumeId, summarizedDraft);
       toast(`《${volume.title}》里程碑已补全`, 'success');
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
@@ -1570,9 +2332,380 @@ export function OutlineView({
     }
   }
 
+  function downloadJsonFile(filename: string, payload: unknown) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const objectUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = sanitizeFileName(filename);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
+  }
+
+  function openImportDialog(target: OutlineImportTarget) {
+    pendingImportTargetRef.current = target;
+
+    if (!importFileInputRef.current) {
+      toast('导入控件尚未就绪，请稍后重试', 'warning');
+      return;
+    }
+
+    importFileInputRef.current.value = '';
+    importFileInputRef.current.click();
+  }
+
+  function handleExportBookOutline() {
+    const payload: OutlineJsonEnvelope<BookOutlineFields> = {
+      version: 1,
+      type: 'book-outline',
+      projectTitle,
+      exportedAt: new Date().toISOString(),
+      data: bookDraft,
+    };
+
+    downloadJsonFile(`${projectTitle}-全书大纲.json`, payload);
+  }
+
+  function handleExportVolumeOutline(volumeId: Id) {
+    const volume = sortedVolumes.find((item) => item.id === volumeId);
+
+    if (!volume) {
+      toast('未找到目标卷', 'warning');
+      return;
+    }
+
+    const payload: OutlineJsonEnvelope<VolumeOutlineFields> = {
+      version: 1,
+      type: 'volume-outline',
+      projectTitle,
+      exportedAt: new Date().toISOString(),
+      data: volumeDraftMap[volumeId] ?? createEmptyVolumeDraft(),
+      meta: {
+        volumeTitle: volume.title,
+        volumeOrder: volume.order,
+      },
+    };
+
+    downloadJsonFile(`${projectTitle}-第${volume.order}卷-${volume.title}-卷纲.json`, payload);
+  }
+
+  function handleExportVolumeMilestone(volumeId: Id, milestoneIndex: number) {
+    const volume = sortedVolumes.find((item) => item.id === volumeId);
+    const milestone = (volumeDraftMap[volumeId] ?? createEmptyVolumeDraft()).milestones[milestoneIndex] ?? null;
+
+    if (!volume || !milestone) {
+      toast('未找到目标里程碑', 'warning');
+      return;
+    }
+
+    const payload: OutlineJsonEnvelope<VolumeMilestoneDraft> = {
+      version: 1,
+      type: 'volume-milestone',
+      projectTitle,
+      exportedAt: new Date().toISOString(),
+      data: cloneVolumeMilestoneDraft(milestone),
+      meta: {
+        volumeTitle: volume.title,
+        volumeOrder: volume.order,
+        milestoneIndex,
+      },
+    };
+
+    downloadJsonFile(`${projectTitle}-第${volume.order}卷-${volume.title}-阶段${milestoneIndex + 1}.json`, payload);
+  }
+
+  function handleExportChapterBeats(volumeId: Id, milestoneIndex: number | null) {
+    const volume = sortedVolumes.find((item) => item.id === volumeId);
+    const draft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    const rows = chapterBeatRowsByVolumeId.get(volumeId) ?? [];
+    const scopedRows = rows.filter((row) => {
+      if (typeof milestoneIndex !== 'number') {
+        return true;
+      }
+
+      const currentMilestoneIndex =
+        row.beat?.milestoneIndex ?? getMilestoneIndexForChapterNumber(draft.milestones, row.chapterNumber);
+      return currentMilestoneIndex === milestoneIndex;
+    });
+    const beats = scopedRows
+      .map((row) => {
+        const beatDraft = chapterBeatDraftMap[row.key] ?? createEmptyChapterBeatDraft(row.chapterNumber);
+        return {
+          ...beatDraft,
+          orderInVolume: row.chapterNumber,
+        };
+      })
+      .filter((item) => hasChapterBeatDraftContent(item));
+
+    if (!volume) {
+      toast('未找到目标卷', 'warning');
+      return;
+    }
+
+    if (beats.length === 0) {
+      toast('当前范围还没有可导出的章节拍数据', 'warning');
+      return;
+    }
+
+    const scope: ChapterBeatExportScope = typeof milestoneIndex === 'number' ? 'milestone' : 'volume';
+    const scopeLabel =
+      typeof milestoneIndex === 'number'
+        ? `阶段${milestoneIndex + 1}`
+        : '全卷';
+    const payload: OutlineJsonEnvelope<{ scope: ChapterBeatExportScope; beats: ChapterBeatFields[] }> = {
+      version: 1,
+      type: 'chapter-beats',
+      projectTitle,
+      exportedAt: new Date().toISOString(),
+      data: {
+        scope,
+        beats,
+      },
+      meta: {
+        volumeTitle: volume.title,
+        volumeOrder: volume.order,
+        milestoneIndex,
+      },
+    };
+
+    downloadJsonFile(`${projectTitle}-第${volume.order}卷-${volume.title}-${scopeLabel}-章节拍.json`, payload);
+  }
+
+  function handleExportChapterOutline(row: ChapterOutlineRowModel) {
+    const draft = normalizeChapterOutlineDraft(
+      chapterOutlineDraftMap[row.chapterId] ?? createChapterOutlineDraft(row.outline),
+    );
+    const payload: OutlineJsonEnvelope<{
+      chapterRef: string;
+      chapterGoal: string;
+      chapterFunction: string;
+      generationModeHint: string;
+      promptModuleHints: NonNullable<ReturnType<typeof normalizeChapterOutlineDraft>['promptModuleHints']>;
+      sceneDecisionNote: string;
+      focusCharacter: string;
+      chapterBoundary: string;
+      revealCeiling: string;
+      openingState: string;
+      closingState: string;
+      sceneDrafts: NonNullable<ReturnType<typeof normalizeChapterOutlineDraft>['sceneDrafts']>;
+      beatDrafts: NonNullable<ReturnType<typeof normalizeChapterOutlineDraft>['beatDrafts']>;
+    }> = {
+      version: 1,
+      type: 'chapter-scene-outline',
+      projectTitle,
+      exportedAt: new Date().toISOString(),
+      data: {
+        chapterRef: `章纲/${projectTitle}-第${String(row.chapterNumber).padStart(2, '0')}章-${row.chapterTitle}-章纲.json`,
+        chapterGoal: draft.goal,
+        chapterFunction: draft.chapterFunction ?? '',
+        generationModeHint:
+          draft.generationModeHint ??
+          ((draft.sceneDrafts?.length ?? 0) <= 1 ? 'single-scene-chapter' : 'scene-by-scene'),
+        promptModuleHints: draft.promptModuleHints ?? { extraPrewriteModules: [] },
+        sceneDecisionNote: draft.sceneDecisionNote ?? '',
+        focusCharacter: draft.focusCharacter ?? '',
+        chapterBoundary: draft.chapterBoundary ?? '',
+        revealCeiling: draft.revealCeiling ?? '',
+        openingState: draft.openingState ?? '',
+        closingState: draft.closingState ?? '',
+        sceneDrafts: draft.sceneDrafts ?? [],
+        beatDrafts: draft.beatDrafts ?? [],
+      },
+      meta: {
+        chapterTitle: row.chapterTitle,
+        sourceType: 'chapter-outline',
+      },
+    };
+
+    downloadJsonFile(`${projectTitle}-第${row.chapterNumber}章-${row.chapterTitle}-场景章纲.json`, payload);
+  }
+
+  async function importBookOutlineJson(raw: unknown) {
+    const fields = readBookOutlineFields(unwrapOutlineJsonData(raw, 'book-outline'));
+    setIsSavingBook(true);
+
+    try {
+      const summarizedBookDraft = await resolveBookOutlineWithSummary(fields);
+      setBookDraft(summarizedBookDraft);
+      await saveBookOutline(projectId, summarizedBookDraft);
+      toast('全书大纲已导入', 'success');
+    } finally {
+      setIsSavingBook(false);
+    }
+  }
+
+  async function importVolumeOutlineJson(volumeId: Id, raw: unknown) {
+    const fields = readVolumeOutlineFields(unwrapOutlineJsonData(raw, 'volume-outline'));
+    setSavingVolumeId(volumeId);
+
+    try {
+      const summarizedDraft = await resolveVolumeOutlineWithSummary(volumeId, fields);
+      updateVolumeDraft(volumeId, summarizedDraft);
+      await saveVolumeOutline(projectId, volumeId, summarizedDraft);
+      toast('卷大纲已导入', 'success');
+    } finally {
+      setSavingVolumeId(null);
+    }
+  }
+
+  async function importVolumeMilestoneJson(volumeId: Id, milestoneIndex: number, raw: unknown) {
+    const milestone = readVolumeMilestoneDraft(unwrapOutlineJsonData(raw, 'volume-milestone'));
+    const currentDraft = cloneVolumeDraft(volumeDraftMap[volumeId] ?? createEmptyVolumeDraft());
+
+    if (milestoneIndex < 0 || milestoneIndex >= currentDraft.milestones.length) {
+      throw new Error('目标里程碑不存在，无法导入');
+    }
+
+    const nextDraft: VolumeOutlineFields = {
+      ...currentDraft,
+      milestones: currentDraft.milestones.map((item, index) =>
+        index === milestoneIndex ? milestone : item,
+      ),
+    };
+
+    setSavingVolumeId(volumeId);
+
+    try {
+      const summarizedDraft = await resolveVolumeOutlineWithSummary(volumeId, nextDraft);
+      setVolumeDraftMap((previous) => ({
+        ...previous,
+        [volumeId]: summarizedDraft,
+      }));
+      await saveVolumeOutline(projectId, volumeId, summarizedDraft);
+      toast(`阶段 ${milestoneIndex + 1} 里程碑已导入`, 'success');
+    } finally {
+      setSavingVolumeId(null);
+    }
+  }
+
+  async function importChapterBeatsJson(volumeId: Id, milestoneIndex: number | null, raw: unknown) {
+    const draft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    const rows = chapterBeatRowsByVolumeId.get(volumeId) ?? [];
+    const startOrderInVolume =
+      typeof milestoneIndex === 'number'
+        ? computeMilestoneStartChapter(draft.milestones, milestoneIndex)
+        : 1;
+    const endOrderInVolume =
+      typeof milestoneIndex === 'number'
+        ? computeMilestoneEndChapter(draft.milestones, milestoneIndex)
+        : Number.MAX_SAFE_INTEGER;
+    const beats = readChapterBeatFieldList(
+      unwrapOutlineJsonData(raw, 'chapter-beats'),
+      startOrderInVolume,
+    );
+
+    if (beats.length === 0) {
+      throw new Error('导入文件中没有可写入的章节拍数据');
+    }
+
+    const inputs = beats
+      .map((beat, index) => {
+        const fallbackOrderInVolume = startOrderInVolume + index;
+        const resolvedOrderInVolume =
+          typeof milestoneIndex === 'number' && (beat.orderInVolume < startOrderInVolume || beat.orderInVolume > endOrderInVolume)
+            ? fallbackOrderInVolume
+            : beat.orderInVolume;
+        const matchedRow = rows.find((row) => row.chapterNumber === resolvedOrderInVolume) ?? null;
+
+        return {
+          ...beat,
+          chapterId: matchedRow?.chapterId,
+          orderInVolume: resolvedOrderInVolume,
+          milestoneIndex:
+            typeof milestoneIndex === 'number'
+              ? milestoneIndex
+              : beat.milestoneIndex ?? getMilestoneIndexForChapterNumber(draft.milestones, resolvedOrderInVolume),
+        };
+      })
+      .sort((left, right) => left.orderInVolume - right.orderInVolume);
+
+    if (typeof milestoneIndex === 'number') {
+      await replaceVolumeChapterBeatsInRange(
+        projectId,
+        volumeId,
+        startOrderInVolume,
+        endOrderInVolume,
+        inputs,
+      );
+      toast(`阶段 ${milestoneIndex + 1} 章节拍已导入`, 'success');
+      return;
+    }
+
+    await saveVolumeChapterBeats(projectId, volumeId, inputs);
+    toast('章节拍已导入', 'success');
+  }
+
+  async function importChapterOutlineJson(chapterId: Id, raw: unknown) {
+    const draft = readChapterOutlineDraft(unwrapOutlineJsonData(raw, ['chapter-outline', 'chapter-scene-outline']));
+    const targetRow = activeVolumeOutlineRows.find((item) => item.chapterId === chapterId) ?? null;
+    setChapterOutlineDraftMap((previous) => ({
+      ...previous,
+      [chapterId]: draft,
+    }));
+    setSavingOutlineChapterId(chapterId);
+
+    try {
+      const saved = await saveChapterOutline(projectId, chapterId, draft, {
+        milestoneIndex: targetRow?.milestoneIndex ?? null,
+      });
+      setChapterOutlines((previous) => [
+        ...previous.filter((item) => item.chapterId !== chapterId),
+        saved,
+      ]);
+      toast('章纲已导入', 'success');
+    } finally {
+      setSavingOutlineChapterId(null);
+    }
+  }
+
+  async function handleImportFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    const target = pendingImportTargetRef.current;
+    pendingImportTargetRef.current = null;
+    event.target.value = '';
+
+    if (!file || !target) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+
+      if (target.type === 'book-outline') {
+        await importBookOutlineJson(parsed);
+        return;
+      }
+
+      if (target.type === 'volume-outline') {
+        await importVolumeOutlineJson(target.volumeId, parsed);
+        return;
+      }
+
+      if (target.type === 'volume-milestone') {
+        await importVolumeMilestoneJson(target.volumeId, target.milestoneIndex, parsed);
+        return;
+      }
+
+      if (target.type === 'chapter-outline') {
+        await importChapterOutlineJson(target.chapterId, parsed);
+        return;
+      }
+
+      await importChapterBeatsJson(target.volumeId, target.milestoneIndex, parsed);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`导入 JSON 失败：${message}`, 'error');
+    }
+  }
+
   function buildReconcileLoreSummary(draft: VolumeOutlineFields) {
     const planningRequirements = collectPlanningRequirements({
       volumeOutline: draft,
+      foreshadows,
     });
     const requiredEntitySet = new Set(planningRequirements.requiredEntityNames.map((item) => item.trim().toLowerCase()));
     const selectedEntities = entities
@@ -1601,6 +2734,7 @@ export function OutlineView({
   function buildReconcileForeshadowSummary(draft: VolumeOutlineFields) {
     const planningRequirements = collectPlanningRequirements({
       volumeOutline: draft,
+      foreshadows,
     });
     const requiredForeshadowSet = new Set(
       planningRequirements.requiredForeshadowTitles.map((item) => item.trim().toLowerCase()),
@@ -1749,10 +2883,14 @@ export function OutlineView({
       milestones: volumePlanReconcilePreview.response.proposedMilestones,
     };
 
-    await saveVolumeOutline(projectId, volumePlanReconcilePreview.volumeId, nextDraft);
+    const summarizedDraft = await resolveVolumeOutlineWithSummary(
+      volumePlanReconcilePreview.volumeId,
+      nextDraft,
+    );
+    await saveVolumeOutline(projectId, volumePlanReconcilePreview.volumeId, summarizedDraft);
     setVolumeDraftMap((previous) => ({
       ...previous,
-      [volumePlanReconcilePreview.volumeId]: nextDraft,
+      [volumePlanReconcilePreview.volumeId]: summarizedDraft,
     }));
     toast(`《${volumePlanReconcilePreview.volumeTitle}》卷规划已更新`, 'success');
     setVolumePlanReconcilePreview(null);
@@ -1838,6 +2976,49 @@ export function OutlineView({
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
       toast(`调整章节拍顺序失败：${message}`, 'error');
+    }
+  }
+
+  async function handleDeleteChapterBeat(row: ChapterBeatRowModel) {
+    const draft = chapterBeatDraftMap[row.key] ?? createEmptyChapterBeatDraft(row.chapterNumber);
+    const hasDraftContent = hasChapterBeatDraftContent(draft);
+
+    if (!row.beatId && !hasDraftContent) {
+      toast('当前章节拍没有可删除的内容', 'warning');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      row.beatId
+        ? `确认删除第 ${row.chapterNumber} 拍吗？会清空这一拍已保存内容，但保留章节槽。`
+        : `确认清空第 ${row.chapterNumber} 拍当前未保存草稿吗？`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      if (row.beatId) {
+        await deleteChapterBeat(row.beatId);
+      }
+
+      setChapterBeatDraftMap((previous) => ({
+        ...previous,
+        [row.key]: createEmptyChapterBeatDraft(row.chapterNumber),
+      }));
+
+      if (activeVolume) {
+        setSelectedBeatRowKeyMap((previous) => ({
+          ...previous,
+          [activeVolume.id]: null,
+        }));
+      }
+
+      toast(row.beatId ? `第 ${row.chapterNumber} 拍已删除` : `第 ${row.chapterNumber} 拍草稿已清空`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`删除章节拍失败：${message}`, 'error');
     }
   }
 
@@ -2086,6 +3267,9 @@ export function OutlineView({
         titleHint: beat.titleHint,
         scenePurpose: beat.scenePurpose,
         focusCharacter: beat.focusCharacter,
+        mustAppearCharacters: beat.mustAppearCharacters ?? [],
+        availableCharacters: beat.availableCharacters ?? [],
+        requiredForeshadows: beat.requiredForeshadows ?? [],
         mainPlot: beat.mainPlot,
         subPlot: beat.subPlot,
         pacing: beat.pacing,
@@ -2172,6 +3356,60 @@ export function OutlineView({
     });
   }
 
+  function addVolumeForeshadowRef(volumeId: Id) {
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    updateVolumeDraft(volumeId, {
+      foreshadowRefs: [...(currentDraft.foreshadowRefs ?? []), createEmptyForeshadowRef()],
+    });
+  }
+
+  function updateVolumeForeshadowRef(volumeId: Id, index: number, patch: Partial<ForeshadowRef>) {
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    updateVolumeDraft(volumeId, {
+      foreshadowRefs: (currentDraft.foreshadowRefs ?? []).map((item, itemIndex) =>
+        itemIndex === index ? normalizeForeshadowRef({ ...item, ...patch }) : item,
+      ),
+    });
+  }
+
+  function removeVolumeForeshadowRef(volumeId: Id, index: number) {
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    updateVolumeDraft(volumeId, {
+      foreshadowRefs: (currentDraft.foreshadowRefs ?? []).filter((_, itemIndex) => itemIndex !== index),
+    });
+  }
+
+  function addMilestoneForeshadowRef(volumeId: Id, milestoneIndex: number) {
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    const milestone = currentDraft.milestones[milestoneIndex] ?? createEmptyVolumeMilestoneDraft();
+    updateVolumeMilestoneDraft(volumeId, milestoneIndex, {
+      foreshadowRefs: [...(milestone.foreshadowRefs ?? []), createEmptyForeshadowRef()],
+    });
+  }
+
+  function updateMilestoneForeshadowRef(
+    volumeId: Id,
+    milestoneIndex: number,
+    index: number,
+    patch: Partial<ForeshadowRef>,
+  ) {
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    const milestone = currentDraft.milestones[milestoneIndex] ?? createEmptyVolumeMilestoneDraft();
+    updateVolumeMilestoneDraft(volumeId, milestoneIndex, {
+      foreshadowRefs: (milestone.foreshadowRefs ?? []).map((item, itemIndex) =>
+        itemIndex === index ? normalizeForeshadowRef({ ...item, ...patch }) : item,
+      ),
+    });
+  }
+
+  function removeMilestoneForeshadowRef(volumeId: Id, milestoneIndex: number, index: number) {
+    const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
+    const milestone = currentDraft.milestones[milestoneIndex] ?? createEmptyVolumeMilestoneDraft();
+    updateVolumeMilestoneDraft(volumeId, milestoneIndex, {
+      foreshadowRefs: (milestone.foreshadowRefs ?? []).filter((_, itemIndex) => itemIndex !== index),
+    });
+  }
+
   function addVolumeMilestone(volumeId: Id) {
     const currentDraft = volumeDraftMap[volumeId] ?? createEmptyVolumeDraft();
 
@@ -2193,18 +3431,21 @@ export function OutlineView({
       milestones: nextMilestones,
     };
 
-    setVolumeDraftMap((previous) => ({
-      ...previous,
-      [volumeId]: nextDraft,
-    }));
     setSavingVolumeId(volumeId);
+    let appliedDraft = nextDraft;
 
     try {
-      await saveVolumeOutline(projectId, volumeId, nextDraft);
+      const summarizedDraft = await resolveVolumeOutlineWithSummary(volumeId, nextDraft);
+      appliedDraft = summarizedDraft;
+      setVolumeDraftMap((previous) => ({
+        ...previous,
+        [volumeId]: summarizedDraft,
+      }));
+      await saveVolumeOutline(projectId, volumeId, summarizedDraft);
       toast('里程碑已删除并保存', 'success');
     } catch (error) {
       setVolumeDraftMap((previous) =>
-        previous[volumeId] === nextDraft
+        previous[volumeId] === appliedDraft
           ? {
               ...previous,
               [volumeId]: currentDraft,
@@ -2226,6 +3467,358 @@ export function OutlineView({
         ...patch,
       },
     }));
+  }
+
+  function updateChapterOutlineDraft(chapterId: Id, patch: Partial<ReturnType<typeof createEmptyChapterOutlineDraft>>) {
+    setChapterOutlineDraftMap((previous) => ({
+      ...previous,
+      [chapterId]: normalizeChapterOutlineDraft({
+        ...(previous[chapterId] ?? createEmptyChapterOutlineDraft()),
+        ...patch,
+      }),
+    }));
+  }
+
+  function selectBeatRow(rowKey: string) {
+    if (!activeVolume) {
+      return;
+    }
+
+    setSelectedBeatRowKeyMap((previous) => ({
+      ...previous,
+      [activeVolume.id]: rowKey,
+    }));
+  }
+
+  function selectOutlineChapter(chapterId: Id) {
+    if (!activeVolume) {
+      return;
+    }
+
+    setSelectedOutlineChapterIdMap((previous) => ({
+      ...previous,
+      [activeVolume.id]: chapterId,
+    }));
+  }
+
+  function createOutlineDraftFromBeat(beat: ChapterBeat | null | undefined) {
+    if (!beat) {
+      return createEmptyChapterOutlineDraft();
+    }
+
+    const derivedBeatId = `beat_${String(beat.orderInVolume).padStart(2, '0')}`;
+    const derivedSceneId = 'scene_01';
+
+    return normalizeChapterOutlineDraft({
+      ...createEmptyChapterOutlineDraft(),
+      goal: beat.mainPlot,
+      chapterFunction: beat.scenePurpose,
+      generationModeHint: 'single-scene-chapter',
+      sceneDecisionNote: '当前由章节拍导入，先按单场景直出整章处理；beat 仅作为场景内部推进骨架。',
+      focusCharacter: beat.focusCharacter,
+      mustAppearCharacters: [...(beat.mustAppearCharacters ?? [])],
+      availableCharacters: [...(beat.availableCharacters ?? [])],
+      mainPlot: beat.mainPlot,
+      subPlot: beat.subPlot,
+      coreScene: beat.scenePurpose,
+      sceneAnchors: [...beat.keyItems],
+      infoBudget: beat.noveltyRequirement,
+      powerShift: beat.powerDelta,
+      chapterHook: beat.hookOut,
+      foreshadowRefs: (beat.requiredForeshadows ?? []).map((title) =>
+        normalizeForeshadowRef({
+          foreshadowId: '',
+          foreshadowTitle: title,
+          action: 'advance',
+          intensity: 'medium',
+        }),
+      ),
+      sceneDrafts: [
+        {
+          ...createEmptyChapterSceneDraft(),
+          sceneId: derivedSceneId,
+          sceneTitle: beat.titleHint || '场景 1',
+          macroScene: beat.scenePurpose,
+          sceneRole: beat.scenePurpose,
+          sceneGoal: beat.mainPlot,
+          sceneResult: beat.hookOut,
+          sceneHook: beat.hookOut,
+          actors: normalizeSceneActorRefs([
+            beat.focusCharacter
+              ? {
+                  characterId: beat.focusCharacter,
+                  role: 'focus',
+                }
+              : null,
+            ...dedupeTextList(beat.mustAppearCharacters ?? [])
+              .filter((name) => name !== beat.focusCharacter)
+              .map((characterId) => ({
+                characterId,
+                role: 'support' as const,
+              })),
+          ], 'support'),
+          availableCharacters: normalizeSceneActorRefs(
+            (beat.availableCharacters ?? []).map((characterId) => ({
+              characterId,
+              role: 'candidate' as const,
+            })),
+            'candidate',
+          ),
+          infoBudget: beat.noveltyRequirement,
+          powerShift: beat.powerDelta,
+          forbiddenNotes: [...beat.forbiddenPhrases],
+          beatRefs: [derivedBeatId],
+          foreshadowRefs: (beat.requiredForeshadows ?? []).map((title) =>
+            normalizeForeshadowRef({
+              foreshadowId: '',
+              foreshadowTitle: title,
+              action: 'advance',
+              intensity: 'medium',
+            }),
+          ),
+        } satisfies ChapterSceneDraft,
+      ],
+      beatDrafts: [
+        {
+          ...createEmptyOutlineBeatDraft(),
+          beatId: derivedBeatId,
+          sceneId: derivedSceneId,
+          beatTitle: beat.titleHint || '章节主推进',
+          scene: beat.scenePurpose,
+          actors: dedupeTextList([
+            beat.focusCharacter,
+            ...(beat.mustAppearCharacters ?? []),
+          ]),
+          progress: beat.mainPlot,
+          result: beat.hookOut,
+          foreshadowRefs: (beat.requiredForeshadows ?? []).map((title) =>
+            normalizeForeshadowRef({
+              foreshadowId: '',
+              foreshadowTitle: title,
+              action: 'advance',
+              intensity: 'medium',
+            }),
+          ),
+          forbiddenNotes: [...beat.forbiddenPhrases],
+        } satisfies ChapterOutlineBeatDraft,
+      ],
+      beats: [],
+    });
+  }
+
+  async function handleImportOutlineFromBeat(row: ChapterOutlineRowModel) {
+    const matchedBeat =
+      activeVolumeBeatRowsWithMeta.find((item) => item.row.chapterId === row.chapterId)?.row.beat ??
+      activeVolumeBeatRows.find((item) => item.chapterId === row.chapterId)?.beat ??
+      null;
+
+    if (!matchedBeat) {
+      toast('当前章节还没有章节拍可导入', 'warning');
+      return;
+    }
+
+    const imported = createOutlineDraftFromBeat(matchedBeat);
+    setChapterOutlineDraftMap((previous) => ({
+      ...previous,
+      [row.chapterId]: imported,
+    }));
+    selectOutlineChapter(row.chapterId);
+    toast('已从章节拍带入章纲草稿', 'success');
+  }
+
+  async function handleSaveChapterOutline(row: ChapterOutlineRowModel) {
+    const draft = chapterOutlineDraftMap[row.chapterId] ?? createEmptyChapterOutlineDraft();
+    setSavingOutlineChapterId(row.chapterId);
+
+    try {
+      const saved = await saveChapterOutline(projectId, row.chapterId, draft, {
+        milestoneIndex: row.milestoneIndex ?? null,
+      });
+      setChapterOutlines((previous) => [
+        ...previous.filter((item) => item.chapterId !== row.chapterId),
+        saved,
+      ]);
+      toast(`《${row.chapterTitle}》章纲已保存`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`保存章纲失败：${message}`, 'error');
+    } finally {
+      setSavingOutlineChapterId(null);
+    }
+  }
+
+  function addOutlineForeshadowRef(chapterId: Id) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      foreshadowRefs: [...(draft.foreshadowRefs ?? []), createEmptyForeshadowRef()],
+    });
+  }
+
+  function updateOutlineForeshadowRef(chapterId: Id, index: number, patch: Partial<ForeshadowRef>) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      foreshadowRefs: (draft.foreshadowRefs ?? []).map((item, itemIndex) =>
+        itemIndex === index ? normalizeForeshadowRef({ ...item, ...patch }) : item,
+      ),
+    });
+  }
+
+  function removeOutlineForeshadowRef(chapterId: Id, index: number) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      foreshadowRefs: (draft.foreshadowRefs ?? []).filter((_, itemIndex) => itemIndex !== index),
+    });
+  }
+
+  function addOutlineBeatDraft(chapterId: Id) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      beatDrafts: [...(draft.beatDrafts ?? []), createEmptyOutlineBeatDraft()],
+    });
+  }
+
+  function addOutlineSceneDraft(chapterId: Id) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    const nextIndex = (draft.sceneDrafts?.length ?? 0) + 1;
+    const sceneId = `scene_${String(nextIndex).padStart(2, '0')}`;
+    updateChapterOutlineDraft(chapterId, {
+      sceneDrafts: [
+        ...(draft.sceneDrafts ?? []),
+        {
+          ...createEmptyChapterSceneDraft(),
+          sceneId,
+          sceneTitle: `场景 ${nextIndex}`,
+        },
+      ],
+    });
+  }
+
+  function updateOutlineSceneDraft(chapterId: Id, index: number, patch: Partial<ChapterSceneDraft>) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      sceneDrafts: (draft.sceneDrafts ?? []).map((item, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...item,
+              ...patch,
+            }
+          : item,
+      ),
+    });
+  }
+
+  function removeOutlineSceneDraft(chapterId: Id, index: number) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      sceneDrafts: (draft.sceneDrafts ?? []).filter((_, itemIndex) => itemIndex !== index),
+    });
+  }
+
+  function toggleOutlinePromptModule(chapterId: Id, moduleKey: PromptModuleKey) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    const currentModules = new Set(draft.promptModuleHints?.extraPrewriteModules ?? []);
+
+    if (currentModules.has(moduleKey)) {
+      currentModules.delete(moduleKey);
+    } else {
+      currentModules.add(moduleKey);
+    }
+
+    updateChapterOutlineDraft(chapterId, {
+      promptModuleHints: {
+        extraPrewriteModules: ['strand_weave', 'cool_points'].filter((item): item is PromptModuleKey => currentModules.has(item)),
+      },
+    });
+  }
+
+  function updateOutlineBeatDraft(chapterId: Id, index: number, patch: Partial<ChapterOutlineBeatDraft>) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      beatDrafts: (draft.beatDrafts ?? []).map((item, itemIndex) =>
+        itemIndex === index
+          ? {
+              ...item,
+              ...patch,
+            }
+          : item,
+      ),
+    });
+  }
+
+  function removeOutlineBeatDraft(chapterId: Id, index: number) {
+    const draft = chapterOutlineDraftMap[chapterId] ?? createEmptyChapterOutlineDraft();
+    updateChapterOutlineDraft(chapterId, {
+      beatDrafts: (draft.beatDrafts ?? []).filter((_, itemIndex) => itemIndex !== index),
+    });
+  }
+
+  function handleSelectVolume(volumeId: Id) {
+    setExpandedVolumeId(volumeId);
+    setChapterJumpValue('');
+
+    if (outlineMode === 'book') {
+      setOutlineMode('volume');
+    }
+  }
+
+  function handleSelectMilestone(milestoneIndex: number | null) {
+    if (!activeVolume) {
+      return;
+    }
+
+    setSelectedMilestoneIndexMap((previous) => ({
+      ...previous,
+      [activeVolume.id]: milestoneIndex,
+    }));
+    setBeatFilterStatus('all');
+
+    if (outlineMode === 'milestone') {
+      return;
+    }
+
+    setOutlineMode('beats');
+  }
+
+  function handleJumpToChapter() {
+    if (!activeVolume) {
+      toast('请先选择一卷，再定位章节', 'warning');
+      return;
+    }
+
+    const parsedChapterNumber = Number(chapterJumpValue.trim());
+
+    if (!Number.isFinite(parsedChapterNumber) || parsedChapterNumber <= 0) {
+      toast('请输入有效的章号', 'warning');
+      return;
+    }
+
+    const target = activeVolumeBeatRowsWithMeta.find(
+      (item) => item.row.chapterNumber === Math.trunc(parsedChapterNumber),
+    );
+
+    if (!target) {
+      toast(`《${activeVolume.title}》还没有第 ${Math.trunc(parsedChapterNumber)} 章的章节拍`, 'warning');
+      return;
+    }
+
+    setOutlineMode('beats');
+    setBeatFilterStatus('all');
+    setSelectedMilestoneIndexMap((previous) => ({
+      ...previous,
+      [activeVolume.id]:
+        typeof target.milestoneIndex === 'number' ? target.milestoneIndex : previous[activeVolume.id] ?? null,
+    }));
+    setSelectedBeatRowKeyMap((previous) => ({
+      ...previous,
+      [activeVolume.id]: target.row.key,
+    }));
+
+    window.setTimeout(() => {
+      beatRowRefs.current[target.row.key]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    }, 60);
   }
 
   function openFissionDialog(volumeId: Id, milestoneIndex?: number | null) {
@@ -2459,32 +4052,204 @@ export function OutlineView({
     <>
       <section
         className={[
-          'min-h-0 flex-1 space-y-6 overflow-y-auto pb-6',
+          'min-h-0 flex-1 overflow-hidden',
           className ?? '',
         ]
           .filter(Boolean)
           .join(' ')}
       >
-        <article className="overflow-hidden rounded-[28px] border border-indigo-500/20 bg-[radial-gradient(circle_at_top_left,rgba(99,102,241,0.16),transparent_38%),linear-gradient(180deg,rgba(23,23,23,0.96),rgba(10,10,10,0.96))] p-6 shadow-[0_24px_80px_rgba(0,0,0,0.22)]">
+        <div
+          className={`grid h-full gap-4 ${
+            showBeatInspector
+              ? 'xl:grid-cols-[250px_minmax(0,1fr)_340px] 2xl:grid-cols-[270px_minmax(0,1fr)_380px]'
+              : 'xl:grid-cols-[250px_minmax(0,1fr)] 2xl:grid-cols-[270px_minmax(0,1fr)]'
+          }`}
+        >
+          <aside className="min-h-0 overflow-hidden rounded-[28px] border border-neutral-800 bg-neutral-900/70 shadow-[0_24px_80px_rgba(0,0,0,0.22)]">
+            <div className="h-full overflow-y-auto p-4">
+              <OutlineWorkspaceSidebar
+                volumes={volumeSummaryItems}
+                milestones={milestoneSummaryItems}
+                activeVolumeTitle={activeVolume?.title ?? null}
+                chapterJumpValue={chapterJumpValue}
+                beatFilterStatus={beatFilterStatus}
+                onChapterJumpValueChange={setChapterJumpValue}
+                onJumpChapter={handleJumpToChapter}
+                onSelectVolume={handleSelectVolume}
+                onSelectMilestone={handleSelectMilestone}
+                onBeatFilterStatusChange={setBeatFilterStatus}
+                onOpenVolumeSummary={openVolumeSummaryDialog}
+                onOpenMilestoneSummary={openMilestoneSummaryDialog}
+                registerVolumeNode={(volumeId, node) => {
+                  volumeCardRefs.current[volumeId] = node;
+                }}
+              />
+            </div>
+          </aside>
+
+          <div className="min-h-0 overflow-y-auto pb-6 pr-1">
+            <div className="space-y-4">
+              <section className="rounded-[24px] border border-neutral-800 bg-neutral-900/70 px-4 py-3 shadow-[0_20px_60px_rgba(0,0,0,0.18)]">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <OutlineModeTabs
+                      value={outlineMode}
+                      onChange={setOutlineMode}
+                      disabledModes={{
+                        volume: !hasVolumes,
+                        milestone: !hasVolumes,
+                        beats: !hasVolumes,
+                        outline: !hasVolumes,
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowStructureMemoryOverview((current) => !current)}
+                      className={`inline-flex min-h-[48px] items-center gap-2 rounded-2xl border px-4 py-3 text-sm transition ${
+                        showStructureMemoryOverview
+                          ? 'border-emerald-400/40 bg-emerald-500/12 text-emerald-50'
+                          : 'border-neutral-800 bg-neutral-950/50 text-neutral-200 hover:border-neutral-700 hover:bg-neutral-900/70'
+                      }`}
+                    >
+                      <GitBranch size={15} />
+                      {showStructureMemoryOverview ? '收起结构记忆概览' : '结构记忆概览'}
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                      当前卷：{activeVolume?.title ?? '未选择'}
+                    </span>
+                    <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                      阶段：
+                      {typeof activeSelectedMilestoneIndex === 'number'
+                        ? `阶段 ${activeSelectedMilestoneIndex + 1}`
+                        : '整卷'}
+                    </span>
+                    {showBeatInspector ? (
+                      <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                        章节拍：{beatStatusCounts.all}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              </section>
+
+              {showStructureMemoryOverview ? (
+                <section className="rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.2)]">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">结构记忆概览</p>
+                      <h3 className="mt-2 text-xl font-semibold text-neutral-100">当前项目 / 当前卷摘要</h3>
+                      <p className="mt-2 text-sm leading-7 text-neutral-400">
+                        当前摘要默认跟随《{activeStructureVolume?.title ?? '当前卷'}》。这里先看摘要，正式维护统一去结构记忆工作台。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onOpenStructureMemory?.('thread-ledger')}
+                      className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-2.5 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-800"
+                    >
+                      打开结构记忆工作台
+                      <ArrowRight size={15} />
+                    </button>
+                  </div>
+
+                  <div className="mt-4 grid gap-4 xl:grid-cols-2">
+                    {structureMemorySummaries.map((item) => (
+                      <StructureMemorySummaryCard
+                        key={item.key}
+                        label={item.label}
+                        detail={item.detail}
+                        count={item.count}
+                        attentionCount={item.attentionCount}
+                        icon={item.icon}
+                        onOpen={onOpenStructureMemory ? () => onOpenStructureMemory(item.key) : undefined}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ) : outlineMode === 'book' ? (
+                <>
+                  <article className="overflow-hidden rounded-[28px] border border-neutral-800 bg-[linear-gradient(180deg,rgba(18,31,42,0.96),rgba(10,19,27,0.94))] p-6 shadow-[0_24px_80px_rgba(0,0,0,0.22)]">
         <header className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-indigo-300">全书大纲</p>
+            <p className="text-xs uppercase tracking-[0.24em] text-[color:var(--studio-secondary)]">全书大纲</p>
             <h2 className="mt-3 text-2xl font-semibold text-white">{projectTitle}</h2>
             <p className="mt-2 text-sm text-neutral-300">定义你整本书的方向。</p>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-neutral-400">
               {projectDescription || '还没有项目简介。先把核心前提、主线冲突和世界规则定下来，后面的章节生成会稳很多。'}
             </p>
           </div>
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-indigo-400/20 bg-indigo-500/10 text-indigo-200">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-[color:var(--studio-line)] bg-[color:var(--studio-secondary-soft)] text-[color:var(--studio-secondary)]">
             <BookOpen size={20} />
           </div>
         </header>
 
         {isBookGuideVisible ? (
-          <div className="mt-5 rounded-2xl border border-dashed border-indigo-400/30 bg-indigo-500/10 px-4 py-4 text-sm leading-6 text-indigo-100">
+          <div className="mt-5 rounded-2xl border border-dashed border-[color:var(--studio-line-strong)] bg-[color:var(--studio-secondary-soft)] px-4 py-4 text-sm leading-6 text-[color:var(--studio-text)]">
             还没有大纲，点击「AI 生成」让 AI 帮你起草，或手动填写各字段。
           </div>
         ) : null}
+
+        <div className="mt-6 flex flex-col gap-3 border-y border-neutral-800/80 py-4 xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void handleSaveBookOutline()}
+              disabled={isSavingBook || isGeneratingBook}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSavingBook ? <LoaderCircle size={15} className="animate-spin" /> : <Save size={15} />}
+              保存全书大纲
+            </button>
+            <button
+              type="button"
+              onClick={openBookSummaryDialog}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800"
+            >
+              摘要
+            </button>
+            <button
+              type="button"
+              onClick={() => handleExportBookOutline()}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800"
+            >
+              <Download size={15} />
+              导出 JSON
+            </button>
+            <button
+              type="button"
+              onClick={() => openImportDialog({ type: 'book-outline' })}
+              disabled={isSavingBook || isGeneratingBook}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Upload size={15} />
+              导入 JSON
+            </button>
+            <p className="text-xs text-neutral-500">
+              题材标签：{genre.length > 0 ? genre.join(' / ') : '未设置'}
+            </p>
+          </div>
+
+          <div className="flex w-full flex-col gap-3 xl:w-auto xl:min-w-[420px] xl:flex-row xl:items-center">
+            <input
+              value={bookHint}
+              onChange={(event) => setBookHint(event.target.value)}
+              placeholder="输入灵感提示词（可选）"
+              className="h-11 flex-1 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-indigo-400"
+            />
+            <button
+              type="button"
+              onClick={() => void handleGenerateBookOutline()}
+              disabled={isSavingBook || isGeneratingBook}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-indigo-400 px-4 text-sm font-medium text-neutral-950 transition hover:bg-indigo-300 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isGeneratingBook ? <LoaderCircle size={15} className="animate-spin" /> : <Sparkles size={15} />}
+              AI 生成全书大纲
+            </button>
+          </div>
+        </div>
 
         <div className="mt-6 grid gap-4 md:grid-cols-2">
           <TextAreaField
@@ -2685,83 +4450,979 @@ export function OutlineView({
           />
         </div>
 
-        <footer className="mt-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => void handleSaveBookOutline()}
-              disabled={isSavingBook || isGeneratingBook}
-              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isSavingBook ? <LoaderCircle size={15} className="animate-spin" /> : <Save size={15} />}
-              保存全书大纲
-            </button>
-            <p className="text-xs text-neutral-500">
-              题材标签：{genre.length > 0 ? genre.join(' / ') : '未设置'}
-            </p>
-          </div>
-
-          <div className="flex w-full flex-col gap-3 xl:w-auto xl:min-w-[420px] xl:flex-row xl:items-center">
-            <input
-              value={bookHint}
-              onChange={(event) => setBookHint(event.target.value)}
-              placeholder="输入灵感提示词（可选）"
-              className="h-11 flex-1 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-indigo-400"
-            />
-            <button
-              type="button"
-              onClick={() => void handleGenerateBookOutline()}
-              disabled={isSavingBook || isGeneratingBook}
-              className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-indigo-400 px-4 text-sm font-medium text-neutral-950 transition hover:bg-indigo-300 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {isGeneratingBook ? <LoaderCircle size={15} className="animate-spin" /> : <Sparkles size={15} />}
-              AI 生成全书大纲
-            </button>
-          </div>
-        </footer>
       </article>
 
-      <section className="space-y-4 rounded-3xl border border-neutral-800 bg-neutral-900/70 p-5">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">结构记忆概览</p>
-            <h3 className="mt-2 text-xl font-semibold text-neutral-100">规划页只看摘要，正式维护统一去结构记忆工作台</h3>
-            <p className="mt-2 text-sm leading-7 text-neutral-400">
-              这里保留和当前项目 / 当前卷最相关的结构记忆摘要，不再直接嵌完整维护面板。需要新增、编辑、历史回填或处理守护告警时，请跳到独立的“结构记忆”页面。
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => onOpenStructureMemory?.('thread-ledger')}
-            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-2.5 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-800"
-          >
-            打开结构记忆工作台
-            <ArrowRight size={15} />
-          </button>
-        </div>
+                </>
+              ) : null}
 
-        {activeStructureVolume ? (
-          <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 px-4 py-4 text-sm leading-7 text-neutral-400">
-            当前摘要默认跟随《{activeStructureVolume.title}》。如果你从左侧卷目录切进来，会优先按该卷展示摘要；真正维护时请到结构记忆工作台集中处理。
-          </div>
-        ) : null}
+              {outlineMode === 'outline' ? (
+                <section className="space-y-4 rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.2)]">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">章纲工作区</p>
+                      <h3 className="mt-2 text-xl font-semibold text-neutral-100">
+                        {activeVolume ? `《${activeVolume.title}》章纲` : '先选择一卷'}
+                      </h3>
+                      <p className="mt-2 text-sm leading-7 text-neutral-400">
+                        这里维护正文前的执行纲要。章纲可直接新建，不依赖章节拍；若当前章已有章节拍，也可以一键导入作为起稿。
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                        当前章纲：{activeVolumeOutlineRows.filter((item) => item.outline !== null).length}/{activeVolumeOutlineRows.length}
+                      </span>
+                    </div>
+                  </div>
 
-        <div className="grid gap-4 xl:grid-cols-2">
-          {structureMemorySummaries.map((item) => (
-            <StructureMemorySummaryCard
-              key={item.key}
-              label={item.label}
-              detail={item.detail}
-              count={item.count}
-              attentionCount={item.attentionCount}
-              icon={item.icon}
-              onOpen={onOpenStructureMemory ? () => onOpenStructureMemory(item.key) : undefined}
-            />
-          ))}
-        </div>
-      </section>
+                  {!activeVolume ? (
+                    <div className="rounded-2xl border border-dashed border-neutral-700 bg-neutral-950/40 px-4 py-5 text-sm text-neutral-500">
+                      当前还没有可操作的卷。先在左侧创建或选择一卷，再进入章纲工作区。
+                    </div>
+                  ) : activeVolumeOutlineRows.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-neutral-700 bg-neutral-950/40 px-4 py-5 text-sm text-neutral-500">
+                      当前卷下还没有章节。先新建章节，再为每一章补章纲。
+                    </div>
+                  ) : (
+                    <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+                      <div className="space-y-2">
+                        {activeVolumeOutlineRows.map((row) => {
+                          const active = selectedOutlineRow?.chapterId === row.chapterId;
+                          const outlineSummary = row.outline ? serializeChapterOutlineDraft(createChapterOutlineDraft(row.outline)) : '';
 
-      <section className="space-y-4">
+                          return (
+                            <button
+                              key={row.chapterId}
+                              type="button"
+                              onClick={() => selectOutlineChapter(row.chapterId)}
+                              className={`w-full rounded-2xl border px-4 py-4 text-left transition ${
+                                active
+                                  ? 'border-emerald-400/40 bg-emerald-500/10'
+                                  : 'border-neutral-800 bg-neutral-950/60 hover:border-neutral-700 hover:bg-neutral-900'
+                              }`}
+                            >
+                              <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">第 {row.chapterNumber} 章</p>
+                              <p className="mt-2 text-sm font-medium text-neutral-100">{row.chapterTitle}</p>
+                              {typeof row.milestoneIndex === 'number' ? (
+                                <p className="mt-2 text-xs text-neutral-500">阶段 {row.milestoneIndex + 1}</p>
+                              ) : null}
+                              <p className="mt-2 line-clamp-3 text-xs leading-6 text-neutral-500">
+                                {outlineSummary || '当前还没有章纲，可直接手工新建，或从章节拍导入。'}
+                              </p>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {selectedOutlineRow && selectedOutlineDraft ? (
+                        <section className="space-y-4 rounded-3xl border border-neutral-800 bg-neutral-950/50 p-5">
+                          <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                            <div>
+                              <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">当前章纲</p>
+                              <p className="mt-2 text-sm text-neutral-500">
+                                第 {selectedOutlineRow.chapterNumber} 章标题直接复用现有章节名；修改这里会同步写回章节本体。
+                              </p>
+                              <p className="mt-2 text-xs text-neutral-500">
+                                当前写作单位：{getChapterWriteUnitCount(selectedOutlineDraft)} 个
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleExportChapterOutline(selectedOutlineRow)}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-2.5 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                              >
+                                <Download size={15} />
+                                导出 JSON
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openImportDialog({
+                                    type: 'chapter-outline',
+                                    chapterId: selectedOutlineRow.chapterId,
+                                  })
+                                }
+                                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-2.5 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                              >
+                                <Upload size={15} />
+                                导入 JSON
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleImportOutlineFromBeat(selectedOutlineRow)}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 py-2.5 text-sm text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                              >
+                                <Sparkles size={15} />
+                                从章节拍导入
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleSaveChapterOutline(selectedOutlineRow)}
+                                disabled={savingOutlineChapterId === selectedOutlineRow.chapterId}
+                                className="inline-flex items-center gap-2 rounded-2xl bg-emerald-400 px-4 py-2.5 text-sm font-medium text-neutral-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {savingOutlineChapterId === selectedOutlineRow.chapterId ? (
+                                  <LoaderCircle size={15} className="animate-spin" />
+                                ) : (
+                                  <Save size={15} />
+                                )}
+                                保存章纲
+                              </button>
+                            </div>
+                          </div>
+
+                          <label className="block">
+                            <span className="mb-2 block text-sm font-medium text-neutral-200">章节标题</span>
+                            <input
+                              value={selectedOutlineRow.chapterTitle}
+                              onChange={(event) => void updateChapterTitle(selectedOutlineRow.chapterId, event.target.value)}
+                              className="h-11 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-4 text-sm text-neutral-100 outline-none transition focus:border-emerald-400"
+                            />
+                          </label>
+
+                          <TextAreaField
+                            label="章节目标"
+                            placeholder="这一章完成之后，读者必须明确得到什么推进？"
+                            value={selectedOutlineDraft.goal}
+                            rows={2}
+                            onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { goal: value })}
+                          />
+
+                          <section className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-medium text-neutral-200">写作模块开关</p>
+                                <p className="mt-1 text-xs leading-6 text-neutral-500">这里只控制额外注入到写作阶段 system prompt 的模块，不会出现在章纲正文文本里。</p>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {[
+                                ['strand_weave', '三线节奏'],
+                                ['cool_points', '爽点逻辑'],
+                              ].map(([moduleKey, label]) => {
+                                const active = (selectedOutlineDraft.promptModuleHints?.extraPrewriteModules ?? []).includes(
+                                  moduleKey as PromptModuleKey,
+                                );
+
+                                return (
+                                  <button
+                                    key={moduleKey}
+                                    type="button"
+                                    onClick={() => toggleOutlinePromptModule(selectedOutlineRow.chapterId, moduleKey as PromptModuleKey)}
+                                    className={`inline-flex items-center gap-2 rounded-2xl border px-3 py-2 text-sm transition ${
+                                      active
+                                        ? 'border-emerald-400/40 bg-emerald-500/12 text-emerald-50'
+                                        : 'border-neutral-700 bg-neutral-950/60 text-neutral-200 hover:border-neutral-600 hover:bg-neutral-900'
+                                    }`}
+                                  >
+                                    <CheckCircle2 size={14} className={active ? 'opacity-100' : 'opacity-40'} />
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </section>
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <TextAreaField
+                              label="写作模式说明"
+                              placeholder="例如：单场景直出整章 / 按场景推进"
+                              value={selectedOutlineDraft.generationModeHint === 'scene-by-scene' ? '按场景推进' : '单场景直出整章'}
+                              rows={2}
+                              onChange={(value) =>
+                                updateChapterOutlineDraft(selectedOutlineRow.chapterId, {
+                                  generationModeHint: value.includes('场景推进') ? 'scene-by-scene' : 'single-scene-chapter',
+                                })
+                              }
+                            />
+                            <TextAreaField
+                              label="场景决策说明"
+                              placeholder="为什么这一章应该按一个完整场景，或按多个场景拆写？"
+                              value={selectedOutlineDraft.sceneDecisionNote ?? ''}
+                              rows={3}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { sceneDecisionNote: value })}
+                            />
+                          </div>
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <TextAreaField
+                              label="本章功能"
+                              placeholder="这一章整体承担什么作用？"
+                              value={selectedOutlineDraft.chapterFunction ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { chapterFunction: value })}
+                            />
+                            <TextAreaField
+                              label="章节边界"
+                              placeholder="这章不能越过什么线？"
+                              value={selectedOutlineDraft.chapterBoundary ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { chapterBoundary: value })}
+                            />
+                            <TextAreaField
+                              label="揭露上限"
+                              placeholder="这章最多揭露到哪一步？"
+                              value={selectedOutlineDraft.revealCeiling ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { revealCeiling: value })}
+                            />
+                            <TextAreaField
+                              label="焦点角色"
+                              placeholder="这一章的主要观察点/发力点是谁？"
+                              value={selectedOutlineDraft.focusCharacter ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { focusCharacter: value })}
+                            />
+                            <TextAreaField
+                              label="开章状态"
+                              placeholder="这一章一开始人物/局势处于什么状态？"
+                              value={selectedOutlineDraft.openingState ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { openingState: value })}
+                            />
+                            <TextAreaField
+                              label="收章状态"
+                              placeholder="这一章结束后人物/局势落在哪？"
+                              value={selectedOutlineDraft.closingState ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { closingState: value })}
+                            />
+                            <TextAreaField
+                              label="主线推进"
+                              placeholder="这一章主线发生什么变化？"
+                              value={selectedOutlineDraft.mainPlot ?? ''}
+                              rows={3}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { mainPlot: value })}
+                              className="md:col-span-2"
+                            />
+                            <TextAreaField
+                              label="支线推进"
+                              placeholder="支线或角色线怎么动？"
+                              value={selectedOutlineDraft.subPlot ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { subPlot: value })}
+                            />
+                            <TextAreaField
+                              label="核心场景"
+                              placeholder="这一章的主场景是什么？"
+                              value={selectedOutlineDraft.coreScene ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { coreScene: value })}
+                            />
+                            <TextListField
+                              label="必须出场"
+                              placeholder="每行一条"
+                              values={selectedOutlineDraft.mustAppearCharacters ?? []}
+                              rows={3}
+                              onChange={(values) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { mustAppearCharacters: values })}
+                            />
+                            <TextListField
+                              label="可出场候选"
+                              placeholder="每行一条"
+                              values={selectedOutlineDraft.availableCharacters ?? []}
+                              rows={3}
+                              onChange={(values) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { availableCharacters: values })}
+                            />
+                            <TextListField
+                              label="场景锚点"
+                              placeholder="每行一条"
+                              values={selectedOutlineDraft.sceneAnchors ?? []}
+                              rows={3}
+                              onChange={(values) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { sceneAnchors: values })}
+                            />
+                            <TextAreaField
+                              label="信息预算"
+                              placeholder="本章允许揭露多少、保留多少？"
+                              value={selectedOutlineDraft.infoBudget ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { infoBudget: value })}
+                            />
+                            <TextAreaField
+                              label="力量变化"
+                              placeholder="力量、代价、限制怎么变化？"
+                              value={selectedOutlineDraft.powerShift ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { powerShift: value })}
+                            />
+                            <TextAreaField
+                              label="人身冲突点"
+                              placeholder="本章最硬的人身冲突是什么？"
+                              value={selectedOutlineDraft.personalConflict ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { personalConflict: value })}
+                            />
+                            <TextAreaField
+                              label="情绪落点"
+                              placeholder="本章结束时情绪落在哪？"
+                              value={selectedOutlineDraft.emotionalOutcome ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { emotionalOutcome: value })}
+                            />
+                            <TextAreaField
+                              label="章节钩子"
+                              placeholder="本章结尾把读者推向哪里？"
+                              value={selectedOutlineDraft.chapterHook ?? ''}
+                              rows={2}
+                              onChange={(value) => updateChapterOutlineDraft(selectedOutlineRow.chapterId, { chapterHook: value })}
+                              className="md:col-span-2"
+                            />
+                          </div>
+
+                          <section className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <p className="text-sm font-medium text-neutral-200">场景清单</p>
+                                <p className="mt-1 text-xs leading-6 text-neutral-500">场景是正文生成的主控单位；如果这里只有一个场景，系统会直接按整章生成。</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => addOutlineSceneDraft(selectedOutlineRow.chapterId)}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                              >
+                                <Plus size={13} />
+                                新增场景
+                              </button>
+                            </div>
+                            {(selectedOutlineDraft.sceneDrafts ?? []).length === 0 ? (
+                              <p className="text-xs text-neutral-500">当前还没有场景草稿，建议先补 1 到 3 个 scene，再决定是否保留 beat 骨架。</p>
+                            ) : (
+                              <div className="space-y-3">
+                                {(selectedOutlineDraft.sceneDrafts ?? []).map((scene, index) => (
+                                  <div key={`${selectedOutlineRow.chapterId}-scene-${index}`} className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-950/50 p-3">
+                                    <div className="grid gap-3 md:grid-cols-2">
+                                      <TextAreaField
+                                        label={`Scene ${index + 1} 标题`}
+                                        placeholder="例如：第七房旧卷桌前"
+                                        value={scene.sceneTitle}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneTitle: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景 ID"
+                                        placeholder="例如：scene_01"
+                                        value={scene.sceneId}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneId: value })}
+                                      />
+                                      <TextAreaField
+                                        label="宏观场景"
+                                        placeholder="例如：刑律司第七房"
+                                        value={scene.macroScene}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { macroScene: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景作用"
+                                        placeholder="这一场主要承担什么叙事职责？"
+                                        value={scene.sceneRole}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneRole: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景目标"
+                                        placeholder="这场必须完成什么推进？"
+                                        value={scene.sceneGoal}
+                                        rows={3}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneGoal: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景阻力"
+                                        placeholder="这场最大的阻力是什么？"
+                                        value={scene.sceneObstacle}
+                                        rows={3}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneObstacle: value })}
+                                      />
+                                      <TextAreaField
+                                        label="时间跨度"
+                                        placeholder="例如：半天内连续推进，无明显切场"
+                                        value={scene.sceneTimeSpan}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneTimeSpan: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景节奏"
+                                        placeholder="例如：冷压慢起，尾部极轻收钩"
+                                        value={scene.scenePacing}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { scenePacing: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景结果"
+                                        placeholder="这场结束后，读者具体得到什么结果？"
+                                        value={scene.sceneResult}
+                                        rows={3}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneResult: value })}
+                                      />
+                                      <TextAreaField
+                                        label="场景钩子"
+                                        placeholder="这场结尾如何把读者推到下一步？"
+                                        value={scene.sceneHook}
+                                        rows={3}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneHook: value })}
+                                      />
+                                      <label className="space-y-2">
+                                        <span className="text-xs font-medium text-neutral-300">预计字数</span>
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          value={scene.estimatedWords || ''}
+                                          onChange={(event) =>
+                                            updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                              estimatedWords: Number(event.target.value) || 0,
+                                            })
+                                          }
+                                          className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                        />
+                                      </label>
+                                      <div />
+                                      <TextListField
+                                        label="参与角色"
+                                        placeholder="每行一条"
+                                        values={getSceneActorNames(scene.actors)}
+                                        rows={3}
+                                        onChange={(values) =>
+                                          updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                            actors: reconcileSceneActorRefs(scene.actors, values, 'support'),
+                                          })
+                                        }
+                                      />
+                                      <TextListField
+                                        label="可出场候选"
+                                        placeholder="每行一条"
+                                        values={getSceneActorNames(scene.availableCharacters)}
+                                        rows={3}
+                                        onChange={(values) =>
+                                          updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                            availableCharacters: reconcileSceneActorRefs(scene.availableCharacters, values, 'candidate'),
+                                          })
+                                        }
+                                      />
+                                      <TextListField
+                                        label="场景锚点"
+                                        placeholder="每行一条"
+                                        values={scene.sceneAnchors}
+                                        rows={3}
+                                        onChange={(values) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { sceneAnchors: values })}
+                                      />
+                                      <TextListField
+                                        label="beat 引用"
+                                        placeholder="每行一条 beatId"
+                                        values={scene.beatRefs}
+                                        rows={3}
+                                        onChange={(values) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { beatRefs: values })}
+                                      />
+                                      <TextAreaField
+                                        label="信息预算"
+                                        placeholder="本场允许揭到哪，不揭到哪？"
+                                        value={scene.infoBudget}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { infoBudget: value })}
+                                      />
+                                      <TextAreaField
+                                        label="力量变化"
+                                        placeholder="本场的能力/代价/限制怎么变化？"
+                                        value={scene.powerShift}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { powerShift: value })}
+                                      />
+                                      <TextAreaField
+                                        label="人身冲突点"
+                                        placeholder="本场最硬的人身冲突是什么？"
+                                        value={scene.personalConflict}
+                                        rows={2}
+                                        onChange={(value) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { personalConflict: value })}
+                                      />
+                                      <TextListField
+                                        label="禁区提示"
+                                        placeholder="每行一条"
+                                        values={scene.forbiddenNotes}
+                                        rows={3}
+                                        onChange={(values) => updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, { forbiddenNotes: values })}
+                                      />
+                                    </div>
+                                    <div className="grid gap-3 rounded-2xl border border-neutral-800 bg-neutral-950/40 p-3 md:grid-cols-2">
+                                      <div className="md:col-span-2 flex items-center justify-between">
+                                        <p className="text-xs font-medium text-neutral-300">场景级伏笔引用</p>
+                                      </div>
+                                      {(scene.foreshadowRefs ?? []).length === 0 ? (
+                                        <p className="md:col-span-2 text-xs text-neutral-500">当前场景还没有伏笔引用。</p>
+                                      ) : null}
+                                      {(scene.foreshadowRefs ?? []).map((ref, refIndex) => (
+                                        <div key={`${scene.sceneId || index}-scene-foreshadow-${refIndex}`} className="grid gap-3 md:col-span-2 md:grid-cols-2">
+                                          <label className="space-y-2">
+                                            <span className="text-xs font-medium text-neutral-300">伏笔 ID</span>
+                                            <input
+                                              value={ref.foreshadowId}
+                                              onChange={(event) =>
+                                                updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                                  foreshadowRefs: (scene.foreshadowRefs ?? []).map((item, itemIndex) =>
+                                                    itemIndex === refIndex ? normalizeForeshadowRef({ ...item, foreshadowId: event.target.value }) : item,
+                                                  ),
+                                                })
+                                              }
+                                              className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                            />
+                                          </label>
+                                          <label className="space-y-2">
+                                            <span className="text-xs font-medium text-neutral-300">伏笔标题</span>
+                                            <input
+                                              value={ref.foreshadowTitle ?? ''}
+                                              onChange={(event) =>
+                                                updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                                  foreshadowRefs: (scene.foreshadowRefs ?? []).map((item, itemIndex) =>
+                                                    itemIndex === refIndex ? normalizeForeshadowRef({ ...item, foreshadowTitle: event.target.value }) : item,
+                                                  ),
+                                                })
+                                              }
+                                              className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                            />
+                                          </label>
+                                          <label className="space-y-2">
+                                            <span className="text-xs font-medium text-neutral-300">动作</span>
+                                            <select
+                                              value={ref.action}
+                                              onChange={(event) =>
+                                                updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                                  foreshadowRefs: (scene.foreshadowRefs ?? []).map((item, itemIndex) =>
+                                                    itemIndex === refIndex ? normalizeForeshadowRef({ ...item, action: event.target.value as ForeshadowRef['action'] }) : item,
+                                                  ),
+                                                })
+                                              }
+                                              className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                            >
+                                              <option value="shadow">留影</option>
+                                              <option value="plant">埋设</option>
+                                              <option value="advance">推进</option>
+                                              <option value="payoff">回收</option>
+                                            </select>
+                                          </label>
+                                          <label className="space-y-2">
+                                            <span className="text-xs font-medium text-neutral-300">强度</span>
+                                            <select
+                                              value={ref.intensity}
+                                              onChange={(event) =>
+                                                updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                                  foreshadowRefs: (scene.foreshadowRefs ?? []).map((item, itemIndex) =>
+                                                    itemIndex === refIndex ? normalizeForeshadowRef({ ...item, intensity: event.target.value as ForeshadowRef['intensity'] }) : item,
+                                                  ),
+                                                })
+                                              }
+                                              className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                            >
+                                              <option value="light">轻</option>
+                                              <option value="medium">中</option>
+                                              <option value="heavy">重</option>
+                                            </select>
+                                          </label>
+                                          <label className="space-y-2 md:col-span-2">
+                                            <span className="text-xs font-medium text-neutral-300">备注</span>
+                                            <textarea
+                                              value={ref.note ?? ''}
+                                              onChange={(event) =>
+                                                updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                                  foreshadowRefs: (scene.foreshadowRefs ?? []).map((item, itemIndex) =>
+                                                    itemIndex === refIndex ? normalizeForeshadowRef({ ...item, note: event.target.value }) : item,
+                                                  ),
+                                                })
+                                              }
+                                              rows={2}
+                                              className="w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 py-2 text-sm leading-6 text-neutral-100 outline-none transition focus:border-indigo-400"
+                                            />
+                                          </label>
+                                          <div className="md:col-span-2">
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                                  foreshadowRefs: (scene.foreshadowRefs ?? []).filter((_, itemIndex) => itemIndex !== refIndex),
+                                                })
+                                              }
+                                              className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100 transition hover:bg-red-500/20"
+                                            >
+                                              <X size={13} />
+                                              删除场景伏笔
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ))}
+                                      <div className="md:col-span-2 flex gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            updateOutlineSceneDraft(selectedOutlineRow.chapterId, index, {
+                                              foreshadowRefs: [...(scene.foreshadowRefs ?? []), createEmptyForeshadowRef()],
+                                            })
+                                          }
+                                          className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                                        >
+                                          <Plus size={13} />
+                                          新增场景伏笔
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => removeOutlineSceneDraft(selectedOutlineRow.chapterId, index)}
+                                          className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100 transition hover:bg-red-500/20"
+                                        >
+                                          <X size={13} />
+                                          删除场景
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </section>
+
+                          <section className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
+                            <div className="flex items-center justify-between">
+                              <p className="text-sm font-medium text-neutral-200">伏笔引用</p>
+                              <button
+                                type="button"
+                                onClick={() => addOutlineForeshadowRef(selectedOutlineRow.chapterId)}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                              >
+                                <Plus size={13} />
+                                新增伏笔
+                              </button>
+                            </div>
+                            {(selectedOutlineDraft.foreshadowRefs ?? []).length === 0 ? (
+                              <p className="text-xs text-neutral-500">当前还没有章节级伏笔引用，正文会回退到里程碑或卷纲层。</p>
+                            ) : (
+                              <div className="space-y-3">
+                                {(selectedOutlineDraft.foreshadowRefs ?? []).map((ref, index) => (
+                                  <div key={`${selectedOutlineRow.chapterId}-foreshadow-${index}`} className="grid gap-3 rounded-2xl border border-neutral-800 bg-neutral-950/50 p-3 md:grid-cols-2">
+                                    <label className="space-y-2">
+                                      <span className="text-xs font-medium text-neutral-300">伏笔 ID</span>
+                                      <input
+                                        value={ref.foreshadowId}
+                                        onChange={(event) =>
+                                          updateOutlineForeshadowRef(selectedOutlineRow.chapterId, index, {
+                                            foreshadowId: event.target.value,
+                                          })
+                                        }
+                                        className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                      />
+                                    </label>
+                                    <label className="space-y-2">
+                                      <span className="text-xs font-medium text-neutral-300">伏笔标题</span>
+                                      <input
+                                        value={ref.foreshadowTitle ?? ''}
+                                        onChange={(event) =>
+                                          updateOutlineForeshadowRef(selectedOutlineRow.chapterId, index, {
+                                            foreshadowTitle: event.target.value,
+                                          })
+                                        }
+                                        className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                      />
+                                    </label>
+                                    <label className="space-y-2">
+                                      <span className="text-xs font-medium text-neutral-300">动作</span>
+                                      <select
+                                        value={ref.action}
+                                        onChange={(event) =>
+                                          updateOutlineForeshadowRef(selectedOutlineRow.chapterId, index, {
+                                            action: event.target.value as ForeshadowRef['action'],
+                                          })
+                                        }
+                                        className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                      >
+                                        <option value="shadow">留影</option>
+                                        <option value="plant">埋设</option>
+                                        <option value="advance">推进</option>
+                                        <option value="payoff">回收</option>
+                                      </select>
+                                    </label>
+                                    <label className="space-y-2">
+                                      <span className="text-xs font-medium text-neutral-300">强度</span>
+                                      <select
+                                        value={ref.intensity}
+                                        onChange={(event) =>
+                                          updateOutlineForeshadowRef(selectedOutlineRow.chapterId, index, {
+                                            intensity: event.target.value as ForeshadowRef['intensity'],
+                                          })
+                                        }
+                                        className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                      >
+                                        <option value="light">轻</option>
+                                        <option value="medium">中</option>
+                                        <option value="heavy">重</option>
+                                      </select>
+                                    </label>
+                                    <label className="space-y-2 md:col-span-2">
+                                      <span className="text-xs font-medium text-neutral-300">备注</span>
+                                      <textarea
+                                        value={ref.note ?? ''}
+                                        onChange={(event) =>
+                                          updateOutlineForeshadowRef(selectedOutlineRow.chapterId, index, {
+                                            note: event.target.value,
+                                          })
+                                        }
+                                        rows={2}
+                                        className="w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 py-2 text-sm leading-6 text-neutral-100 outline-none transition focus:border-indigo-400"
+                                      />
+                                    </label>
+                                    <div className="md:col-span-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => removeOutlineForeshadowRef(selectedOutlineRow.chapterId, index)}
+                                        className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100 transition hover:bg-red-500/20"
+                                      >
+                                        <X size={13} />
+                                        删除伏笔引用
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </section>
+
+                          <section className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <p className="text-sm font-medium text-neutral-200">场景内部推进骨架</p>
+                                <p className="mt-1 text-xs leading-6 text-neutral-500">beats 只承担场景内部推进骨架，不再直接作为写作切分单位。</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => addOutlineBeatDraft(selectedOutlineRow.chapterId)}
+                                className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-600 hover:bg-neutral-900"
+                              >
+                                <Plus size={13} />
+                                新增 beat
+                              </button>
+                            </div>
+                            {(selectedOutlineDraft.beatDrafts ?? []).length === 0 ? (
+                              <p className="text-xs text-neutral-500">当前还没有场景内部 beat 骨架；如果场景本身已经足够完整，也可以不强制细拆。</p>
+                            ) : (
+                              <div className="space-y-3">
+                                {(selectedOutlineDraft.beatDrafts ?? []).map((beat, index) => (
+                                  <div key={`${selectedOutlineRow.chapterId}-beat-${index}`} className="grid gap-3 rounded-2xl border border-neutral-800 bg-neutral-950/50 p-3 md:grid-cols-2">
+                                    <TextAreaField
+                                      label={`Beat ${index + 1} 标题`}
+                                      placeholder="这一小段在干什么？"
+                                      value={beat.beatTitle}
+                                      rows={2}
+                                      onChange={(value) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { beatTitle: value })}
+                                    />
+                                    <TextAreaField
+                                      label="场景"
+                                      placeholder="这一拍主要发生在哪？"
+                                      value={beat.scene}
+                                      rows={2}
+                                      onChange={(value) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { scene: value })}
+                                    />
+                                    <TextListField
+                                      label="场景锚点"
+                                      placeholder="每行一条"
+                                      values={beat.anchors}
+                                      rows={3}
+                                      onChange={(values) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { anchors: values })}
+                                    />
+                                    <TextListField
+                                      label="参与角色"
+                                      placeholder="每行一条"
+                                      values={beat.actors}
+                                      rows={3}
+                                      onChange={(values) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { actors: values })}
+                                    />
+                                    <TextAreaField
+                                      label="推进动作"
+                                      placeholder="这一拍到底推进了什么？"
+                                      value={beat.progress}
+                                      rows={3}
+                                      onChange={(value) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { progress: value })}
+                                      className="md:col-span-2"
+                                    />
+                                    <TextAreaField
+                                      label="结果落点"
+                                      placeholder="这一拍结束时局势落在哪？"
+                                      value={beat.result}
+                                      rows={2}
+                                      onChange={(value) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { result: value })}
+                                    />
+                                    <TextListField
+                                      label="实体引用"
+                                      placeholder="每行一条"
+                                      values={beat.entityRefs}
+                                      rows={3}
+                                      onChange={(values) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { entityRefs: values })}
+                                    />
+                                    <TextListField
+                                      label="禁区提示"
+                                      placeholder="每行一条"
+                                      values={beat.forbiddenNotes}
+                                      rows={3}
+                                      onChange={(values) => updateOutlineBeatDraft(selectedOutlineRow.chapterId, index, { forbiddenNotes: values })}
+                                    />
+                                    <div className="md:col-span-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => removeOutlineBeatDraft(selectedOutlineRow.chapterId, index)}
+                                        className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100 transition hover:bg-red-500/20"
+                                      >
+                                        <X size={13} />
+                                        删除 beat
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </section>
+                        </section>
+                      ) : null}
+                    </div>
+                  )}
+                </section>
+              ) : outlineMode === 'beats' ? (
+                <section className="space-y-4 rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.2)]">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">章节拍工作区</p>
+                      <h3 className="mt-2 text-xl font-semibold text-neutral-100">
+                        {activeVolume ? `《${activeVolume.title}》章节拍` : '先选择一卷'}
+                      </h3>
+                      <p className="mt-2 text-sm leading-7 text-neutral-400">
+                        用紧凑列表先定位章节，再在右侧检查器中完成细改。几百章场景下不再需要整页长滚动。
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      {activeVolume ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleExportChapterBeats(activeVolume.id, activeSelectedMilestoneIndex)}
+                            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-800 bg-neutral-950/70 px-3 py-1.5 text-xs text-neutral-200 transition hover:border-neutral-700 hover:bg-neutral-900"
+                          >
+                            <Download size={13} />
+                            导出 JSON
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openImportDialog({
+                                type: 'chapter-beats',
+                                volumeId: activeVolume.id,
+                                milestoneIndex: activeSelectedMilestoneIndex,
+                              })
+                            }
+                            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-800 bg-neutral-950/70 px-3 py-1.5 text-xs text-neutral-200 transition hover:border-neutral-700 hover:bg-neutral-900"
+                          >
+                            <Upload size={13} />
+                            导入 JSON
+                          </button>
+                        </>
+                      ) : null}
+                      <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                        全部 {beatStatusCounts.all}
+                      </span>
+                      <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                        未规划 {beatStatusCounts.empty}
+                      </span>
+                      <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                        已规划 {beatStatusCounts.planned}
+                      </span>
+                      <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1 text-xs text-neutral-400">
+                        已推进 {beatStatusCounts.progressed}
+                      </span>
+                    </div>
+                  </div>
+
+                  {activeVolume ? (
+                    <>
+                      <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+                        {activeSelectedMilestoneIndex === null && activeVolumeChapters.length === 0 ? (
+                          <input
+                            value={beatChapterCountMap[activeVolume.id] ?? ''}
+                            onChange={(event) =>
+                              setBeatChapterCountMap((previous) => ({
+                                ...previous,
+                                [activeVolume.id]: event.target.value,
+                              }))
+                            }
+                            placeholder={`目标章节数（默认 ${activeVolumeDefaultChapterCount}）`}
+                            inputMode="numeric"
+                            className="h-11 w-full rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-emerald-400 xl:w-[180px]"
+                          />
+                        ) : null}
+                        <input
+                          value={beatHintMap[activeVolume.id] ?? ''}
+                          onChange={(event) =>
+                            setBeatHintMap((previous) => ({
+                              ...previous,
+                              [activeVolume.id]: event.target.value,
+                            }))
+                          }
+                          placeholder="输入裂变提示词（可选）"
+                          className="h-11 flex-1 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-indigo-400"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => openFissionDialog(activeVolume.id)}
+                          disabled={generatingBeatVolumeId === activeVolume.id}
+                          className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-emerald-400 px-4 text-sm font-medium text-neutral-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {generatingBeatVolumeId === activeVolume.id ? (
+                            <LoaderCircle size={15} className="animate-spin" />
+                          ) : (
+                            <Sparkles size={15} />
+                          )}
+                          {activeFilteredMilestone
+                            ? `AI 裂变阶段 ${activeSelectedMilestoneIndex! + 1}`
+                            : 'AI 裂变本卷'}
+                        </button>
+                      </div>
+
+                      {activeFilteredMilestone ? (
+                        <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-xs leading-6 text-neutral-300">
+                          <p>
+                            当前已按里程碑过滤：
+                            {activeFilteredMilestone.title.trim()
+                              ? activeFilteredMilestone.title.trim()
+                              : `阶段 ${(activeSelectedMilestoneIndex ?? 0) + 1}`}。
+                            范围为第{' '}
+                            {computeMilestoneStartChapter(
+                              activeVolumeDraft.milestones,
+                              activeSelectedMilestoneIndex ?? 0,
+                            )}{' '}
+                            章到第{' '}
+                            {computeMilestoneEndChapter(
+                              activeVolumeDraft.milestones,
+                              activeSelectedMilestoneIndex ?? 0,
+                            )}{' '}
+                            章。
+                          </p>
+                          <p className="mt-1 text-neutral-500">
+                            左侧切换里程碑会直接过滤章节列表，右侧检查器继续编辑单章细节。
+                          </p>
+                        </div>
+                      ) : null}
+
+                      <ChapterBeatCompactList
+                        items={chapterBeatListItems}
+                        emptyTitle="当前筛选下没有可显示的章节拍"
+                        emptyDescription={
+                          beatFilterStatus === 'all'
+                            ? '当前卷还没有任何章节拍。你可以先裂变当前卷，或者先补齐里程碑后按阶段裂变。'
+                            : '当前筛选条件下没有命中的章节拍，试着切换里程碑或状态筛选。'
+                        }
+                        onSelect={selectBeatRow}
+                        registerRowNode={(rowKey, node) => {
+                          beatRowRefs.current[rowKey] = node;
+                        }}
+                      />
+                    </>
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-neutral-700 bg-neutral-950/40 px-4 py-5 text-sm text-neutral-500">
+                      当前还没有可操作的卷。先在左侧创建或选择一卷，再进入章节拍工作区。
+                    </div>
+                  )}
+                </section>
+              ) : outlineMode === 'book' ? null : (
+              <section className="space-y-4">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">卷大纲</p>
@@ -2781,11 +5442,15 @@ export function OutlineView({
           </div>
         ) : (
           sortedVolumes.map((volume, index) => {
+            if (activeVolume?.id !== volume.id) {
+              return null;
+            }
+
             const draft = volumeDraftMap[volume.id] ?? createEmptyVolumeDraft();
             const isSavingCurrent = savingVolumeId === volume.id;
             const isGeneratingCurrent = generatingVolumeId === volume.id;
             const isGeneratingMilestonesCurrent = generatingMilestonesVolumeId === volume.id;
-            const isExpanded = expandedVolumeId === volume.id;
+            const isExpanded = true;
             const progressLabel = getVolumeProgressLabel(draft);
             const milestoneStatuses = milestoneStatusMapByVolumeId.get(volume.id) ?? [];
             const selectedMilestoneIndex = Object.prototype.hasOwnProperty.call(selectedMilestoneIndexMap, volume.id)
@@ -2905,6 +5570,7 @@ export function OutlineView({
                       </span>
                     </div>
 
+                    {outlineMode !== 'milestone' ? (
                     <div className="grid gap-4 md:grid-cols-2">
                       <TextAreaField
                         label="本卷目标"
@@ -3061,32 +5727,6 @@ export function OutlineView({
 
                       <div>
                         <ListFieldEditor
-                          label="伏笔安排"
-                          values={draft.foreshadowSeeds}
-                          addPlaceholder="输入一条伏笔安排，回车直接添加"
-                          textModePlaceholder={
-                            '每行一条伏笔安排，例：\n黑铁片对古井产生异常共鸣\n谢无咎真实立场暂不揭露'
-                          }
-                          emptyText="未填写 · 点击展开编辑或使用 AI 生成。"
-                          mode={listFieldModes[`volume.${volume.id}.foreshadowSeeds`] ?? 'cards'}
-                          inputValue={listFieldInputs[`volume.${volume.id}.foreshadowSeeds`] ?? ''}
-                          onInputChange={(value) =>
-                            setListFieldInput(`volume.${volume.id}.foreshadowSeeds`, value)
-                          }
-                          onChange={(values) => updateVolumeDraft(volume.id, { foreshadowSeeds: values })}
-                          onToggleMode={() =>
-                            setListFieldMode(
-                              `volume.${volume.id}.foreshadowSeeds`,
-                              (listFieldModes[`volume.${volume.id}.foreshadowSeeds`] ?? 'cards') === 'cards'
-                                ? 'text'
-                                : 'cards',
-                            )
-                          }
-                        />
-                      </div>
-
-                      <div>
-                        <ListFieldEditor
                           label="必需实体"
                           values={draft.requiredEntities ?? []}
                           addPlaceholder="输入一个本卷必需重点关注的实体"
@@ -3110,31 +5750,117 @@ export function OutlineView({
                         />
                       </div>
 
-                      <div>
-                        <ListFieldEditor
-                          label="必需伏笔"
-                          values={draft.requiredForeshadows ?? []}
-                          addPlaceholder="输入一个本卷必须持续关注的伏笔"
-                          textModePlaceholder={'每行一条必需伏笔，例：\n黑铁片的真实来历\n谢无咎的真实立场'}
-                          emptyText="未填写 · 只有必须强关注的长线暗线才需要写。"
-                          helperText="用于把本卷关键长线伏笔优先注入 working/retrieval memory。"
-                          mode={listFieldModes[`volume.${volume.id}.requiredForeshadows`] ?? 'cards'}
-                          inputValue={listFieldInputs[`volume.${volume.id}.requiredForeshadows`] ?? ''}
-                          onInputChange={(value) =>
-                            setListFieldInput(`volume.${volume.id}.requiredForeshadows`, value)
-                          }
-                          onChange={(values) => updateVolumeDraft(volume.id, { requiredForeshadows: values })}
-                          onToggleMode={() =>
-                            setListFieldMode(
-                              `volume.${volume.id}.requiredForeshadows`,
-                              (listFieldModes[`volume.${volume.id}.requiredForeshadows`] ?? 'cards') === 'cards'
-                                ? 'text'
-                                : 'cards',
-                            )
-                          }
-                        />
-                      </div>
+                      <section className="md:col-span-2 space-y-3 rounded-2xl border border-neutral-800 bg-neutral-950/50 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-neutral-200">卷级伏笔引用</p>
+                            <p className="mt-1 text-xs leading-6 text-neutral-500">
+                              这里定义本卷整体要如何使用某条伏笔。强度和动作会作为卷级基线，后续可被里程碑和章纲覆盖。
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => addVolumeForeshadowRef(volume.id)}
+                            className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-900"
+                          >
+                            <Plus size={14} />
+                            新增伏笔引用
+                          </button>
+                        </div>
 
+                        {(draft.foreshadowRefs ?? []).length === 0 ? (
+                          <p className="text-xs text-neutral-500">当前还没有卷级伏笔引用。若这一卷只想给出整体基线，可以先从这里补。</p>
+                        ) : (
+                          <div className="space-y-3">
+                            {(draft.foreshadowRefs ?? []).map((ref, index) => (
+                              <div
+                                key={`volume-${volume.id}-foreshadow-ref-${index}`}
+                                className="grid gap-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3 md:grid-cols-2"
+                              >
+                                <label className="space-y-2">
+                                  <span className="text-xs font-medium text-neutral-300">伏笔 ID</span>
+                                  <input
+                                    value={ref.foreshadowId}
+                                    onChange={(event) =>
+                                      updateVolumeForeshadowRef(volume.id, index, { foreshadowId: event.target.value })
+                                    }
+                                    className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                  />
+                                </label>
+                                <label className="space-y-2">
+                                  <span className="text-xs font-medium text-neutral-300">伏笔标题</span>
+                                  <input
+                                    value={ref.foreshadowTitle ?? ''}
+                                    onChange={(event) =>
+                                      updateVolumeForeshadowRef(volume.id, index, { foreshadowTitle: event.target.value })
+                                    }
+                                    className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                  />
+                                </label>
+                                <label className="space-y-2">
+                                  <span className="text-xs font-medium text-neutral-300">动作</span>
+                                  <select
+                                    value={ref.action}
+                                    onChange={(event) =>
+                                      updateVolumeForeshadowRef(volume.id, index, {
+                                        action: event.target.value as ForeshadowRef['action'],
+                                      })
+                                    }
+                                    className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                  >
+                                    <option value="shadow">留影</option>
+                                    <option value="plant">埋设</option>
+                                    <option value="advance">推进</option>
+                                    <option value="payoff">回收</option>
+                                  </select>
+                                </label>
+                                <label className="space-y-2">
+                                  <span className="text-xs font-medium text-neutral-300">强度</span>
+                                  <select
+                                    value={ref.intensity}
+                                    onChange={(event) =>
+                                      updateVolumeForeshadowRef(volume.id, index, {
+                                        intensity: event.target.value as ForeshadowRef['intensity'],
+                                      })
+                                    }
+                                    className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                  >
+                                    <option value="light">轻</option>
+                                    <option value="medium">中</option>
+                                    <option value="heavy">重</option>
+                                  </select>
+                                </label>
+                                <label className="space-y-2 md:col-span-2">
+                                  <span className="text-xs font-medium text-neutral-300">备注</span>
+                                  <textarea
+                                    value={ref.note ?? ''}
+                                    onChange={(event) =>
+                                      updateVolumeForeshadowRef(volume.id, index, { note: event.target.value })
+                                    }
+                                    rows={2}
+                                    className="w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 py-2 text-sm leading-6 text-neutral-100 outline-none transition focus:border-indigo-400"
+                                  />
+                                </label>
+                                <div className="md:col-span-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => removeVolumeForeshadowRef(volume.id, index)}
+                                    className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100 transition hover:bg-red-500/20"
+                                  >
+                                    <Trash2 size={13} />
+                                    删除伏笔引用
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </section>
+
+                    </div>
+                    ) : null}
+
+                    {outlineMode === 'milestone' ? (
                       <div className="md:col-span-2">
                         <div className="rounded-3xl border border-neutral-800 bg-neutral-950/40 p-4">
                           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -3176,15 +5902,40 @@ export function OutlineView({
                                         用来承接长卷中的一个叙事阶段，而不是单独某一章。
                                       </p>
                                     </div>
-                                    <button
-                                      type="button"
-                                      onClick={() => void removeVolumeMilestone(volume.id, milestoneIndex)}
-                                      disabled={isSavingCurrent}
-                                      className="inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-400 transition hover:border-neutral-500 hover:bg-neutral-900 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
-                                      aria-label={`删除第 ${milestoneIndex + 1} 个里程碑`}
-                                    >
-                                      <X size={15} />
-                                    </button>
+                                    <div className="flex flex-wrap items-center justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleExportVolumeMilestone(volume.id, milestoneIndex)}
+                                        className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-900"
+                                      >
+                                        <Download size={14} />
+                                        导出
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          openImportDialog({
+                                            type: 'volume-milestone',
+                                            volumeId: volume.id,
+                                            milestoneIndex,
+                                          })
+                                        }
+                                        disabled={isSavingCurrent}
+                                        className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        <Upload size={14} />
+                                        导入
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void removeVolumeMilestone(volume.id, milestoneIndex)}
+                                        disabled={isSavingCurrent}
+                                        className="inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-400 transition hover:border-neutral-500 hover:bg-neutral-900 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                        aria-label={`删除第 ${milestoneIndex + 1} 个里程碑`}
+                                      >
+                                        <X size={15} />
+                                      </button>
+                                    </div>
                                   </div>
 
                                   <div className="mt-4 grid gap-4 md:grid-cols-2">
@@ -3308,27 +6059,6 @@ export function OutlineView({
                                     />
 
                                     <TextListField
-                                      label="必埋伏笔"
-                                      placeholder="每行一条，这一阶段必须埋下哪些伏笔"
-                                      values={milestone.mustPlant}
-                                      rows={3}
-                                      onChange={(values) =>
-                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { mustPlant: values })
-                                      }
-                                    />
-
-                                    <TextListField
-                                      label="必回收"
-                                      placeholder="每行一条，这一阶段必须兑现或回收哪些伏笔"
-                                      values={milestone.mustPayoff}
-                                      rows={3}
-                                      onChange={(values) =>
-                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { mustPayoff: values })
-                                      }
-                                      className="md:col-span-2"
-                                    />
-
-                                    <TextListField
                                       label="阶段必需实体"
                                       placeholder="每行一条，这一阶段必须强关注哪些实体"
                                       values={milestone.requiredEntities ?? []}
@@ -3338,15 +6068,119 @@ export function OutlineView({
                                       }
                                     />
 
-                                    <TextListField
-                                      label="阶段必需伏笔"
-                                      placeholder="每行一条，这一阶段必须强关注哪些伏笔"
-                                      values={milestone.requiredForeshadows ?? []}
-                                      rows={3}
-                                      onChange={(values) =>
-                                        updateVolumeMilestoneDraft(volume.id, milestoneIndex, { requiredForeshadows: values })
-                                      }
-                                    />
+                                    <section className="md:col-span-2 space-y-3 rounded-2xl border border-neutral-800 bg-neutral-950/50 p-4">
+                                      <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                          <p className="text-sm font-medium text-neutral-200">阶段伏笔引用</p>
+                                          <p className="mt-1 text-xs leading-6 text-neutral-500">
+                                            这里定义这一阶段要如何使用伏笔。章纲会在此基础上继续细化到单章。
+                                          </p>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => addMilestoneForeshadowRef(volume.id, milestoneIndex)}
+                                          className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-900"
+                                        >
+                                          <Plus size={14} />
+                                          新增伏笔引用
+                                        </button>
+                                      </div>
+
+                                      {(milestone.foreshadowRefs ?? []).length === 0 ? (
+                                        <p className="text-xs text-neutral-500">当前还没有阶段级伏笔引用。你可以在这里决定这一阶段是留影、埋设、推进还是回收。</p>
+                                      ) : (
+                                        <div className="space-y-3">
+                                          {(milestone.foreshadowRefs ?? []).map((ref, index) => (
+                                            <div
+                                              key={`milestone-${volume.id}-${milestoneIndex}-foreshadow-ref-${index}`}
+                                              className="grid gap-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3 md:grid-cols-2"
+                                            >
+                                              <label className="space-y-2">
+                                                <span className="text-xs font-medium text-neutral-300">伏笔 ID</span>
+                                                <input
+                                                  value={ref.foreshadowId}
+                                                  onChange={(event) =>
+                                                    updateMilestoneForeshadowRef(volume.id, milestoneIndex, index, {
+                                                      foreshadowId: event.target.value,
+                                                    })
+                                                  }
+                                                  className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                                />
+                                              </label>
+                                              <label className="space-y-2">
+                                                <span className="text-xs font-medium text-neutral-300">伏笔标题</span>
+                                                <input
+                                                  value={ref.foreshadowTitle ?? ''}
+                                                  onChange={(event) =>
+                                                    updateMilestoneForeshadowRef(volume.id, milestoneIndex, index, {
+                                                      foreshadowTitle: event.target.value,
+                                                    })
+                                                  }
+                                                  className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                                />
+                                              </label>
+                                              <label className="space-y-2">
+                                                <span className="text-xs font-medium text-neutral-300">动作</span>
+                                                <select
+                                                  value={ref.action}
+                                                  onChange={(event) =>
+                                                    updateMilestoneForeshadowRef(volume.id, milestoneIndex, index, {
+                                                      action: event.target.value as ForeshadowRef['action'],
+                                                    })
+                                                  }
+                                                  className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                                >
+                                                  <option value="shadow">留影</option>
+                                                  <option value="plant">埋设</option>
+                                                  <option value="advance">推进</option>
+                                                  <option value="payoff">回收</option>
+                                                </select>
+                                              </label>
+                                              <label className="space-y-2">
+                                                <span className="text-xs font-medium text-neutral-300">强度</span>
+                                                <select
+                                                  value={ref.intensity}
+                                                  onChange={(event) =>
+                                                    updateMilestoneForeshadowRef(volume.id, milestoneIndex, index, {
+                                                      intensity: event.target.value as ForeshadowRef['intensity'],
+                                                    })
+                                                  }
+                                                  className="h-10 w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 text-sm text-neutral-100 outline-none transition focus:border-indigo-400"
+                                                >
+                                                  <option value="light">轻</option>
+                                                  <option value="medium">中</option>
+                                                  <option value="heavy">重</option>
+                                                </select>
+                                              </label>
+                                              <label className="space-y-2 md:col-span-2">
+                                                <span className="text-xs font-medium text-neutral-300">备注</span>
+                                                <textarea
+                                                  value={ref.note ?? ''}
+                                                  onChange={(event) =>
+                                                    updateMilestoneForeshadowRef(volume.id, milestoneIndex, index, {
+                                                      note: event.target.value,
+                                                    })
+                                                  }
+                                                  rows={2}
+                                                  className="w-full rounded-2xl border border-neutral-700 bg-neutral-950/80 px-3 py-2 text-sm leading-6 text-neutral-100 outline-none transition focus:border-indigo-400"
+                                                />
+                                              </label>
+                                              <div className="md:col-span-2">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => removeMilestoneForeshadowRef(volume.id, milestoneIndex, index)}
+                                                  className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100 transition hover:bg-red-500/20"
+                                                >
+                                                  <Trash2 size={13} />
+                                                  删除伏笔引用
+                                                </button>
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </section>
+
                                   </div>
                                 </article>
                               ))}
@@ -3354,18 +6188,37 @@ export function OutlineView({
                           )}
                         </div>
                       </div>
-                    </div>
+                    ) : null}
 
                     <footer className="mt-6 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                      <button
-                        type="button"
-                        onClick={() => void handleSaveVolumeOutline(volume.id)}
-                        disabled={isSavingCurrent || isGeneratingCurrent}
-                        className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {isSavingCurrent ? <LoaderCircle size={15} className="animate-spin" /> : <Save size={15} />}
-                        保存卷大纲
-                      </button>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveVolumeOutline(volume.id)}
+                          disabled={isSavingCurrent || isGeneratingCurrent}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {isSavingCurrent ? <LoaderCircle size={15} className="animate-spin" /> : <Save size={15} />}
+                          {outlineMode === 'milestone' ? '保存里程碑' : '保存卷大纲'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportVolumeOutline(volume.id)}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800"
+                        >
+                          <Download size={15} />
+                          导出 JSON
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openImportDialog({ type: 'volume-outline', volumeId: volume.id })}
+                          disabled={isSavingCurrent || isGeneratingCurrent || isGeneratingMilestonesCurrent}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <Upload size={15} />
+                          导入 JSON
+                        </button>
+                      </div>
 
                       <div className="flex w-full flex-col gap-3 xl:w-auto xl:min-w-[420px] xl:flex-row xl:items-center">
                         <input
@@ -3379,19 +6232,21 @@ export function OutlineView({
                           placeholder="输入灵感提示词（可选）"
                           className="h-11 flex-1 rounded-2xl border border-neutral-700 bg-neutral-950/70 px-4 text-sm text-neutral-200 outline-none transition placeholder:text-neutral-500 focus:border-indigo-400"
                         />
-                        <button
-                          type="button"
-                          onClick={() => void handleGenerateVolumeMilestones(volume.id)}
-                          disabled={isSavingCurrent || isGeneratingCurrent || isGeneratingMilestonesCurrent || isGeneratingBook}
-                          className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isGeneratingMilestonesCurrent ? (
-                            <LoaderCircle size={15} className="animate-spin" />
-                          ) : (
-                            <Sparkles size={15} />
-                          )}
-                          AI 补全里程碑
-                        </button>
+                        {outlineMode === 'milestone' ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerateVolumeMilestones(volume.id)}
+                            disabled={isSavingCurrent || isGeneratingCurrent || isGeneratingMilestonesCurrent || isGeneratingBook}
+                            className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-4 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isGeneratingMilestonesCurrent ? (
+                              <LoaderCircle size={15} className="animate-spin" />
+                            ) : (
+                              <Sparkles size={15} />
+                            )}
+                            AI 补全里程碑
+                          </button>
+                        ) : null}
                         <button
                           type="button"
                           onClick={() => void handleReconcileVolumePlan(volume.id)}
@@ -3405,23 +6260,26 @@ export function OutlineView({
                           )}
                           修正规划
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleGenerateVolumeOutline(volume.id)}
-                          disabled={isSavingCurrent || isGeneratingCurrent || isGeneratingMilestonesCurrent || isGeneratingBook}
-                          className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-indigo-400 px-4 text-sm font-medium text-neutral-950 transition hover:bg-indigo-300 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {isGeneratingCurrent ? (
-                            <LoaderCircle size={15} className="animate-spin" />
-                          ) : (
-                            <Sparkles size={15} />
-                          )}
-                          AI 生成卷大纲
-                        </button>
+                        {outlineMode === 'volume' ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerateVolumeOutline(volume.id)}
+                            disabled={isSavingCurrent || isGeneratingCurrent || isGeneratingMilestonesCurrent || isGeneratingBook}
+                            className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl bg-indigo-400 px-4 text-sm font-medium text-neutral-950 transition hover:bg-indigo-300 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isGeneratingCurrent ? (
+                              <LoaderCircle size={15} className="animate-spin" />
+                            ) : (
+                              <Sparkles size={15} />
+                            )}
+                            AI 生成卷大纲
+                          </button>
+                        ) : null}
                       </div>
                     </footer>
 
-                    <section className="mt-6 border-t border-neutral-800 pt-6">
+                    {showBeatInspector ? (
+                      <section className="mt-6 border-t border-neutral-800 pt-6">
                       <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                         <div>
                           <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">章节拍表</p>
@@ -3743,6 +6601,16 @@ export function OutlineView({
                                     }
                                   />
 
+                                  <TextListField
+                                    label="必须落地伏笔"
+                                    placeholder="每行一条，例如：慎之发光、空白页现"
+                                    values={beatDraft.requiredForeshadows ?? []}
+                                    rows={3}
+                                    onChange={(values) =>
+                                      updateChapterBeatDraft(row.key, { requiredForeshadows: values })
+                                    }
+                                  />
+
                                   <TextAreaField
                                     label="节奏"
                                     placeholder="例：慢压迫 / 中速推进 / 快爆点"
@@ -3845,7 +6713,8 @@ export function OutlineView({
                           })}
                         </div>
                       )}
-                    </section>
+                      </section>
+                    ) : null}
                   </div>
                 ) : null}
               </article>
@@ -3853,7 +6722,237 @@ export function OutlineView({
           })
         )}
         </section>
+              )}
+            </div>
+          </div>
+
+          {showBeatInspector ? (
+          <aside className="min-h-0 overflow-hidden rounded-[28px] border border-neutral-800 bg-neutral-900/70 shadow-[0_24px_80px_rgba(0,0,0,0.22)]">
+            <div className="h-full overflow-y-auto p-4">
+              {selectedBeatRow ? (
+                  <div className="space-y-4">
+                    <section className="rounded-3xl border border-neutral-800 bg-neutral-950/50 p-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">章节拍检查器</p>
+                      <div className="mt-3">
+                        <p className="text-sm text-neutral-500">
+                          {selectedBeatRow.row.displayChapterNumber !== null
+                            ? `第 ${selectedBeatRow.row.displayChapterNumber} 章`
+                            : `卷内第 ${selectedBeatRow.row.chapterNumber} 拍`}
+                        </p>
+                        <h3 className="mt-2 text-xl font-semibold text-neutral-100">
+                          {selectedBeatRow.row.chapterLabel}
+                        </h3>
+                        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                          <span className="rounded-full border border-neutral-800 bg-neutral-900 px-3 py-1 text-neutral-300">
+                            {selectedBeatRow.row.chapterId ? '已绑定章节' : '未绑定章节'}
+                          </span>
+                          {selectedBeatRow.milestone ? (
+                            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-emerald-100">
+                              阶段 {selectedBeatRow.milestoneIndex! + 1}
+                              {selectedBeatRow.milestone.title.trim()
+                                ? ` · ${selectedBeatRow.milestone.title.trim()}`
+                                : ''}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleMoveChapterBeat(selectedBeatRow.row, 'up')}
+                          disabled={!selectedBeatRow.row.beatId || selectedBeatRow.rowIndex === 0}
+                          className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-300 transition hover:border-neutral-500 hover:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-40"
+                          aria-label={`上移第 ${selectedBeatRow.row.chapterNumber} 拍`}
+                        >
+                          <ArrowUp size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleMoveChapterBeat(selectedBeatRow.row, 'down')}
+                          disabled={
+                            !selectedBeatRow.row.beatId || selectedBeatRow.rowIndex === selectedBeatRow.rowCount - 1
+                          }
+                          className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-300 transition hover:border-neutral-500 hover:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-40"
+                          aria-label={`下移第 ${selectedBeatRow.row.chapterNumber} 拍`}
+                        >
+                          <ArrowDown size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveChapterBeat(selectedBeatRow.row)}
+                          disabled={savingBeatKey === selectedBeatRow.row.key}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-100 transition hover:border-neutral-500 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {savingBeatKey === selectedBeatRow.row.key ? (
+                            <LoaderCircle size={15} className="animate-spin" />
+                          ) : (
+                            <Save size={15} />
+                          )}
+                          保存本拍
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteChapterBeat(selectedBeatRow.row)}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-100 transition hover:bg-red-500/20"
+                        >
+                          <Trash2 size={15} />
+                          删除本拍
+                        </button>
+                      </div>
+                    </section>
+
+                    <section className="space-y-4 rounded-3xl border border-neutral-800 bg-neutral-950/50 p-4">
+                      <TextAreaField
+                        label="标题提示"
+                        placeholder="给这一拍一个临时标题或意象提示"
+                        value={selectedBeatRow.draft.titleHint}
+                        rows={2}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { titleHint: value })}
+                      />
+                      <TextAreaField
+                        label="场景功能"
+                        placeholder="这一章核心承担什么功能？例如：换地图、反打认知、关系试探"
+                        value={selectedBeatRow.draft.scenePurpose}
+                        rows={3}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { scenePurpose: value })}
+                      />
+                      <TextAreaField
+                        label="焦点角色"
+                        placeholder="本章视角或发力重点更偏向谁？"
+                        value={selectedBeatRow.draft.focusCharacter}
+                        rows={2}
+                        onChange={(value) =>
+                          updateChapterBeatDraft(selectedBeatRow.row.key, { focusCharacter: value })
+                        }
+                      />
+                      <TextAreaField
+                        label="主线推进"
+                        placeholder="这一章主线实际会发生什么变化？"
+                        value={selectedBeatRow.draft.mainPlot}
+                        rows={4}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { mainPlot: value })}
+                      />
+                      <TextAreaField
+                        label="支线推进"
+                        placeholder="如果有支线、情感线或角色线，在这里补充"
+                        value={selectedBeatRow.draft.subPlot}
+                        rows={3}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { subPlot: value })}
+                      />
+                      <TextAreaField
+                        label="章节钩子"
+                        placeholder="本章结尾拿什么把读者推向下一章？"
+                        value={selectedBeatRow.draft.hookOut}
+                        rows={3}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { hookOut: value })}
+                      />
+                      <TextListField
+                        label="必须出场"
+                        placeholder="每行一条，例如：许明、秦小昭"
+                        values={selectedBeatRow.draft.mustAppearCharacters ?? []}
+                        rows={3}
+                        onChange={(values) =>
+                          updateChapterBeatDraft(selectedBeatRow.row.key, { mustAppearCharacters: values })
+                        }
+                      />
+                      <TextListField
+                        label="可出场候选"
+                        placeholder="每行一条，例如：绳、余化及、茶铺老板"
+                        values={selectedBeatRow.draft.availableCharacters ?? []}
+                        rows={3}
+                        onChange={(values) =>
+                          updateChapterBeatDraft(selectedBeatRow.row.key, { availableCharacters: values })
+                        }
+                      />
+                      <TextListField
+                        label="必须落地伏笔"
+                        placeholder="每行一条，例如：慎之发光、空白页现"
+                        values={selectedBeatRow.draft.requiredForeshadows ?? []}
+                        rows={3}
+                        onChange={(values) =>
+                          updateChapterBeatDraft(selectedBeatRow.row.key, { requiredForeshadows: values })
+                        }
+                      />
+                      <TextAreaField
+                        label="节奏"
+                        placeholder="例：慢压迫 / 中速推进 / 快爆点"
+                        value={selectedBeatRow.draft.pacing}
+                        rows={2}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { pacing: value })}
+                      />
+                      <TextAreaField
+                        label="新意要求"
+                        placeholder="明确这一章必须和前几章不一样的地方"
+                        value={selectedBeatRow.draft.noveltyRequirement}
+                        rows={3}
+                        onChange={(value) =>
+                          updateChapterBeatDraft(selectedBeatRow.row.key, { noveltyRequirement: value })
+                        }
+                      />
+                      <TextAreaField
+                        label="力量变化"
+                        placeholder="写清能力变化幅度、环境限制以及成长方式"
+                        value={selectedBeatRow.draft.powerDelta}
+                        rows={3}
+                        onChange={(value) => updateChapterBeatDraft(selectedBeatRow.row.key, { powerDelta: value })}
+                      />
+                    </section>
+                  </div>
+                ) : (
+                  <div className="flex h-full min-h-[320px] items-center justify-center rounded-3xl border border-dashed border-neutral-800 bg-neutral-950/40 px-4 py-10 text-center">
+                    <div className="max-w-sm">
+                      <p className="text-base font-medium text-neutral-100">先选择一个章节拍</p>
+                      <p className="mt-3 text-sm leading-7 text-neutral-500">
+                        中栏列表只负责定位，右侧检查器才承载单章细节编辑。
+                      </p>
+                    </div>
+                  </div>
+              )}
+            </div>
+          </aside>
+          ) : null}
+        </div>
       </section>
+
+      {outlineSummaryDialog ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/55 px-4 py-6 backdrop-blur-sm">
+          <div className="flex w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-900 shadow-2xl shadow-black/40">
+            <div className="flex items-start justify-between gap-4 border-b border-neutral-800 px-6 py-5">
+              <div>
+                <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">摘要</p>
+                <h3 className="mt-2 text-lg font-semibold text-neutral-100">{outlineSummaryDialog.title}</h3>
+                <p className="mt-2 text-sm leading-6 text-neutral-500">{outlineSummaryDialog.description}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOutlineSummaryDialog(null)}
+                className="rounded-2xl p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-neutral-200"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="px-6 py-6">
+              <div className="rounded-3xl border border-neutral-800 bg-neutral-950/60 p-5">
+                <pre className="whitespace-pre-wrap text-sm leading-7 text-neutral-200">
+                  {outlineSummaryDialog.summary || '当前还没有可展示的摘要。'}
+                </pre>
+              </div>
+            </div>
+
+            <div className="flex justify-end border-t border-neutral-800 px-6 py-5">
+              <button
+                type="button"
+                onClick={() => setOutlineSummaryDialog(null)}
+                className="rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-300 transition hover:border-neutral-500 hover:bg-neutral-800"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {fissionDialogVolume ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/55 px-4 py-6 backdrop-blur-sm">
@@ -4172,6 +7271,14 @@ export function OutlineView({
           </div>
         </div>
       ) : null}
+
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={(event) => void handleImportFileChange(event)}
+        className="hidden"
+      />
     </>
   );
 }

@@ -116,6 +116,7 @@ export interface ResourceContinuityMutationInput {
   hiddenCost?: string;
   continuityRisk?: string;
   status?: ResourceContinuityStatus;
+  riskLevel?: ResourceContinuityRiskLevel;
 }
 
 export interface ListResourceContinuitiesOptions {
@@ -308,6 +309,15 @@ function mapRow(row: Record<string, unknown>): ResourceContinuityRecord {
   const performanceImpact = asString(row.performance_impact);
   const hiddenCost = asString(row.hidden_cost);
   const continuityRisk = asString(row.continuity_risk);
+  const inferredRiskLevel = inferResourceContinuityRiskLevel({
+    resourceType,
+    currentState,
+    performanceImpact,
+    hiddenCost,
+    continuityRisk,
+    status,
+  });
+  const riskLevel = isResourceContinuityRiskLevel(row.risk_level) ? row.risk_level : inferredRiskLevel;
 
   return {
     id: asString(row.id),
@@ -322,14 +332,7 @@ function mapRow(row: Record<string, unknown>): ResourceContinuityRecord {
     hiddenCost,
     continuityRisk,
     status,
-    riskLevel: inferResourceContinuityRiskLevel({
-      resourceType,
-      currentState,
-      performanceImpact,
-      hiddenCost,
-      continuityRisk,
-      status,
-    }),
+    riskLevel,
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
   };
@@ -349,6 +352,15 @@ function normalizeRecord(
     typeof input.status === 'undefined'
       ? existing?.status ?? 'active'
       : normalizeStatus(input.status);
+  const inferredRiskLevel = inferResourceContinuityRiskLevel({
+    resourceType,
+    currentState,
+    performanceImpact,
+    hiddenCost,
+    continuityRisk,
+    status,
+  });
+  const riskLevel = isResourceContinuityRiskLevel(input.riskLevel) ? input.riskLevel : inferredRiskLevel;
 
   return {
     id: existing?.id ?? randomUUID(),
@@ -366,14 +378,7 @@ function normalizeRecord(
     hiddenCost,
     continuityRisk,
     status,
-    riskLevel: inferResourceContinuityRiskLevel({
-      resourceType,
-      currentState,
-      performanceImpact,
-      hiddenCost,
-      continuityRisk,
-      status,
-    }),
+    riskLevel,
     createdAt: existing?.createdAt ?? currentTime,
     updatedAt: currentTime,
   };
@@ -406,6 +411,7 @@ export function listResourceContinuities(env: ServerEnv, options: ListResourceCo
       hidden_cost,
       continuity_risk,
       status,
+      risk_level,
       created_at,
       updated_at
     FROM resource_continuities
@@ -438,6 +444,7 @@ export function getResourceContinuity(env: ServerEnv, projectId: string, resourc
       hidden_cost,
       continuity_risk,
       status,
+      risk_level,
       created_at,
       updated_at
     FROM resource_continuities
@@ -465,9 +472,10 @@ export function createResourceContinuity(env: ServerEnv, input: ResourceContinui
       hidden_cost,
       continuity_risk,
       status,
+      risk_level,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.id,
     record.projectId,
@@ -481,6 +489,7 @@ export function createResourceContinuity(env: ServerEnv, input: ResourceContinui
     record.hiddenCost,
     record.continuityRisk,
     record.status,
+    record.riskLevel,
     record.createdAt,
     record.updatedAt,
   );
@@ -508,6 +517,7 @@ export function updateResourceContinuity(env: ServerEnv, resourceContinuityId: s
       hidden_cost = ?,
       continuity_risk = ?,
       status = ?,
+      risk_level = ?,
       updated_at = ?
     WHERE project_id = ? AND id = ?
   `).run(
@@ -521,6 +531,7 @@ export function updateResourceContinuity(env: ServerEnv, resourceContinuityId: s
     record.hiddenCost,
     record.continuityRisk,
     record.status,
+    record.riskLevel,
     record.updatedAt,
     record.projectId,
     record.id,

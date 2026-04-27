@@ -15,6 +15,7 @@ import type { Id, StructureMemoryGuardAlert, StructureMemorySyncStatus, Structur
 interface StructureWorkspaceIndexProps {
   projectId: Id;
   guardAlerts?: StructureMemoryGuardAlert[];
+  onOpenSection?: (sectionId: string) => void;
 }
 
 interface IndexAlert {
@@ -108,8 +109,17 @@ function countMatchedTerms(text: string, terms: string[]) {
   }, 0);
 }
 
-export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: StructureWorkspaceIndexProps) {
+export function StructureWorkspaceIndex({
+  projectId,
+  guardAlerts = [],
+  onOpenSection,
+}: StructureWorkspaceIndexProps) {
   const [searchText, setSearchText] = useState('');
+
+  function openSection(sectionId: string) {
+    onOpenSection?.(sectionId);
+    openSection(sectionId);
+  }
 
   const threadLedgers = useThreadLedgerStore((state) => state.threadLedgers);
   const threadAlerts = useThreadLedgerStore((state) => state.alerts);
@@ -182,7 +192,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           threadLocalOnlyById[item.id] === true,
           () => {
             setActiveThreadLedger(item.id);
-            scrollToSection('thread-ledger');
+            openSection('thread-ledger');
           },
         ),
       ),
@@ -197,7 +207,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           foreshadowLocalOnlyById[item.id] === true,
           () => {
             setActiveForeshadowPlan(item.id);
-            scrollToSection('foreshadow-plan');
+            openSection('foreshadow-plan');
           },
         ),
       ),
@@ -212,7 +222,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           worldStateLocalOnlyById[item.id] === true,
           () => {
             setActiveWorldStateEntry(item.id);
-            scrollToSection('world-state');
+            openSection('world-state');
           },
         ),
       ),
@@ -227,7 +237,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           questionLocalOnlyById[item.id] === true,
           () => {
             setActiveQuestionPool(item.id);
-            scrollToSection('question-pool');
+            openSection('question-pool');
           },
         ),
       ),
@@ -242,7 +252,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           antagonistLocalOnlyById[item.id] === true,
           () => {
             setActiveAntagonistAgenda(item.id);
-            scrollToSection('antagonist-agenda');
+            openSection('antagonist-agenda');
           },
         ),
       ),
@@ -257,7 +267,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           povLocalOnlyById[item.id] === true,
           () => {
             setActivePovPermission(item.id);
-            scrollToSection('pov-permission');
+            openSection('pov-permission');
           },
         ),
       ),
@@ -272,7 +282,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
           resourceLocalOnlyById[item.id] === true,
           () => {
             setActiveResourceContinuity(item.id);
-            scrollToSection('resource-continuity');
+            openSection('resource-continuity');
           },
         ),
       ),
@@ -325,6 +335,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
       )
       .slice(0, 12);
   }, [searchItems, searchText]);
+  const isSearching = normalizeText(searchText).length > 0;
 
   function openGuardAlert(alert: StructureMemoryGuardAlert) {
     const { sectionId } = getSectionMeta(alert.targetSystem);
@@ -398,7 +409,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
         tone: 'amber' as const,
         onOpen: () => {
           setActiveThreadLedger(alert.threadLedgerId);
-          scrollToSection('thread-ledger');
+          openSection('thread-ledger');
         },
       })),
       ...foreshadowAlerts.map((alert) => ({
@@ -409,7 +420,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
         tone: 'amber' as const,
         onOpen: () => {
           setActiveForeshadowPlan(alert.foreshadowPlanId);
-          scrollToSection('foreshadow-plan');
+          openSection('foreshadow-plan');
         },
       })),
       ...questionAlerts.map((alert) => ({
@@ -420,7 +431,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
         tone: 'amber' as const,
         onOpen: () => {
           setActiveQuestionPool(alert.questionPoolId);
-          scrollToSection('question-pool');
+          openSection('question-pool');
         },
       })),
       ...searchItems
@@ -456,7 +467,7 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
   return (
     <section className="space-y-4">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <div className="rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5">
+        <div className="flex h-[560px] max-h-[70vh] min-h-0 flex-col rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5">
           <div className="flex items-center gap-2">
             <Search size={16} className="text-sky-300" />
             <p className="text-sm font-medium text-neutral-200">跨系统搜索</p>
@@ -470,31 +481,49 @@ export function StructureWorkspaceIndex({ projectId, guardAlerts = [] }: Structu
               className="w-full bg-transparent text-sm text-neutral-100 outline-none placeholder:text-neutral-500"
             />
           </label>
-          <div className="mt-4 grid gap-3">
-            {filteredSearchResults.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={item.onOpen}
-                className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-4 py-4 text-left transition hover:border-neutral-700 hover:bg-neutral-900"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="font-medium text-neutral-100">{item.label}</p>
-                    <p className="mt-1 text-xs uppercase tracking-[0.18em] text-neutral-500">{item.sectionLabel}</p>
-                    <p className="mt-2 text-sm leading-6 text-neutral-300">{item.description}</p>
-                  </div>
-                  <ArrowRight size={16} className="text-neutral-500" />
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">
+              {isSearching ? '搜索结果' : '最近结构记忆项'}
+            </p>
+            <p className="text-xs text-neutral-500">
+              {filteredSearchResults.length} 条
+            </p>
+          </div>
+          <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="grid gap-3">
+              {filteredSearchResults.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-neutral-800 bg-neutral-950/50 px-4 py-6 text-sm leading-6 text-neutral-500">
+                  {isSearching
+                    ? '当前没有命中的结构记忆项，试试换关键词、卷名、角色名或伏笔名。'
+                    : '当前还没有可展示的最近结构记忆项。'}
                 </div>
-                {item.unsynced ? (
-                  <div className="mt-3">
-                    <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-100">
-                      {item.syncLabel}
-                    </span>
-                  </div>
-                ) : null}
-              </button>
-            ))}
+              ) : (
+                filteredSearchResults.map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={item.onOpen}
+                    className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-4 py-4 text-left transition hover:border-neutral-700 hover:bg-neutral-900"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <p className="font-medium text-neutral-100">{item.label}</p>
+                        <p className="mt-1 text-xs uppercase tracking-[0.18em] text-neutral-500">{item.sectionLabel}</p>
+                        <p className="mt-2 text-sm leading-6 text-neutral-300">{item.description}</p>
+                      </div>
+                      <ArrowRight size={16} className="text-neutral-500" />
+                    </div>
+                    {item.unsynced ? (
+                      <div className="mt-3">
+                        <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-3 py-1.5 text-xs text-sky-100">
+                          {item.syncLabel}
+                        </span>
+                      </div>
+                    ) : null}
+                  </button>
+                ))
+              )}
+            </div>
           </div>
         </div>
 

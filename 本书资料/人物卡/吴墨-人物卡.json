@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-character-card",
+  "exportedAt": "2026-04-17T17:10:00+08:00",
+  "data": {
+    "name": "吴墨",
+    "description": "物证库与旧卷库主事，二十五年不离库房。第一卷中既是挡住许明调卷的卷宗墙，也是最终匿名送出关键流转节点、守住“缺而不无”底线的人。",
+    "tags": [
+      "重要角色",
+      "守卷人",
+      "物证库",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "让卷宗至少还存在，不至于被彻底抹干净。",
+      "static_fear": "怕卷被毁、被改到连留下痕都做不到。",
+      "static_values": "留痕、守卷、边界、宁可少说也不能多毁一页。",
+      "static_trueNature": "沉默、硬、耐心，能挡人却不毁卷，守的不是谁，而是卷宗还得存在这条底线。",
+      "static_speechStyle": "少、短、不给废解释，一句够挡住人就不会说第二句。",
+      "static_decisionStyle": "先守住卷，再决定给不给缝，给缝也尽量不留名。",
+      "static_conflictResponse": "站门口、守权限、压程序，不轻易替任何人把门打开。",
+      "static_taboos": "不亲手毁卷，不轻易留下能被人追到自己头上的名字。"
+    }
+  }
+}

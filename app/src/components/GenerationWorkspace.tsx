@@ -13,6 +13,7 @@ import { GenerationLabDialog } from '@/components/GenerationLabDialog';
 import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { useToast } from '@/components/Toast';
+import { createChapterOutlineDraft, getChapterWriteUnitCount } from '@/lib/chapter-outline';
 import { db } from '@/lib/db';
 import {
   backfillGenerationMemoryChunks,
@@ -67,7 +68,7 @@ import {
 } from '@/lib/generation-storage';
 import { createParagraphDocument } from '@/lib/editor-content';
 import { rebuildProjectArtifactsFromLocalState } from '@/lib/generation-project-artifact-client';
-import { getProjectStylePrompt } from '@/lib/project-style';
+import { buildEffectiveStylePrompt } from '@/lib/project-style';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { buildWorldStateSummary, findPreviousChapter, getStrandLabel } from '@/lib/generation-utils';
@@ -142,55 +143,15 @@ function createStateChangeMap(changes: StateChange[]) {
 }
 
 function createEmptyOutlineDraft(): ChapterOutlineDraft {
-  return {
-    goal: '',
-    obstacle: '',
-    cost: '',
-    beats: [],
-    timeAnchor: '',
-    chapterTimeSpan: '',
-    gapFromPrevious: '',
-    strand: 'quest',
-    hookType: '',
-    hookStrength: 'medium',
-    immutableFacts: [],
-  };
+  return createChapterOutlineDraft();
 }
 
 function createOutlineDraft(outline?: ChapterOutline | ChapterOutlineDraft | null): ChapterOutlineDraft {
-  if (!outline) {
-    return createEmptyOutlineDraft();
-  }
-
-  return {
-    goal: outline.goal,
-    obstacle: outline.obstacle,
-    cost: outline.cost,
-    beats: [...outline.beats],
-    timeAnchor: outline.timeAnchor,
-    chapterTimeSpan: outline.chapterTimeSpan,
-    gapFromPrevious: outline.gapFromPrevious,
-    strand: outline.strand,
-    hookType: outline.hookType,
-    hookStrength: outline.hookStrength,
-    immutableFacts: [...outline.immutableFacts],
-  };
+  return createChapterOutlineDraft(outline);
 }
 
 function normalizeOutlineDraft(draft: ChapterOutlineDraft): ChapterOutlineDraft {
-  return {
-    goal: draft.goal.trim(),
-    obstacle: draft.obstacle.trim(),
-    cost: draft.cost.trim(),
-    beats: draft.beats.map((item) => item.trim()).filter(Boolean),
-    timeAnchor: draft.timeAnchor.trim(),
-    chapterTimeSpan: draft.chapterTimeSpan.trim(),
-    gapFromPrevious: draft.gapFromPrevious.trim(),
-    strand: draft.strand,
-    hookType: draft.hookType.trim(),
-    hookStrength: draft.hookStrength,
-    immutableFacts: draft.immutableFacts.map((item) => item.trim()).filter(Boolean),
-  };
+  return createChapterOutlineDraft(draft);
 }
 
 function splitMultilineList(value: string) {
@@ -250,6 +211,8 @@ function formatJobStep(step: GenerationJobRecord['currentStep'], status?: Genera
       return '质量审查';
     case 'polish':
       return '润色终检';
+    case 'editor_refine':
+      return '整章统筹改稿';
     case 'extract':
       return '提取摘要';
     case 'complete':
@@ -490,17 +453,9 @@ export function GenerationWorkspace({
   const updateProject = useProjectStore((state) => state.updateProject);
   const settings = useSettingsStore((state) => state.settings);
   const effectiveStylePrompt = useMemo(
-    () =>
-      mergePromptSections(
-        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
-        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
-        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
-        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
-      ),
+    () => buildEffectiveStylePrompt(currentProject, settings),
     [
-      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
       currentProject?.templateSnapshot?.promptBundle.stylePrompt,
-      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
       currentProject?.stylePrompt,
       settings.stylePrompt,
     ],
@@ -1107,8 +1062,8 @@ export function GenerationWorkspace({
 
     const normalizedDraft = normalizeOutlineDraft(outlineDraft);
 
-    if (normalizedDraft.beats.length === 0) {
-      toast('至少需要填写 1 条 beat 才能保存章节契约', 'warning');
+    if (getChapterWriteUnitCount(normalizedDraft) === 0) {
+      toast('至少需要填写 1 个写作单元（scene 或旧 beat）才能保存章节契约', 'warning');
       return;
     }
 
@@ -1168,8 +1123,8 @@ export function GenerationWorkspace({
         });
         const outlinePromptPayload = await getOutlinePromptPayload(chapter.id);
 
-        if (!outlinePromptPayload.chapterBeat) {
-          throw new Error(`《${chapter.title}》缺少章节拍，请先到大纲页补齐后再批量生成`);
+        if (!outlineMap.get(chapter.id) && !outlinePromptPayload.chapterBeat) {
+          throw new Error(`《${chapter.title}》缺少章纲或章节拍，请先补齐后再批量生成`);
         }
 
         const response = await createChapterPlan(settings.serverUrl, {
@@ -1199,7 +1154,9 @@ export function GenerationWorkspace({
           ...buildModelRequestConfig(settings),
         });
 
-        await saveChapterOutline(projectId, chapter.id, response.outline);
+        await saveChapterOutline(projectId, chapter.id, response.outline, {
+          source: 'generated',
+        });
       }
 
       await refreshOverview(false);
@@ -1238,8 +1195,8 @@ export function GenerationWorkspace({
           });
           const outlinePromptPayload = await getOutlinePromptPayload(chapter.id);
 
-          if (!outlinePromptPayload.chapterBeat) {
-            throw new Error(`《${chapter.title}》缺少章节拍，请先到大纲页补齐后再加入队列`);
+          if (!savedOutline && !outlinePromptPayload.chapterBeat) {
+            throw new Error(`《${chapter.title}》缺少章纲或章节拍，请先补齐后再加入队列`);
           }
 
           return {
@@ -1255,7 +1212,7 @@ export function GenerationWorkspace({
             bookOutline: outlinePromptPayload.bookOutline,
             volumeOutline: outlinePromptPayload.volumeOutline,
             volumeGoal: outlinePromptPayload.volumeGoal,
-            chapterBeat: outlinePromptPayload.chapterBeat,
+            chapterBeat: savedOutline ? undefined : outlinePromptPayload.chapterBeat,
             nextChapterPreview: outlinePromptPayload.nextChapterPreview,
             forbiddenZone: outlinePromptPayload.forbiddenZone,
             previousSummary: previousSummary?.summary ?? '',
@@ -1265,6 +1222,7 @@ export function GenerationWorkspace({
             availableCharacterNames: outlinePromptPayload.availableCharacterNames,
             requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
             stylePrompt: effectiveStylePrompt.trim() || undefined,
+            enableEditorRefine: false,
             ...buildModelRequestConfig(settings),
             priority: orderedChapters.length - index,
             gateConfigOverride: currentProject?.generationGateOverride ?? null,
@@ -1312,7 +1270,9 @@ export function GenerationWorkspace({
     await saveChapterContent(chapter.id, createParagraphDocument(job.generatedText));
 
     if (job.outline) {
-      await saveChapterOutline(projectId, chapter.id, job.outline);
+      await saveChapterOutline(projectId, chapter.id, job.outline, {
+        source: 'generated',
+      });
     }
 
     if (job.summary) {
@@ -2512,7 +2472,7 @@ export function GenerationWorkspace({
                       </div>
                     )}
                     {selectedServerJob.currentBeatLabel && (
-                      <p className="mt-3 text-xs text-neutral-500">当前 beat：{selectedServerJob.currentBeatLabel}</p>
+                      <p className="mt-3 text-xs text-neutral-500">当前写作单元：{selectedServerJob.currentBeatLabel}</p>
                     )}
                     {selectedServerJob.pausedAt && (
                       <p className="mt-2 text-xs text-sky-300">暂停时间：{formatTimeLabel(selectedServerJob.pausedAt)}</p>
@@ -2839,6 +2799,33 @@ export function GenerationWorkspace({
                       )}
                     </div>
                   )}
+
+                  {selectedServerJob.editorRefine && (
+                    <div className="rounded-2xl border border-neutral-800 bg-neutral-900/70 p-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm text-neutral-200">服务端整章统筹改稿</p>
+                        <span
+                          className={`rounded-full px-2 py-1 text-[11px] ${
+                            selectedServerJob.editorRefine.antiAiForceCheck === 'fail'
+                              ? 'bg-red-500/15 text-red-300'
+                              : 'bg-emerald-500/15 text-emerald-300'
+                          }`}
+                        >
+                          Anti-AI：{selectedServerJob.editorRefine.antiAiForceCheck === 'fail' ? '未通过' : '通过'}
+                        </span>
+                      </div>
+                      <p className="mt-3 text-xs leading-6 text-neutral-400">{selectedServerJob.editorRefine.summary}</p>
+                      {selectedServerJob.editorRefine.majorAdjustments.length > 0 && (
+                        <div className="mt-3 space-y-2">
+                          {selectedServerJob.editorRefine.majorAdjustments.map((change, index) => (
+                            <p key={`${selectedServerJob.id}-editor-refine-${index}`} className="rounded-xl border border-neutral-800 px-3 py-2 text-xs leading-6 text-neutral-500">
+                              {index + 1}. {change}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2861,6 +2848,14 @@ export function GenerationWorkspace({
                 <p>审查级别：{selectedServerJob?.review ? formatReviewSeverity(selectedServerJob.review.overallSeverity) : '暂无'}</p>
                 <p>风格层：{selectedServerJob?.style ? '已执行' : (effectiveStylePrompt.trim() ? '待执行/未入队' : '未启用')}</p>
                 <p>润色终检：{selectedServerJob?.polish ? (selectedServerJob.polish.antiAiForceCheck === 'fail' ? '未通过' : '通过') : '暂无'}</p>
+                <p>
+                  整章统筹改稿：
+                  {selectedServerJob?.editorRefine
+                    ? (selectedServerJob.editorRefine.antiAiForceCheck === 'fail' ? '未通过' : '已执行')
+                    : selectedServerJob?.request.enableEditorRefine === false
+                      ? '已跳过'
+                      : '暂无'}
+                </p>
                 <p>门控原因：{selectedServerJob?.reviewGateReason || '暂无'}</p>
                 <p>重写提示：{selectedServerJob?.rewriteGuidance ? '已生成' : '暂无'}</p>
                 <p>生效门控来源：{selectedEffectiveGateSource}</p>

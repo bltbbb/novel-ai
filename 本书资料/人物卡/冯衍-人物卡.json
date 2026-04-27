@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-character-card",
+  "exportedAt": "2026-04-17T17:10:00+08:00",
+  "data": {
+    "name": "冯衍",
+    "description": "刑律司第六房主事，第一卷中复核、限题、解释程序适用的核心对手，也是听证与公审上那堵最像水的程序墙。",
+    "tags": [
+      "重要角色",
+      "程序对手",
+      "第六房",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "守住程序不失控，不让个案情绪冲塌可复核的边界。",
+      "static_fear": "怕一旦给坏口子开了门，往后所有人都拿正义的名义撞塌程序。",
+      "static_values": "边界、可复核性、限题、程序先于情绪。",
+      "static_trueNature": "冷静、硬、像水一样会绕，但本质是不肯让路；不替余化及说话，只替现行律说话。",
+      "static_speechStyle": "平直、克制、近乎无温度，擅长把问题压回规则本身。",
+      "static_decisionStyle": "先问合不合例，再问应不应该，最后才看值不值得例外。",
+      "static_conflictResponse": "以定义权、适用范围、证据效力和程序顺序不断逼人补链。",
+      "static_taboos": "不接受用情理顶替程序，不肯为任何个人破坏自己相信的规则。"
+    }
+  }
+}

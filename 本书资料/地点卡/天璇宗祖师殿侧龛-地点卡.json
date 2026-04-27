@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "type": "lore-location-card",
+  "exportedAt": "2026-04-17T17:35:00+08:00",
+  "data": {
+    "name": "天璇宗祖师殿侧龛",
+    "description": "秦小昭在第一卷夜探的关键地点，表面只是一处宗门供奉侧位，实际却藏着被红布遮住的法统实物。",
+    "tags": [
+      "地点",
+      "宗门场景",
+      "法统线索点",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "location_type": "宗门祖师殿内部侧位",
+      "public_function": "供奉与摆放祖师殿附属重要器物。",
+      "true_function": "让被遮住的法统证物以供奉之名继续存在于天璇宗内部。",
+      "physical_impression": "殿深、光暗、红布压着冷器，静得像不许人久看。",
+      "atmosphere": "庄重里带着偷藏感，越安静越显不对。",
+      "symbolic_meaning": "最怕被人问的东西，往往就被放在最神圣、最不让人细看的地方。",
+      "controllers": "天璇宗祖师殿与法统保管体系。",
+      "key_people": "秦小昭、余化及、商陆。",
+      "hidden_layers": "镇宗剑印、法统归属争议、供奉与占有之间的暧昧界线。",
+      "danger_level": "高，夜探、暴露与宗门反制风险都很强。",
+      "volume1_function": "秦小昭确认第三件赃存在的现场，是名、位、印从纸上落回实物的关键转折点。",
+      "future_hook": "祖师殿中的供奉逻辑与并宗后器物摆位，后续都可能继续被追问。"
+    }
+  }
+}

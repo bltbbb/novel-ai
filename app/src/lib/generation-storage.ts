@@ -1,10 +1,12 @@
 import { db } from '@/lib/db';
 import { richTextToPlainText } from '@/lib/editor-content';
 import { createId, createTimestamp } from '@/lib/identity';
+import { normalizeChapterOutlineDraft } from '@/lib/chapter-outline';
 import type {
   Chapter,
   ChapterOutline,
   ChapterOutlineDraft,
+  ChapterOutlineSource,
   ChapterSummary,
   ChapterSummaryDraft,
   GenerationQueueItem,
@@ -68,25 +70,73 @@ export function loadGenerationQueueMap(projectId: Id) {
   return db.generationQueue.where('projectId').equals(projectId).toArray();
 }
 
-export async function saveChapterOutline(projectId: Id, chapterId: Id, draft: ChapterOutlineDraft) {
+interface SaveChapterOutlineOptions {
+  source?: ChapterOutlineSource;
+  milestoneIndex?: number | null;
+}
+
+function normalizeMilestoneIndex(milestoneIndex: number | null | undefined) {
+  if (typeof milestoneIndex !== 'number' || !Number.isFinite(milestoneIndex) || milestoneIndex < 0) {
+    return null;
+  }
+
+  return Math.trunc(milestoneIndex);
+}
+
+export async function saveChapterOutline(
+  projectId: Id,
+  chapterId: Id,
+  draft: ChapterOutlineDraft,
+  options: SaveChapterOutlineOptions = {},
+) {
   const now = createTimestamp();
   const existing = await db.chapterOutlines.where('[projectId+chapterId]').equals([projectId, chapterId]).first();
+  const normalizedDraft = normalizeChapterOutlineDraft(draft);
+  const hasPromptModuleHints = Object.prototype.hasOwnProperty.call(normalizedDraft, 'promptModuleHints');
 
   const outline: ChapterOutline = {
     id: existing?.id ?? createId(),
     projectId,
     chapterId,
-    goal: draft.goal,
-    obstacle: draft.obstacle,
-    cost: draft.cost,
-    beats: draft.beats,
-    timeAnchor: draft.timeAnchor,
-    chapterTimeSpan: draft.chapterTimeSpan,
-    gapFromPrevious: draft.gapFromPrevious,
-    strand: draft.strand,
-    hookType: draft.hookType,
-    hookStrength: draft.hookStrength,
-    immutableFacts: draft.immutableFacts,
+    source: options.source ?? existing?.source ?? 'manual',
+    milestoneIndex:
+      typeof options.milestoneIndex === 'undefined'
+        ? existing?.milestoneIndex ?? null
+        : normalizeMilestoneIndex(options.milestoneIndex),
+    goal: normalizedDraft.goal,
+    obstacle: normalizedDraft.obstacle,
+    cost: normalizedDraft.cost,
+    beats: normalizedDraft.beats,
+    timeAnchor: normalizedDraft.timeAnchor,
+    chapterTimeSpan: normalizedDraft.chapterTimeSpan,
+    gapFromPrevious: normalizedDraft.gapFromPrevious,
+    strand: normalizedDraft.strand,
+    hookType: normalizedDraft.hookType,
+    hookStrength: normalizedDraft.hookStrength,
+    immutableFacts: normalizedDraft.immutableFacts,
+    chapterFunction: normalizedDraft.chapterFunction,
+    chapterBoundary: normalizedDraft.chapterBoundary,
+    revealCeiling: normalizedDraft.revealCeiling,
+    openingState: normalizedDraft.openingState,
+    closingState: normalizedDraft.closingState,
+    focusCharacter: normalizedDraft.focusCharacter,
+    mustAppearCharacters: normalizedDraft.mustAppearCharacters,
+    availableCharacters: normalizedDraft.availableCharacters,
+    mainPlot: normalizedDraft.mainPlot,
+    subPlot: normalizedDraft.subPlot,
+    coreScene: normalizedDraft.coreScene,
+    sceneAnchors: normalizedDraft.sceneAnchors,
+    infoBudget: normalizedDraft.infoBudget,
+    powerShift: normalizedDraft.powerShift,
+    personalConflict: normalizedDraft.personalConflict,
+    emotionalOutcome: normalizedDraft.emotionalOutcome,
+    chapterHook: normalizedDraft.chapterHook,
+    generationModeHint: normalizedDraft.generationModeHint,
+    sceneDecisionNote: normalizedDraft.sceneDecisionNote,
+    foreshadowRefs: normalizedDraft.foreshadowRefs,
+    sceneDrafts: normalizedDraft.sceneDrafts,
+    beatDrafts: normalizedDraft.beatDrafts,
+    promptModuleHints: hasPromptModuleHints ? normalizedDraft.promptModuleHints : existing?.promptModuleHints,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -97,6 +147,16 @@ export async function saveChapterOutline(projectId: Id, chapterId: Id, draft: Ch
 
 export function loadChapterOutline(projectId: Id, chapterId: Id) {
   return db.chapterOutlines.where('[projectId+chapterId]').equals([projectId, chapterId]).first();
+}
+
+export async function deleteChapterOutline(projectId: Id, chapterId: Id) {
+  const existing = await db.chapterOutlines.where('[projectId+chapterId]').equals([projectId, chapterId]).first();
+
+  if (!existing) {
+    return;
+  }
+
+  await db.chapterOutlines.delete(existing.id);
 }
 
 export async function saveChapterSummary(projectId: Id, chapterId: Id, draft: ChapterSummaryDraft) {
@@ -122,8 +182,22 @@ export function loadChapterSummary(projectId: Id, chapterId: Id) {
   return db.chapterSummaries.where('[projectId+chapterId]').equals([projectId, chapterId]).first();
 }
 
+export async function deleteChapterSummary(projectId: Id, chapterId: Id) {
+  const existing = await db.chapterSummaries.where('[projectId+chapterId]').equals([projectId, chapterId]).first();
+
+  if (!existing) {
+    return;
+  }
+
+  await db.chapterSummaries.delete(existing.id);
+}
+
 export function loadChapterStateChanges(chapterId: Id) {
   return db.stateChanges.where('chapterId').equals(chapterId).toArray();
+}
+
+export async function deleteChapterStateChanges(chapterId: Id) {
+  await db.stateChanges.where('chapterId').equals(chapterId).delete();
 }
 
 export async function replaceChapterStateChanges(
@@ -187,6 +261,28 @@ export async function appendStrandHistory(projectId: Id, chapterId: Id, chapterT
 
 export function loadStrandTracker(projectId: Id) {
   return db.strandTrackers.get(projectId);
+}
+
+export async function removeStrandHistory(projectId: Id, chapterId: Id) {
+  const tracker = await db.strandTrackers.get(projectId);
+
+  if (!tracker) {
+    return null;
+  }
+
+  const nextHistory = tracker.history.filter((entry) => entry.chapterId !== chapterId);
+  const nextTracker: StrandTracker = {
+    ...tracker,
+    history: nextHistory,
+    lastQuestChapterId: tracker.lastQuestChapterId === chapterId ? null : tracker.lastQuestChapterId,
+    lastFireChapterId: tracker.lastFireChapterId === chapterId ? null : tracker.lastFireChapterId,
+    lastConstellationChapterId:
+      tracker.lastConstellationChapterId === chapterId ? null : tracker.lastConstellationChapterId,
+    updatedAt: createTimestamp(),
+  };
+
+  await db.strandTrackers.put(nextTracker);
+  return nextTracker;
 }
 
 interface SaveGenerationQueueInput {

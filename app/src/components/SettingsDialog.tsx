@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, RotateCcw, Save, Settings2, Wifi, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDown, RefreshCw, RotateCcw, Save, Settings2, Wifi, X } from 'lucide-react';
 import { AI_PROVIDER_PRESETS, getProviderDefaultBaseUrl } from '@/lib/ai-provider-presets';
 import {
   DEFAULT_GENERATION_GATE_CONFIG,
@@ -73,6 +73,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [isModelLoading, setIsModelLoading] = useState(false);
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [testStatus, setTestStatus] = useState('');
   const [gateConfig, setGateConfig] = useState<GenerationGateConfig>(DEFAULT_GENERATION_GATE_CONFIG);
@@ -80,6 +81,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
   const [isGateLoading, setIsGateLoading] = useState(false);
   const [isGateSaving, setIsGateSaving] = useState(false);
   const [gateStatus, setGateStatus] = useState('');
+  const modelFieldRef = useRef<HTMLDivElement | null>(null);
   const isEditableBaseUrlProvider =
     runtimeConfig.provider === 'custom' || runtimeConfig.provider === 'claude_compatible';
 
@@ -98,6 +100,14 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     return Array.from(new Set([chatModel, ...modelOptions].map((item) => item.trim()).filter(Boolean)))
       .sort((left, right) => left.localeCompare(right, 'zh-CN'));
   }, [chatModel, modelOptions]);
+  const filteredModelOptions = useMemo(() => {
+    const keyword = chatModel.trim().toLocaleLowerCase('zh-CN');
+    if (!keyword) {
+      return mergedModelOptions;
+    }
+
+    return mergedModelOptions.filter((item) => item.toLocaleLowerCase('zh-CN').includes(keyword));
+  }, [chatModel, mergedModelOptions]);
   const matchedLightweightRecallPreset = useMemo(
     () => findMatchingLightweightRecallPreset(gateConfig.lightweightRecall),
     [gateConfig.lightweightRecall],
@@ -138,12 +148,28 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     setTemperature(settings.temperature);
     setReasoningEffort(settings.reasoningEffort);
     setModelOptions([]);
+    setIsModelMenuOpen(false);
     setStatusText('');
     setTestStatus('');
     setGateStatus('');
     void loadRuntimeConfig();
     void loadGateConfig();
   }, [open, settings]);
+
+  useEffect(() => {
+    if (!isModelMenuOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (!modelFieldRef.current?.contains(event.target as Node)) {
+        setIsModelMenuOpen(false);
+      }
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => window.removeEventListener('pointerdown', handlePointerDown);
+  }, [isModelMenuOpen]);
 
   if (!open) {
     return null;
@@ -381,20 +407,61 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
 
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-neutral-200">聊天模型</span>
-                <input
-                  list="chat-model-options"
-                  value={chatModel}
-                  onChange={(event) => setChatModel(event.target.value)}
-                  placeholder="可直接手填模型名，也可先拉取模型后选择"
-                  className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
-                />
-                <datalist id="chat-model-options">
-                  {mergedModelOptions.map((model) => (
-                    <option key={model} value={model} />
-                  ))}
-                </datalist>
+                <div ref={modelFieldRef} className="relative">
+                  <input
+                    value={chatModel}
+                    onFocus={() => setIsModelMenuOpen(true)}
+                    onChange={(event) => {
+                      setChatModel(event.target.value);
+                      setIsModelMenuOpen(true);
+                    }}
+                    placeholder="可直接手填模型名，也可先拉取模型后选择"
+                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 pr-12 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setIsModelMenuOpen((current) => !current)}
+                    className="absolute inset-y-0 right-0 inline-flex w-12 items-center justify-center rounded-r-2xl text-neutral-500 transition-colors hover:text-neutral-200"
+                    aria-label={isModelMenuOpen ? '收起模型列表' : '展开模型列表'}
+                    aria-expanded={isModelMenuOpen}
+                  >
+                    <ChevronDown
+                      size={16}
+                      className={`transition-transform ${isModelMenuOpen ? 'rotate-180 text-neutral-200' : ''}`}
+                    />
+                  </button>
+                  {isModelMenuOpen ? (
+                    <div className="absolute left-0 right-0 top-full z-20 mt-2 overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl shadow-black/40">
+                      {filteredModelOptions.length > 0 ? (
+                        <div className="max-h-60 overflow-y-auto py-2">
+                          {filteredModelOptions.map((model) => (
+                            <button
+                              key={model}
+                              type="button"
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                setChatModel(model);
+                                setIsModelMenuOpen(false);
+                              }}
+                              className={`flex w-full items-center px-4 py-2 text-left text-sm transition-colors ${
+                                model === chatModel
+                                  ? 'bg-indigo-500/15 text-indigo-200'
+                                  : 'text-neutral-200 hover:bg-neutral-900'
+                              }`}
+                            >
+                              {model}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="px-4 py-3 text-sm text-neutral-500">没有匹配项，可直接手填模型名</div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
                 <span className="mt-2 block text-xs text-neutral-500">
-                  向量模型不在这里设置，服务端会继续使用 `OPENAI_EMBEDDING_MODEL` / `EMBEDDING_*` 配置。
+                  支持直接手填，也可点右侧箭头展开已拉取模型。向量模型不在这里设置，服务端会继续使用
+                  `OPENAI_EMBEDDING_MODEL` / `EMBEDDING_*` 配置。
                 </span>
               </label>
 

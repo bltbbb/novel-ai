@@ -58,6 +58,14 @@ export function buildVolumeForeshadowPlanBundle(input: {
         `- ${plan.foreshadowTitle}（${plan.type || '未分类'} / ${plan.importance === 'major' ? '核心伏笔' : '次级伏笔'}）`,
       ];
 
+      if (plan.activationWindow?.trim()) {
+        lines.push(`激活窗口：${truncateText(plan.activationWindow, 120)}`);
+      }
+
+      if (plan.resolveWindow?.trim()) {
+        lines.push(`回收窗口：${truncateText(plan.resolveWindow, 120)}`);
+      }
+
       if (typeof plan.plannedActivateVolume === 'number' && plan.plannedActivateVolume > 0) {
         lines.push(`计划激活：第${plan.plannedActivateVolume}卷`);
       }

@@ -49,7 +49,7 @@ test('显式关系快照会扩展焦点人物并进入关系 section', async (t)
   assert.ok(relationshipSection, '应生成关系 section');
   assert.ok(result.focusEntityNames.includes('林冲'));
   assert.ok(result.focusEntityNames.includes('谢无咎'));
-  assert.ok(relationshipSection.blocks.some((block) => block.includes('显式关系：林冲 <-> 谢无咎')));
+  assert.ok(relationshipSection.blocks.some((block) => block.includes('显式关系真源：林冲 <-> 谢无咎')));
 });
 
 test('draft 关系在默认正文上下文中不会进入关系 section，也不会扩展焦点人物', async (t) => {

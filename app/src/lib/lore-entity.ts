@@ -24,8 +24,7 @@ export const CHARACTER_DYNAMIC_FIELD_DEFINITIONS: CharacterFieldDefinition[] = [
   { key: 'current_disguise', label: '当前伪装', placeholder: '对外呈现出的身份或面具' },
 ];
 
-export const CHARACTER_CARD_FIELD_TOTAL =
-  CHARACTER_STATIC_FIELD_DEFINITIONS.length + CHARACTER_DYNAMIC_FIELD_DEFINITIONS.length;
+export const CHARACTER_CARD_FIELD_TOTAL = CHARACTER_STATIC_FIELD_DEFINITIONS.length;
 
 function normalizeText(value: string) {
   return value.trim();
@@ -118,10 +117,7 @@ export function buildLoreEntityIdLookup(entities: LoreEntity[]) {
 }
 
 export function getCharacterCardFilledCount(fields: LoreEntityFields | undefined | null) {
-  return [
-    ...CHARACTER_STATIC_FIELD_DEFINITIONS,
-    ...CHARACTER_DYNAMIC_FIELD_DEFINITIONS,
-  ].reduce((count, definition) => {
+  return CHARACTER_STATIC_FIELD_DEFINITIONS.reduce((count, definition) => {
     return count + (isFilledFieldValue(fields?.[definition.key]) ? 1 : 0);
   }, 0);
 }

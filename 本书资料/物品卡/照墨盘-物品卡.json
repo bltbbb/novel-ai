@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "type": "lore-item-card",
+  "exportedAt": "2026-04-17T17:45:00+08:00",
+  "data": {
+    "name": "照墨盘",
+    "description": "刑律司法器之一，用于核验卷页墨层、批注先后与纸面覆盖关系。第一卷中它既替许明自证，也替卷宗自己开口。",
+    "tags": [
+      "物品",
+      "法器",
+      "验卷工具",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "item_type": "验卷法器",
+      "public_identity": "用于检验文书墨层与描补先后的法器。",
+      "true_identity": "让‘你说卷被改过’变成‘法器看见卷被改过’的客观放大器。",
+      "origin": "刑律司",
+      "current_holder": "刑律司审理体系",
+      "core_function": "验证墨层前后、批注覆盖和旧痕残留。",
+      "proof_value": "为‘卷不净’提供最强的法器型佐证，也让更早旧痕浮出。",
+      "conflict_value": "它一旦得出结果，程序席就很难再把问题压回单纯猜测。",
+      "symbolic_meaning": "不是人替卷说话，而是卷在法器下自己开口。",
+      "activation_or_reveal": "幕五先用于核验‘存疑’，幕六公审上正式替旧卷发声。",
+      "limitations": "只能显层次与痕迹，不能独立解释动机与全链。",
+      "risks": "若被解释为常例描补，其结论会被程序重新压窄。",
+      "volume1_function": "负责把抽象怀疑压成法器可见的事实面。",
+      "future_hook": "更深法器和更旧卷宗核验，后续仍会继续扩展。"
+    }
+  }
+}

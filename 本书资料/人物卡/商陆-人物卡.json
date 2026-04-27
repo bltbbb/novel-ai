@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-character-card",
+  "exportedAt": "2026-04-17T17:10:00+08:00",
+  "data": {
+    "name": "商陆",
+    "description": "天璇宗戒律长老，第一卷公审中的主要守方之一。前半程一直替法统与秩序站位，直到镇宗剑印上堂，才真正意识到自己守了一百多年的东西未必有根。",
+    "tags": [
+      "重要角色",
+      "戒律长老",
+      "天璇宗",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "守住自己相信有根的法统，不让宗门名义在自己手里塌掉。",
+      "static_fear": "怕自己守了一辈子的法统，其实是建在别人家的骨头上。",
+      "static_values": "戒律、法统、秩序、名义必须有根。",
+      "static_trueNature": "苦、冷、准，像药一样不讨喜，但底层仍然真信法统一定应该有正当根基。",
+      "static_speechStyle": "稳、正、少情绪，像在当堂配一剂苦药。",
+      "static_decisionStyle": "先看法统站不站得住，再决定自己替谁说话。",
+      "static_conflictResponse": "以资格、律理、宗门正当性和程序论证正面压场。",
+      "static_taboos": "不愿承认自己守错了东西，更不愿承认自己多年不识一印。"
+    }
+  }
+}

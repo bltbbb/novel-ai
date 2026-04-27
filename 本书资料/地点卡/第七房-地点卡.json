@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "type": "lore-location-card",
+  "exportedAt": "2026-04-17T17:35:00+08:00",
+  "data": {
+    "name": "第七房",
+    "description": "刑律司中负责旧卷、残卷、疑卷整理与抄录的偏僻房间，也是许明与前代追查链相接的起点。",
+    "tags": [
+      "地点",
+      "刑律司",
+      "核心场景",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "location_type": "官署内部房间",
+      "public_function": "抄卷、归档、整理旧案残卷。",
+      "true_function": "被压下的案子与前代留痕的汇聚点。",
+      "physical_impression": "偏僻、积尘、纸气重、灯火冷，像永远在角落里。",
+      "atmosphere": "安静、压抑、像长期无人真正看见的地方。",
+      "symbolic_meaning": "最容易被忽略的地方，却是白纸黑字重新长出反抗痕迹的地方。",
+      "controllers": "名义归刑律司，实际长期处于被忽视和边缘化状态。",
+      "key_people": "许明、老邹、老修士、周垣。",
+      "hidden_layers": "旧抽屉残纸、空白页、前代留字、暗格与被洗过的旧痕。",
+      "danger_level": "表面低，实际高。",
+      "volume1_function": "旧案引爆点、道种初醒点、卷尾写慎的闭环点。",
+      "future_hook": "承天城档案阁、第七房前代追查链与老修士留下的更深线索都会从这里接出。"
+    }
+  }
+}

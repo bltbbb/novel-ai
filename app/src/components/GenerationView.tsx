@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  Eye,
   LoaderCircle,
   PencilLine,
   RotateCcw,
@@ -14,7 +15,9 @@ import {
   XCircle,
 } from 'lucide-react';
 import { EmptyState } from '@/components/EmptyState';
+import { GenerationContextPreviewDialog, type GenerationContextPreviewData } from '@/components/GenerationContextPreviewDialog';
 import { useToast } from '@/components/Toast';
+import { createChapterOutlineDraft, getChapterWriteUnitCount, getChapterWriteUnitLabels, serializeChapterOutlineDraft } from '@/lib/chapter-outline';
 import { buildGenerationContextBundle } from '@/lib/generation-context';
 import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import {
@@ -31,6 +34,7 @@ import {
   fetchGenerationDebugRelationships,
   fetchGenerationDebugRetrieval,
   fetchGenerationDebugVolumeRecaps,
+  previewGenerationPrompts,
 } from '@/lib/generation-debug-client';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
 import { buildGenerationRelationSnapshot } from '@/lib/generation-relation-snapshot';
@@ -51,10 +55,14 @@ import {
   getEffectiveChapterSummary,
   loadGenerationQueueMap,
   appendStrandHistory,
+  deleteChapterOutline,
+  deleteChapterStateChanges,
+  deleteChapterSummary,
   loadChapterOutline,
   loadChapterStateChanges,
   loadChapterSummary,
   loadGenerationQueue,
+  removeStrandHistory,
   replaceChapterStateChanges,
   saveChapterOutline,
   saveChapterSummary,
@@ -70,7 +78,7 @@ import {
   LIGHTWEIGHT_RECALL_PRESETS,
   normalizeGenerationGateConfig,
 } from '@/lib/generation-gate-defaults';
-import { getProjectStylePrompt } from '@/lib/project-style';
+import { buildEffectiveStylePrompt } from '@/lib/project-style';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { fetchGenerationGateConfig } from '@/lib/server-config-client';
@@ -102,6 +110,7 @@ import type {
   GenerationJobRecord,
   GenerationMemoryChunkBackfillResult,
   GenerationMemoryEmbeddingBackfillResult,
+  GenerationPromptPreviewStageRequest,
   GenerationQueueItem,
   GenerationVolumeRecapBackfillResult,
   Id,
@@ -121,7 +130,7 @@ interface GenerationViewProps {
   onOpenOutline?: () => void;
 }
 
-const pipelineStages: Array<{
+const allPipelineStages: Array<{
   key: GenerationPipelineStage;
   label: string;
 }> = [
@@ -130,6 +139,7 @@ const pipelineStages: Array<{
   { key: 'style', label: 'Style' },
   { key: 'review', label: 'Review' },
   { key: 'polish', label: 'Polish' },
+  { key: 'editor_refine', label: 'Editor Refine' },
   { key: 'extract', label: 'Extract' },
 ];
 
@@ -299,6 +309,10 @@ function formatStageDescription(
   beatIndex: number | null,
   beatCount: number | null,
   label?: string,
+  stageOptions: Array<{
+    key: GenerationPipelineStage;
+    label: string;
+  }> = allPipelineStages,
 ) {
   if (label?.trim()) {
     return label.trim();
@@ -309,10 +323,10 @@ function formatStageDescription(
   }
 
   if (stage === 'write' && beatIndex !== null && beatCount) {
-    return `正在撰写第 ${beatIndex + 1}/${beatCount} 个 beat`;
+    return `正在撰写第 ${beatIndex + 1}/${beatCount} 个写作单元`;
   }
 
-  return `正在执行 ${pipelineStages.find((item) => item.key === stage)?.label ?? stage}`;
+  return `正在执行 ${stageOptions.find((item) => item.key === stage)?.label ?? stage}`;
 }
 
 function getChapterPlainText(content = createParagraphDocument()) {
@@ -325,19 +339,73 @@ function getQueuePreviewText(queueItem: GenerationQueueItem | null, chapterConte
 }
 
 function normalizeOutlineDraft(outline: ChapterOutlineDraft | NonNullable<Awaited<ReturnType<typeof loadChapterOutline>>>) {
-  return {
-    goal: outline.goal,
-    obstacle: outline.obstacle,
-    cost: outline.cost,
-    beats: [...outline.beats],
-    timeAnchor: outline.timeAnchor,
-    chapterTimeSpan: outline.chapterTimeSpan,
-    gapFromPrevious: outline.gapFromPrevious,
-    strand: outline.strand,
-    hookType: outline.hookType,
-    hookStrength: outline.hookStrength,
-    immutableFacts: [...outline.immutableFacts],
-  } satisfies ChapterOutlineDraft;
+  return createChapterOutlineDraft(outline);
+}
+
+function hasManualOutlineSignals(
+  outline: NonNullable<Awaited<ReturnType<typeof loadChapterOutline>>> | ChapterOutlineDraft | null | undefined,
+) {
+  if (!outline) {
+    return false;
+  }
+
+  return Boolean(
+    outline.chapterFunction?.trim() ||
+      outline.chapterBoundary?.trim() ||
+      outline.revealCeiling?.trim() ||
+      outline.openingState?.trim() ||
+      outline.closingState?.trim() ||
+      outline.focusCharacter?.trim() ||
+      (outline.mustAppearCharacters?.length ?? 0) > 0 ||
+      (outline.availableCharacters?.length ?? 0) > 0 ||
+      outline.mainPlot?.trim() ||
+      outline.subPlot?.trim() ||
+      outline.coreScene?.trim() ||
+      (outline.sceneAnchors?.length ?? 0) > 0 ||
+      outline.infoBudget?.trim() ||
+      outline.powerShift?.trim() ||
+      outline.personalConflict?.trim() ||
+      outline.emotionalOutcome?.trim() ||
+      outline.chapterHook?.trim() ||
+      outline.sceneDecisionNote?.trim() ||
+      (outline.foreshadowRefs?.length ?? 0) > 0 ||
+      (outline.sceneDrafts?.length ?? 0) > 0 ||
+      (outline.beatDrafts?.length ?? 0) > 0
+  );
+}
+
+function shouldResetOutline(
+  outline: NonNullable<Awaited<ReturnType<typeof loadChapterOutline>>> | ChapterOutlineDraft | null | undefined,
+) {
+  if (!outline) {
+    return false;
+  }
+
+  if (outline.source === 'generated') {
+    return true;
+  }
+
+  if (outline.source === 'manual') {
+    return false;
+  }
+
+  const hasLegacyContractSignals = Boolean(
+    outline.goal?.trim() ||
+      outline.obstacle?.trim() ||
+      outline.cost?.trim() ||
+      (outline.beats?.length ?? 0) > 0 ||
+      outline.timeAnchor?.trim() ||
+      outline.chapterTimeSpan?.trim() ||
+      outline.gapFromPrevious?.trim() ||
+      outline.hookType?.trim() ||
+      (outline.immutableFacts?.length ?? 0) > 0,
+  );
+
+  if (hasManualOutlineSignals(outline)) {
+    return false;
+  }
+
+  return hasLegacyContractSignals;
 }
 
 function renderLoadMoreActions(
@@ -405,17 +473,9 @@ export function GenerationView({
   const currentProject = useProjectStore((state) => state.projects.find((project) => project.id === projectId) ?? null);
   const updateProject = useProjectStore((state) => state.updateProject);
   const effectiveStylePrompt = useMemo(
-    () =>
-      mergePromptSections(
-        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
-        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
-        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
-        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
-      ),
+    () => buildEffectiveStylePrompt(currentProject, settings),
     [
-      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
       currentProject?.templateSnapshot?.promptBundle.stylePrompt,
-      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
       currentProject?.stylePrompt,
       settings.stylePrompt,
     ],
@@ -500,6 +560,7 @@ export function GenerationView({
 
   const [mode, setMode] = useState<GenerationViewMode>('idle');
   const [chapterHint, setChapterHint] = useState('');
+  const [enableEditorRefine, setEnableEditorRefine] = useState(false);
   const [outline, setOutline] = useState<Awaited<ReturnType<typeof loadChapterOutline>> | null>(null);
   const [summary, setSummary] = useState<Awaited<ReturnType<typeof loadChapterSummary>> | null>(null);
   const [previousSummaryText, setPreviousSummaryText] = useState('');
@@ -515,6 +576,10 @@ export function GenerationView({
   const [isApproving, setIsApproving] = useState(false);
   const [showAdvancedPanel, setShowAdvancedPanel] = useState(false);
   const [activeSingleStep, setActiveSingleStep] = useState<GenerationPipelineStage | null>(null);
+  const [showContextPreviewDialog, setShowContextPreviewDialog] = useState(false);
+  const [isContextPreviewLoading, setIsContextPreviewLoading] = useState(false);
+  const [contextPreviewError, setContextPreviewError] = useState('');
+  const [contextPreviewData, setContextPreviewData] = useState<GenerationContextPreviewData | null>(null);
 
   function buildEffectiveChapterHint(extraHint?: string) {
     return mergePromptSections(
@@ -583,6 +648,10 @@ export function GenerationView({
         currentProject?.generationGateOverride ?? effectiveGateConfig ?? DEFAULT_GENERATION_GATE_CONFIG,
       ),
     [currentProject?.generationGateOverride, effectiveGateConfig],
+  );
+  const pipelineStages = useMemo(
+    () => allPipelineStages.filter((stage) => enableEditorRefine || stage.key !== 'editor_refine'),
+    [enableEditorRefine],
   );
 
   useEffect(() => {
@@ -942,6 +1011,322 @@ export function GenerationView({
     };
   }
 
+  async function refreshGenerationContextPreview(chapter = selectedChapter) {
+    if (!chapter) {
+      return;
+    }
+
+    setIsContextPreviewLoading(true);
+    setContextPreviewError('');
+
+    try {
+      const [context, outlinePromptPayload, previousSummary, savedOutline] = await Promise.all([
+        buildGenerationContextBundle({
+          projectId,
+          currentChapterId: chapter.id,
+          chapters,
+          entities,
+        }),
+        getOutlinePromptPayload(chapter.id),
+        getPreviousSummaryText(chapter),
+        loadChapterOutline(projectId, chapter.id),
+      ]);
+      const effectiveHint = buildEffectiveChapterHint(chapterHint.trim());
+      const chapterHintBlock = effectiveHint.trim() ? `【本章生成提示】\n${effectiveHint.trim()}` : '';
+      const mergedBundle = mergePromptSections(context.bundle, chapterHintBlock);
+      const activeOutline =
+        (outline && getChapterWriteUnitCount(normalizeOutlineDraft(outline)) > 0 ? normalizeOutlineDraft(outline) : null) ??
+        (savedOutline && getChapterWriteUnitCount(normalizeOutlineDraft(savedOutline)) > 0 ? normalizeOutlineDraft(savedOutline) : null);
+      const reviewOutline =
+        (outline && getChapterWriteUnitCount(normalizeOutlineDraft(outline)) > 0 ? normalizeOutlineDraft(outline) : null) ??
+        draftItem?.outline ??
+        activeOutline;
+      const sourceText = getCurrentDraftText();
+      const chapterBeatForExecution = reviewOutline ? undefined : outlinePromptPayload.chapterBeat;
+      const promptPreviewStages: GenerationPromptPreviewStageRequest[] = [];
+
+      if (!activeOutline) {
+        promptPreviewStages.push({
+          stage: 'plan',
+          label: 'Plan',
+          request: {
+            projectId,
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            chapterOrder: chapter.order,
+            volumeTitle: chapter.volumeTitle,
+            previousChapterId: previousChapter?.id,
+            previousChapterTitle: previousChapter?.title,
+            projectTitle,
+            projectDescription,
+            bookOutline: outlinePromptPayload.bookOutline,
+            volumeOutline: outlinePromptPayload.volumeOutline,
+            volumeGoal: outlinePromptPayload.volumeGoal,
+            chapterBeat: outlinePromptPayload.chapterBeat,
+            nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+            forbiddenZone: outlinePromptPayload.forbiddenZone,
+            previousSummary,
+            worldState,
+            contextBundle: mergedBundle,
+            entitySnapshot,
+            relationSnapshot,
+            requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+            availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+            requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+            foreshadowSnapshot,
+            ...buildModelRequestConfig(settings),
+          },
+        });
+      }
+
+      if (activeOutline) {
+        const writeUnitLabels = getChapterWriteUnitLabels(activeOutline);
+        const unitLabel = (activeOutline.sceneDrafts?.length ?? 0) > 0 ? '场景' : '拍';
+
+        writeUnitLabels.forEach((beat, index) => {
+          promptPreviewStages.push({
+            stage: 'write',
+            label: `Write 第 ${index + 1} ${unitLabel}`,
+            request: {
+              projectId,
+              chapterId: chapter.id,
+              chapterTitle: chapter.title,
+              chapterOrder: chapter.order,
+              volumeTitle: chapter.volumeTitle,
+              previousChapterId: previousChapter?.id,
+              previousChapterTitle: previousChapter?.title,
+              projectTitle,
+              projectDescription,
+              bookOutline: outlinePromptPayload.bookOutline,
+              volumeOutline: outlinePromptPayload.volumeOutline,
+              volumeGoal: outlinePromptPayload.volumeGoal,
+              chapterBeat: undefined,
+              nextChapterPreview: outlinePromptPayload.nextChapterPreview,
+              forbiddenZone: outlinePromptPayload.forbiddenZone,
+              outline: activeOutline,
+              beatIndex: index,
+              currentBeat: beat,
+              previousText: writeUnitLabels.slice(0, index).length > 0 ? '【预检仅展示 prompt，不实际拼接已生成正文】' : '',
+              previousSummary,
+              worldState,
+              contextBundle: mergedBundle,
+              entitySnapshot,
+              relationSnapshot,
+              requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+              availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+              requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+              foreshadowSnapshot,
+              ...buildModelRequestConfig(settings),
+            },
+          });
+        });
+      }
+
+      if (sourceText) {
+        if (effectiveStylePrompt.trim()) {
+          promptPreviewStages.push({
+            stage: 'style',
+            label: 'Style',
+            request: {
+              projectId,
+              chapterId: chapter.id,
+              chapterTitle: chapter.title,
+              chapterOrder: chapter.order,
+              volumeTitle: chapter.volumeTitle,
+              previousChapterId: previousChapter?.id,
+              previousChapterTitle: previousChapter?.title,
+              projectTitle,
+              projectDescription,
+              bookOutline: outlinePromptPayload.bookOutline,
+              volumeOutline: outlinePromptPayload.volumeOutline,
+              outline: reviewOutline ?? null,
+              previousSummary,
+              worldState,
+              contextBundle: mergedBundle,
+              entitySnapshot,
+              relationSnapshot,
+              requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+              availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+              requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+              foreshadowSnapshot,
+              stylePrompt: effectiveStylePrompt,
+              content: sourceText,
+              ...buildModelRequestConfig(settings),
+            },
+          });
+        }
+
+        promptPreviewStages.push({
+          stage: 'review',
+          label: 'Review',
+          request: {
+            projectId,
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            chapterOrder: chapter.order,
+            volumeTitle: chapter.volumeTitle,
+            previousChapterId: previousChapter?.id,
+            previousChapterTitle: previousChapter?.title,
+            projectTitle,
+            projectDescription,
+            bookOutline: outlinePromptPayload.bookOutline,
+            volumeOutline: outlinePromptPayload.volumeOutline,
+            chapterBeat: chapterBeatForExecution,
+            outline: reviewOutline ?? null,
+            previousSummary,
+            worldState,
+            contextBundle: mergedBundle,
+            entitySnapshot,
+            relationSnapshot,
+            requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+            availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+            requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+            foreshadowSnapshot,
+            content: sourceText,
+            ...buildModelRequestConfig(settings),
+          },
+        });
+        promptPreviewStages.push({
+          stage: 'language_qa',
+          label: 'Language QA',
+          request: {
+            projectId,
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            chapterOrder: chapter.order,
+            volumeTitle: chapter.volumeTitle,
+            previousChapterId: previousChapter?.id,
+            previousChapterTitle: previousChapter?.title,
+            projectTitle,
+            projectDescription,
+            bookOutline: outlinePromptPayload.bookOutline,
+            volumeOutline: outlinePromptPayload.volumeOutline,
+            chapterBeat: chapterBeatForExecution,
+            outline: reviewOutline ?? null,
+            previousSummary,
+            worldState,
+            contextBundle: mergedBundle,
+            entitySnapshot,
+            relationSnapshot,
+            requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+            availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+            requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+            foreshadowSnapshot,
+            content: sourceText,
+            ...buildModelRequestConfig(settings),
+          },
+        });
+        promptPreviewStages.push({
+          stage: 'polish',
+          label: 'Polish',
+          request: {
+            projectId,
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            chapterOrder: chapter.order,
+            volumeTitle: chapter.volumeTitle,
+            previousChapterId: previousChapter?.id,
+            previousChapterTitle: previousChapter?.title,
+            projectTitle,
+            projectDescription,
+            bookOutline: outlinePromptPayload.bookOutline,
+            volumeOutline: outlinePromptPayload.volumeOutline,
+            outline: reviewOutline ?? null,
+            previousSummary,
+            worldState,
+            contextBundle: mergedBundle,
+            entitySnapshot,
+            relationSnapshot,
+            requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+            availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+            requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+            foreshadowSnapshot,
+            review: draftItem?.review ?? null,
+            languageQa: draftItem?.languageQa ?? null,
+            content: sourceText,
+            ...buildModelRequestConfig(settings),
+          },
+        });
+        if (enableEditorRefine) {
+          promptPreviewStages.push({
+            stage: 'editor_refine',
+            label: 'Editor Refine',
+            request: {
+              projectId,
+              chapterId: chapter.id,
+              chapterTitle: chapter.title,
+              chapterOrder: chapter.order,
+              volumeTitle: chapter.volumeTitle,
+              previousChapterId: previousChapter?.id,
+              previousChapterTitle: previousChapter?.title,
+              bookOutline: outlinePromptPayload.bookOutline,
+              volumeOutline: outlinePromptPayload.volumeOutline,
+              outline: reviewOutline ?? null,
+              previousSummary,
+              entitySnapshot,
+              requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+              availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+              content: sourceText,
+              ...buildModelRequestConfig(settings),
+            },
+          });
+        }
+        promptPreviewStages.push({
+          stage: 'extract',
+          label: 'Extract',
+          request: {
+            projectId,
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            chapterOrder: chapter.order,
+            chapterBeat: chapterBeatForExecution,
+            content: sourceText,
+            loreSummary: worldState,
+            ...buildModelRequestConfig(settings),
+          },
+        });
+      }
+      const promptPreviewResponse =
+        promptPreviewStages.length > 0
+          ? await previewGenerationPrompts(settings.serverUrl, {
+              stages: promptPreviewStages,
+            })
+          : { previews: [] };
+
+      setContextPreviewData({
+        chapterTitle: chapter.title,
+        bookOutline: outlinePromptPayload.bookOutline ?? '',
+        volumeOutline: outlinePromptPayload.volumeOutline ?? '',
+        volumeGoal: outlinePromptPayload.volumeGoal ?? '',
+        chapterOutline: activeOutline ? serializeChapterOutlineDraft(activeOutline) : '',
+        localBundle: context.bundle,
+        effectiveHint,
+        mergedBundle,
+        rawChapterHint: chapterHint.trim(),
+        chapterBeat: outlinePromptPayload.chapterBeat ?? '',
+        nextChapterPreview: outlinePromptPayload.nextChapterPreview ?? '',
+        forbiddenZone: outlinePromptPayload.forbiddenZone ?? '',
+        previousSummary,
+        worldState,
+        requiredEntityNames: outlinePromptPayload.requiredEntityNames,
+        availableCharacterNames: outlinePromptPayload.availableCharacterNames,
+        requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
+        entitySnapshotCount: entitySnapshot.length,
+        relationSnapshotCount: relationSnapshot.length,
+        foreshadowSnapshotCount: foreshadowSnapshot?.length ?? 0,
+        recentChapterCount: context.recentChapterCount,
+        recentSummaryCount: context.recentSummaryCount,
+        activeForeshadowCount: context.activeForeshadowCount,
+        promptPreviews: promptPreviewResponse.previews,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      setContextPreviewError(message);
+    } finally {
+      setIsContextPreviewLoading(false);
+    }
+  }
+
   async function refreshAdvancedPreview() {
     if (!selectedChapter) {
       return;
@@ -1225,11 +1610,11 @@ export function GenerationView({
   }
 
   function ensureChapterBeatReady() {
-    if (currentChapterBeat) {
+    if (currentChapterBeat || outline) {
       return true;
     }
 
-    toast('当前章节还没有绑定章节拍，请先到「大纲」页补齐章节拍表或执行整卷裂变', 'warning');
+    toast('当前章节还没有章纲或章节拍，请先到「大纲」页补齐章纲，或先补章节拍后再导入。', 'warning');
     return false;
   }
 
@@ -1263,6 +1648,7 @@ export function GenerationView({
         getPreviousSummaryText(selectedChapter),
         getMergedContextBundle(selectedChapter),
       ]);
+      const chapterBeatForExecution = undefined;
       const response = await createChapterPlan(settings.serverUrl, {
         projectId,
         chapterId: selectedChapter.id,
@@ -1299,7 +1685,9 @@ export function GenerationView({
         ...buildModelRequestConfig(settings),
       });
 
-      const savedOutline = await saveChapterOutline(projectId, selectedChapter.id, response.outline);
+      const savedOutline = await saveChapterOutline(projectId, selectedChapter.id, response.outline, {
+        source: 'generated',
+      });
       setOutline(savedOutline);
       toast('已完成单步 Plan', 'success');
       if (showAdvancedPanel) {
@@ -1326,16 +1714,16 @@ export function GenerationView({
 
     try {
       const activeOutline =
-        outline && outline.beats.length > 0 ? normalizeOutlineDraft(outline) : null;
+        outline && getChapterWriteUnitCount(normalizeOutlineDraft(outline)) > 0 ? normalizeOutlineDraft(outline) : null;
 
       if (!activeOutline) {
         await handleSingleStepPlan();
       }
 
-      const latestOutline = (outline && outline.beats.length > 0 ? normalizeOutlineDraft(outline) : null) ??
+      const latestOutline = (outline && getChapterWriteUnitCount(normalizeOutlineDraft(outline)) > 0 ? normalizeOutlineDraft(outline) : null) ??
         (await loadChapterOutline(projectId, selectedChapter.id));
 
-      if (!latestOutline || latestOutline.beats.length === 0) {
+      if (!latestOutline || getChapterWriteUnitCount(normalizeOutlineDraft(latestOutline)) === 0) {
         toast('当前没有可执行的章节契约', 'warning');
         return;
       }
@@ -1346,8 +1734,10 @@ export function GenerationView({
         getMergedContextBundle(selectedChapter),
       ]);
 
+      const normalizedOutline = normalizeOutlineDraft(latestOutline);
+      const writeUnitLabels = getChapterWriteUnitLabels(normalizedOutline);
       let generatedText = '';
-      for (let index = 0; index < latestOutline.beats.length; index += 1) {
+      for (let index = 0; index < writeUnitLabels.length; index += 1) {
         const response = await writeChapterBeat(settings.serverUrl, {
           projectId,
           chapterId: selectedChapter.id,
@@ -1361,12 +1751,12 @@ export function GenerationView({
           bookOutline: outlinePromptPayload.bookOutline,
           volumeOutline: outlinePromptPayload.volumeOutline,
           volumeGoal: outlinePromptPayload.volumeGoal,
-          chapterBeat: outlinePromptPayload.chapterBeat,
+          chapterBeat: chapterBeatForExecution,
           nextChapterPreview: outlinePromptPayload.nextChapterPreview,
           forbiddenZone: outlinePromptPayload.forbiddenZone,
-          outline: normalizeOutlineDraft(latestOutline),
+          outline: normalizedOutline,
           beatIndex: index,
-          currentBeat: latestOutline.beats[index],
+          currentBeat: writeUnitLabels[index],
           previousText: generatedText,
           previousSummary,
           worldState,
@@ -1511,6 +1901,7 @@ export function GenerationView({
         getPreviousSummaryText(selectedChapter),
         getMergedContextBundle(selectedChapter),
       ]);
+      const chapterBeatForExecution = outline || draftItem?.outline ? undefined : outlinePromptPayload.chapterBeat;
 
       const response = await reviewChapterDraft(settings.serverUrl, {
         projectId,
@@ -1524,7 +1915,7 @@ export function GenerationView({
         projectDescription,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
-        chapterBeat: outlinePromptPayload.chapterBeat,
+        chapterBeat: chapterBeatForExecution,
         outline: outline ? normalizeOutlineDraft(outline) : null,
         previousSummary,
         worldState,
@@ -1550,7 +1941,7 @@ export function GenerationView({
         projectDescription,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
-        chapterBeat: outlinePromptPayload.chapterBeat,
+        chapterBeat: chapterBeatForExecution,
         outline: outline ? normalizeOutlineDraft(outline) : null,
         previousSummary,
         worldState,
@@ -1611,6 +2002,7 @@ export function GenerationView({
         getPreviousSummaryText(selectedChapter),
         getMergedContextBundle(selectedChapter),
       ]);
+      const chapterBeatForExecution = outline || draftItem?.outline ? undefined : outlinePromptPayload.chapterBeat;
 
       const response = await polishChapterDraft(settings.serverUrl, {
         projectId,
@@ -1624,6 +2016,7 @@ export function GenerationView({
         projectDescription,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
+        chapterBeat: chapterBeatForExecution,
         outline: outline ? normalizeOutlineDraft(outline) : null,
         previousSummary,
         worldState,
@@ -1682,12 +2075,13 @@ export function GenerationView({
 
     try {
       const outlinePromptPayload = await getOutlinePromptPayload(selectedChapter.id);
+      const chapterBeatForExecution = outline || draftItem?.outline ? undefined : outlinePromptPayload.chapterBeat;
       const response = await extractChapterState(settings.serverUrl, {
         projectId,
         chapterId: selectedChapter.id,
         chapterTitle: selectedChapter.title,
         chapterOrder: selectedChapter.order,
-        chapterBeat: outlinePromptPayload.chapterBeat,
+        chapterBeat: chapterBeatForExecution,
         content: sourceText,
         loreSummary: worldState,
         ...buildModelRequestConfig(settings),
@@ -1788,10 +2182,11 @@ export function GenerationView({
       return;
     }
 
+    const hasOutlineOverride = Boolean(outline);
     setMode('generating');
     setErrorMessage('');
-    setProgressStage('plan');
-    setProgressLabel('生成章节契约');
+    setProgressStage(hasOutlineOverride ? 'write' : 'plan');
+    setProgressLabel(hasOutlineOverride ? '读取现有章纲' : '生成章节契约');
     setProgressBeatIndex(null);
     setProgressBeatCount(null);
     markLocalGenerationActive(selectedChapter.id);
@@ -1804,8 +2199,8 @@ export function GenerationView({
         chapterId: selectedChapter.id,
         chapterTitle: selectedChapter.title,
         status: 'running',
-        progressStage: 'plan',
-        progressLabel: '生成章节契约',
+        progressStage: hasOutlineOverride ? 'write' : 'plan',
+        progressLabel: hasOutlineOverride ? '读取现有章纲' : '生成章节契约',
         progressBeatIndex: null,
         progressBeatCount: null,
         generatedText: '',
@@ -1835,7 +2230,7 @@ export function GenerationView({
         volumeOutline: outlinePromptPayload.volumeOutline,
         volumeOutlineDraft: chapterVolumeOutline ?? null,
         volumeGoal: outlinePromptPayload.volumeGoal,
-        chapterBeat: outlinePromptPayload.chapterBeat,
+        chapterBeat: outline ? undefined : outlinePromptPayload.chapterBeat,
         milestoneIndex: currentChapterBeat?.milestoneIndex ?? null,
         nextChapterPreview: outlinePromptPayload.nextChapterPreview,
         forbiddenZone: outlinePromptPayload.forbiddenZone,
@@ -1845,7 +2240,8 @@ export function GenerationView({
         requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
         chapterHint: buildEffectiveChapterHint(chapterHint.trim()),
-        outlineOverride: null,
+        enableEditorRefine,
+        outlineOverride: outline ? normalizeOutlineDraft(outline) : null,
         gateConfig: localGenerationGateConfig,
         signal: generationController.signal,
         onStageChange: async ({ stage, label, beatIndex, beatCount }) => {
@@ -1865,7 +2261,9 @@ export function GenerationView({
           });
         },
       });
-      const savedOutline = await saveChapterOutline(projectId, selectedChapter.id, result.outline);
+      const savedOutline = await saveChapterOutline(projectId, selectedChapter.id, result.outline, {
+        source: 'generated',
+      });
 
       const nextQueueItem = await saveGenerationQueueItem({
         projectId,
@@ -2097,6 +2495,135 @@ export function GenerationView({
     }
   }
 
+  async function handleDiscardDraftResult() {
+    if (!selectedChapter || !draftItem) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      shouldResetOutline(outline)
+        ? '确认作废当前生成结果吗？这会清空当前审核态正文、本地生成草稿，以及本次生成提取出的摘要和状态变更，并删除自动生成的章纲。'
+        : '确认作废当前生成结果吗？这会清空当前审核态正文、本地生成草稿，以及本次生成提取出的摘要和状态变更，但会保留手工维护的章纲。',
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const discardedItem = await saveGenerationQueueItem({
+        projectId,
+        chapterId: selectedChapter.id,
+        chapterTitle: selectedChapter.title,
+        status: 'discarded',
+        generatedText: '',
+        outline: shouldResetOutline(outline) ? null : draftItem.outline,
+        review: null,
+        languageQa: null,
+        summary: null,
+        stateChanges: [],
+        strand: null,
+        errorMessage: '',
+      });
+
+      if (shouldResetOutline(outline)) {
+        await deleteChapterOutline(projectId, selectedChapter.id);
+      }
+      await deleteChapterSummary(projectId, selectedChapter.id);
+      await deleteChapterStateChanges(selectedChapter.id);
+      await removeStrandHistory(projectId, selectedChapter.id);
+
+      setDraftItem(discardedItem);
+      if (shouldResetOutline(outline)) {
+        setOutline(null);
+      }
+      setSummary(null);
+      setStateChanges([]);
+      setReviewText('');
+      setErrorMessage('');
+      setMode('idle');
+      toast(
+        shouldResetOutline(outline)
+          ? '已作废当前生成结果，并清掉自动生成章纲'
+          : '已作废当前生成结果，手工章纲已保留',
+        'success',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`作废结果失败：${message}`, 'error');
+    }
+  }
+
+  async function handleResetChapterGenerationState() {
+    if (!selectedChapter) {
+      return;
+    }
+
+    const hasResidualArtifacts =
+      Boolean(draftItem) ||
+      Boolean(summary) ||
+      stateChanges.length > 0 ||
+      shouldResetOutline(outline);
+
+    if (!hasResidualArtifacts) {
+      toast('当前章节已经是初始状态，无需重置', 'warning');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      shouldResetOutline(outline)
+        ? '确认重置本章生成状态吗？这会清空当前生成草稿、摘要、状态变更，并删除自动生成的章纲；不会删除已确认写回的正文主干。'
+        : '确认重置本章生成状态吗？这会清空当前生成草稿、摘要、状态变更，但会保留你手工维护的章纲；不会删除已确认写回的正文主干。',
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const resetQueueItem = await saveGenerationQueueItem({
+        projectId,
+        chapterId: selectedChapter.id,
+        chapterTitle: selectedChapter.title,
+        status: 'discarded',
+        generatedText: '',
+        outline: null,
+        review: null,
+        languageQa: null,
+        summary: null,
+        stateChanges: [],
+        strand: null,
+        errorMessage: '',
+      });
+
+      if (shouldResetOutline(outline)) {
+        await deleteChapterOutline(projectId, selectedChapter.id);
+      }
+      await deleteChapterSummary(projectId, selectedChapter.id);
+      await deleteChapterStateChanges(selectedChapter.id);
+      await removeStrandHistory(projectId, selectedChapter.id);
+
+      setDraftItem(resetQueueItem);
+      if (shouldResetOutline(outline)) {
+        setOutline(null);
+      }
+      setSummary(null);
+      setStateChanges([]);
+      setReviewText('');
+      setErrorMessage('');
+      setMode('idle');
+      toast(
+        shouldResetOutline(outline)
+          ? '已重置本章生成状态，并清掉自动生成章纲'
+          : '已重置本章生成状态，手工章纲已保留',
+        'success',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`重置本章生成状态失败：${message}`, 'error');
+    }
+  }
+
   const queueRunningCount = serverJobs.filter((job) => job.status === 'running').length;
   const queueReadyCount = serverJobs.filter((job) => job.status === 'ready').length;
   const queuePausedCount = serverJobs.filter((job) => job.status === 'paused').length;
@@ -2288,7 +2815,19 @@ export function GenerationView({
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-3" />
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setShowContextPreviewDialog(true);
+                void refreshGenerationContextPreview(selectedChapter);
+              }}
+              className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-4 py-2.5 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+            >
+              <Eye size={16} />
+              预检注入上下文
+            </button>
+          </div>
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-4">
@@ -2302,7 +2841,9 @@ export function GenerationView({
           </div>
           <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
             <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">现有契约</p>
-            <p className="mt-2 text-sm text-neutral-200">{outline ? `${outline.beats.length} 个 beats` : '尚未生成'}</p>
+            <p className="mt-2 text-sm text-neutral-200">
+              {outline ? `${getChapterWriteUnitCount(normalizeOutlineDraft(outline))} 个写作单元` : '尚未生成'}
+            </p>
           </div>
           <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
             <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">状态变更</p>
@@ -2330,7 +2871,7 @@ export function GenerationView({
                     <p>阻力：{outline.obstacle || '未填写'}</p>
                     <p>代价：{outline.cost || '未填写'}</p>
                     <p>Strand：{getStrandLabel(outline.strand)}</p>
-                    <p>Beats：{outline.beats.length > 0 ? outline.beats.join(' / ') : '未生成'}</p>
+                    <p>写作单元：{getChapterWriteUnitLabels(normalizeOutlineDraft(outline)).length > 0 ? getChapterWriteUnitLabels(normalizeOutlineDraft(outline)).join(' / ') : '未生成'}</p>
                   </div>
                 ) : (
                   <p className="mt-3 text-sm text-neutral-500">当前还没有章节契约，生成时会先执行 Plan。</p>
@@ -2362,27 +2903,38 @@ export function GenerationView({
                 />
               </div>
 
-              {!currentChapterBeat ? (
+              {!currentChapterBeat && !outline ? (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
                   <div className="flex items-start gap-2">
                     <AlertTriangle size={16} className="mt-0.5" />
                     <div>
-                      <p className="font-medium">当前章节缺少章节拍</p>
+                      <p className="font-medium">当前章节缺少章纲或章节拍</p>
                       <p className="mt-2 leading-6 text-amber-100/90">
-                        生成链路不会再静默退回旧方案。请先去「大纲」页补齐本章的章节拍，或在对应卷里执行一次「AI 裂变本卷」。
+                        正文生成至少需要章纲或章节拍其一。你可以直接去「大纲」页新建章纲，或先补齐章节拍后再导入为章纲。
                       </p>
                     </div>
                   </div>
                 </div>
               ) : (
                 <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm text-emerald-100">
-                  <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">本章节拍</p>
-                  <div className="mt-3 space-y-2 text-sm leading-6 text-emerald-50/90">
-                    <p>场景功能：{currentChapterBeat.scenePurpose || '未填写'}</p>
-                    <p>焦点角色：{currentChapterBeat.focusCharacter || '未填写'}</p>
-                    <p>章节钩子：{currentChapterBeat.hookOut || '未填写'}</p>
-                    <p>能力变化幅度：{currentChapterBeat.powerDelta || '未填写'}</p>
-                  </div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-emerald-300/80">
+                    {outline ? '当前章纲' : '本章节拍'}
+                  </p>
+                  {outline ? (
+                    <div className="mt-3 space-y-2 text-sm leading-6 text-emerald-50/90">
+                      <p>本章功能：{outline.chapterFunction || outline.goal || '未填写'}</p>
+                      <p>焦点角色：{outline.focusCharacter || '未填写'}</p>
+                      <p>主线推进：{outline.mainPlot || '未填写'}</p>
+                      <p>章节钩子：{outline.chapterHook || '未填写'}</p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 space-y-2 text-sm leading-6 text-emerald-50/90">
+                      <p>场景功能：{currentChapterBeat?.scenePurpose || '未填写'}</p>
+                      <p>焦点角色：{currentChapterBeat?.focusCharacter || '未填写'}</p>
+                      <p>章节钩子：{currentChapterBeat?.hookOut || '未填写'}</p>
+                      <p>能力变化幅度：{currentChapterBeat?.powerDelta || '未填写'}</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2391,8 +2943,22 @@ export function GenerationView({
           <article className="rounded-3xl border border-neutral-800 bg-neutral-900/70 p-5">
             <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">开始生成</p>
             <p className="mt-4 text-sm leading-6 text-neutral-400">
-              点击后会按 `Plan → Write → Style → Review → Polish → Extract` 运行，`Review` 后会自动补做一次语言校对，并在完成后进入页面内审核态。
+              点击后会按
+              {enableEditorRefine
+                ? ' `Plan → Write → Style → Review → Polish → Editor Refine → Extract` '
+                : ' `Plan → Write → Style → Review → Polish → Extract` '}
+              运行，`Review` 后会自动补做一次语言校对，并在完成后进入页面内审核态。
             </p>
+
+            <label className="mt-4 flex items-center gap-3 rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-300">
+              <input
+                type="checkbox"
+                checked={enableEditorRefine}
+                onChange={(event) => setEnableEditorRefine(event.target.checked)}
+                className="h-4 w-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-500"
+              />
+              <span>启用 Editor Refine 统筹改稿</span>
+            </label>
 
             {errorMessage ? (
               <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
@@ -2409,7 +2975,7 @@ export function GenerationView({
             <button
               type="button"
               onClick={() => void handleGenerateChapter()}
-              disabled={!currentChapterBeat}
+              disabled={!currentChapterBeat && !outline}
               className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Sparkles size={16} />
@@ -2426,6 +2992,17 @@ export function GenerationView({
                 去大纲页修正规划
               </button>
             ) : null}
+
+            {(draftItem || summary || stateChanges.length > 0 || shouldResetOutline(outline)) ? (
+              <button
+                type="button"
+                onClick={() => void handleResetChapterGenerationState()}
+                className="mt-3 inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-100 transition-colors hover:bg-red-500/20"
+              >
+                <XCircle size={16} />
+                重置本章生成状态
+              </button>
+            ) : null}
           </article>
         </section>
       ) : null}
@@ -2435,7 +3012,7 @@ export function GenerationView({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-sm text-indigo-200">
               <LoaderCircle size={16} className="animate-spin" />
-              {formatStageDescription(progressStage, progressBeatIndex, progressBeatCount, progressLabel)}
+              {formatStageDescription(progressStage, progressBeatIndex, progressBeatCount, progressLabel, pipelineStages)}
             </div>
             <button
               type="button"
@@ -2510,6 +3087,27 @@ export function GenerationView({
               </button>
               <button
                 type="button"
+                onClick={() => void handleSingleStepExtract()}
+                disabled={isApproving || activeSingleStep !== null || !reviewText.trim()}
+                className="inline-flex items-center gap-2 rounded-2xl border border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-sm text-sky-100 transition-colors hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {activeSingleStep === 'extract' ? (
+                  <LoaderCircle size={16} className="animate-spin" />
+                ) : (
+                  <ClipboardList size={16} />
+                )}
+                {activeSingleStep === 'extract' ? 'Extract 中...' : '重新 Extract'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDiscardDraftResult()}
+                className="inline-flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-100 transition-colors hover:bg-red-500/20"
+              >
+                <XCircle size={16} />
+                作废结果
+              </button>
+              <button
+                type="button"
                 onClick={() => void handleDeepEdit()}
                 className="inline-flex items-center gap-2 rounded-2xl border border-indigo-500/40 bg-indigo-500/10 px-4 py-2.5 text-sm text-indigo-200 transition-colors hover:bg-indigo-500/20"
               >
@@ -2517,6 +3115,9 @@ export function GenerationView({
                 在编辑器中深度修改
               </button>
             </div>
+            <p className="mt-3 text-xs leading-6 text-neutral-500">
+              如果你在审核态手动改了正文，确认前记得重新 Extract，一并刷新摘要、状态变更和主线标签。
+            </p>
           </article>
 
           <article className="space-y-5 rounded-3xl border border-neutral-800 bg-neutral-900/70 p-5">
@@ -3947,6 +4548,15 @@ export function GenerationView({
           </div>
         ) : null}
       </section>
+
+      <GenerationContextPreviewDialog
+        open={showContextPreviewDialog}
+        loading={isContextPreviewLoading}
+        error={contextPreviewError}
+        preview={contextPreviewData}
+        onClose={() => setShowContextPreviewDialog(false)}
+        onRefresh={() => void refreshGenerationContextPreview()}
+      />
     </div>
   );
 }

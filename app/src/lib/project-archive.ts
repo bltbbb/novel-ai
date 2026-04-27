@@ -3,6 +3,7 @@ import { countDocumentCharacters } from '@/lib/editor-content';
 import { DEFAULT_GENERATION_GATE_CONFIG, normalizeLightweightRecallConfig } from '@/lib/generation-gate-defaults';
 import { db, DEFAULT_VOLUME_TITLE } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
+import { normalizeForeshadowRefs } from '@/lib/chapter-outline';
 import { normalizeLoreEntityAliases, normalizeLoreEntityFields } from '@/lib/lore-entity';
 import { cloneTemplateSubTemplates } from '@/lib/project-template';
 import type {
@@ -357,6 +358,8 @@ function normalizeVolumeMilestones(milestones: unknown): VolumeMilestoneDraft[] 
         powerCeiling: typeof candidate.powerCeiling === 'string' ? candidate.powerCeiling.trim() : '',
         requiredEntities: normalizeOptionalStringList(candidate.requiredEntities),
         requiredForeshadows: normalizeOptionalStringList(candidate.requiredForeshadows),
+        requiredForeshadowIds: normalizeOptionalStringList(candidate.requiredForeshadowIds),
+        foreshadowRefs: normalizeForeshadowRefs(candidate.foreshadowRefs),
       };
     })
     .filter(
@@ -374,6 +377,8 @@ function normalizeVolumeMilestones(milestones: unknown): VolumeMilestoneDraft[] 
         milestone.mustPayoff.length > 0 ||
         milestone.requiredEntities.length > 0 ||
         milestone.requiredForeshadows.length > 0 ||
+        milestone.requiredForeshadowIds.length > 0 ||
+        (milestone.foreshadowRefs?.length ?? 0) > 0 ||
         milestone.powerCeiling ||
         milestone.targetChapterCount > 0,
     );
@@ -582,6 +587,8 @@ function remapVolumeOutlines(
             : [],
           requiredEntities: normalizeOptionalStringList((outline as Partial<VolumeOutline>).requiredEntities),
           requiredForeshadows: normalizeOptionalStringList((outline as Partial<VolumeOutline>).requiredForeshadows),
+          requiredForeshadowIds: normalizeOptionalStringList((outline as Partial<VolumeOutline>).requiredForeshadowIds),
+          foreshadowRefs: normalizeForeshadowRefs((outline as Partial<VolumeOutline>).foreshadowRefs),
           estimatedChapterCount: normalizePositiveInteger(
             (outline as Partial<VolumeOutline>).estimatedChapterCount,
           ),
@@ -626,6 +633,7 @@ function remapChapterBeats(
           focusCharacter: typeof beat.focusCharacter === 'string' ? beat.focusCharacter.trim() : '',
           mustAppearCharacters: normalizeOptionalStringList((beat as Partial<ChapterBeat>).mustAppearCharacters),
           availableCharacters: normalizeOptionalStringList((beat as Partial<ChapterBeat>).availableCharacters),
+          requiredForeshadows: normalizeOptionalStringList((beat as Partial<ChapterBeat>).requiredForeshadows),
           mainPlot: typeof beat.mainPlot === 'string' ? beat.mainPlot.trim() : '',
           subPlot: typeof beat.subPlot === 'string' ? beat.subPlot.trim() : '',
           pacing: typeof beat.pacing === 'string' ? beat.pacing.trim() : '',
@@ -716,6 +724,7 @@ function remapForeshadows(foreshadows: Foreshadow[], projectId: Id, chapterIdMap
     ...foreshadow,
     id: createId(),
     projectId,
+    foreshadowId: foreshadow.foreshadowId?.trim() || null,
     title: foreshadow.title.trim() || '未命名伏笔',
     excerpt: foreshadow.excerpt?.trim() || '',
     notes: foreshadow.notes?.trim() || '',

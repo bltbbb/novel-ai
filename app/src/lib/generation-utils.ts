@@ -1,11 +1,41 @@
+import { CHARACTER_STATIC_FIELD_DEFINITIONS } from '@/lib/lore-entity';
 import type { Chapter, Id, LoreEntity, StrandType } from '@/types';
+
+function isCurrentFieldKey(key: string) {
+  return key.startsWith('current_');
+}
+
+function getStableEntityFieldEntries(entity: LoreEntity) {
+  const fieldEntries = Object.entries(entity.fields).filter(([key, value]) => {
+    return !isCurrentFieldKey(key) && value !== null && typeof value !== 'undefined' && String(value).trim();
+  });
+
+  if (entity.type !== 'character') {
+    return fieldEntries;
+  }
+
+  const fieldLookup = new Map(fieldEntries);
+  const orderedKeys = [...CHARACTER_STATIC_FIELD_DEFINITIONS.map((item) => item.key), ...fieldEntries.map(([key]) => key)];
+  const seenKeys = new Set<string>();
+
+  return orderedKeys
+    .filter((key) => {
+      if (seenKeys.has(key) || !fieldLookup.has(key)) {
+        return false;
+      }
+
+      seenKeys.add(key);
+      return true;
+    })
+    .map((key) => [key, fieldLookup.get(key)] as const);
+}
 
 export function buildWorldStateSummary(entities: LoreEntity[]) {
   return entities
     .filter((entity) => entity.pinned)
     .slice(0, 6)
     .map((entity) => {
-      const fields = Object.entries(entity.fields)
+      const fields = getStableEntityFieldEntries(entity)
         .slice(0, 3)
         .map(([key, value]) => `${key}：${String(value)}`)
         .join('；');

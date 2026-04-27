@@ -75,6 +75,8 @@ export interface ForeshadowPlanRecord {
   foreshadowTitle: string;
   type: string;
   importance: ForeshadowPlanImportance;
+  activationWindow: string;
+  resolveWindow: string;
   plannedActivateVolume: number | null;
   plannedResolveVolume: number | null;
   activationCondition: string;
@@ -94,6 +96,8 @@ export interface ForeshadowPlanMutationInput {
   foreshadowTitle?: string;
   type?: string;
   importance?: ForeshadowPlanImportance;
+  activationWindow?: string;
+  resolveWindow?: string;
   plannedActivateVolume?: number | null;
   plannedResolveVolume?: number | null;
   activationCondition?: string;
@@ -612,6 +616,8 @@ function mapForeshadowPlanRow(row: Record<string, unknown>): ForeshadowPlanRecor
     foreshadowTitle: asString(row.foreshadow_title),
     type: asString(row.type),
     importance: normalizeForeshadowPlanImportance(row.importance),
+    activationWindow: asString(row.activation_window),
+    resolveWindow: asString(row.resolve_window),
     plannedActivateVolume: normalizeOptionalInteger(row.planned_activate_volume),
     plannedResolveVolume: normalizeOptionalInteger(row.planned_resolve_volume),
     activationCondition: asString(row.activation_condition),
@@ -642,6 +648,8 @@ function normalizeForeshadowPlanRecord(
       typeof input.importance === 'undefined'
         ? existing?.importance ?? 'minor'
         : normalizeForeshadowPlanImportance(input.importance),
+    activationWindow: normalizeText(input.activationWindow, existing?.activationWindow ?? ''),
+    resolveWindow: normalizeText(input.resolveWindow, existing?.resolveWindow ?? ''),
     plannedActivateVolume:
       typeof input.plannedActivateVolume === 'undefined'
         ? existing?.plannedActivateVolume ?? null
@@ -693,6 +701,8 @@ export function listForeshadowPlans(env: ServerEnv, options: ListForeshadowPlans
           foreshadow_title,
           type,
           importance,
+          activation_window,
+          resolve_window,
           planned_activate_volume,
           planned_resolve_volume,
           activation_condition,
@@ -734,6 +744,8 @@ export function getForeshadowPlan(env: ServerEnv, projectId: string, foreshadowP
           foreshadow_title,
           type,
           importance,
+          activation_window,
+          resolve_window,
           planned_activate_volume,
           planned_resolve_volume,
           activation_condition,
@@ -766,6 +778,8 @@ export function createForeshadowPlan(env: ServerEnv, input: ForeshadowPlanMutati
       foreshadow_title,
       type,
       importance,
+      activation_window,
+      resolve_window,
       planned_activate_volume,
       planned_resolve_volume,
       activation_condition,
@@ -777,7 +791,7 @@ export function createForeshadowPlan(env: ServerEnv, input: ForeshadowPlanMutati
       payoff_effect,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   statement.run(
@@ -787,6 +801,8 @@ export function createForeshadowPlan(env: ServerEnv, input: ForeshadowPlanMutati
     record.foreshadowTitle,
     record.type,
     record.importance,
+    record.activationWindow,
+    record.resolveWindow,
     record.plannedActivateVolume,
     record.plannedResolveVolume,
     record.activationCondition,
@@ -819,6 +835,8 @@ export function updateForeshadowPlan(env: ServerEnv, foreshadowPlanId: string, i
       foreshadow_title = ?,
       type = ?,
       importance = ?,
+      activation_window = ?,
+      resolve_window = ?,
       planned_activate_volume = ?,
       planned_resolve_volume = ?,
       activation_condition = ?,
@@ -837,6 +855,8 @@ export function updateForeshadowPlan(env: ServerEnv, foreshadowPlanId: string, i
     record.foreshadowTitle,
     record.type,
     record.importance,
+    record.activationWindow,
+    record.resolveWindow,
     record.plannedActivateVolume,
     record.plannedResolveVolume,
     record.activationCondition,

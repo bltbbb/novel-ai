@@ -4,9 +4,10 @@ import { buildGenerationContextBundle } from '@/lib/generation-context';
 import { buildGenerationEntitySnapshot } from '@/lib/generation-entity-snapshot';
 import { buildGenerationForeshadowSnapshot } from '@/lib/generation-foreshadow-snapshot';
 import { buildGenerationRelationSnapshot } from '@/lib/generation-relation-snapshot';
+import { createChapterOutlineDraft, getChapterWriteUnitCount, getChapterWriteUnitLabels } from '@/lib/chapter-outline';
 import { buildLoreEntityIdLookup } from '@/lib/lore-entity';
 import { buildChapterPromptPayload } from '@/lib/generation-repetition';
-import { getProjectStylePrompt } from '@/lib/project-style';
+import { buildEffectiveStylePrompt } from '@/lib/project-style';
 import { formatPromptSection, mergePromptSections } from '@/lib/project-template';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import {
@@ -133,17 +134,10 @@ export function GenerationLabDialog({
   const effectiveSettings = useMemo(
     () => ({
       ...settings,
-      stylePrompt: mergePromptSections(
-        formatPromptSection('创作模板正文约束', currentProject?.templateSnapshot?.promptBundle.writingPrompt),
-        formatPromptSection('创作模板文风约束', currentProject?.templateSnapshot?.promptBundle.stylePrompt),
-        formatPromptSection('创作模板负面约束', currentProject?.templateSnapshot?.promptBundle.negativePrompt),
-        formatPromptSection('项目文风', getProjectStylePrompt(currentProject, settings)),
-      ),
+      stylePrompt: buildEffectiveStylePrompt(currentProject, settings),
     }),
     [
-      currentProject?.templateSnapshot?.promptBundle.negativePrompt,
       currentProject?.templateSnapshot?.promptBundle.stylePrompt,
-      currentProject?.templateSnapshot?.promptBundle.writingPrompt,
       currentProject?.stylePrompt,
       settings,
     ],
@@ -290,7 +284,9 @@ export function GenerationLabDialog({
         ...buildModelRequestConfig(settings),
       });
 
-      const savedOutline = await saveChapterOutline(projectId, activeChapter.id, response.outline);
+      const savedOutline = await saveChapterOutline(projectId, activeChapter.id, response.outline, {
+        source: 'generated',
+      });
       setOutline(savedOutline);
       toast('章节契约已生成', 'success');
       return savedOutline;
@@ -325,8 +321,11 @@ export function GenerationLabDialog({
     setIsWriting(true);
 
     try {
-      if (activeOutline.beats.length === 0) {
-        toast('当前章节契约还没有有效 beats，无法生成章节初稿', 'warning');
+      const normalizedOutline = createChapterOutlineDraft(activeOutline);
+      const writeUnitLabels = getChapterWriteUnitLabels(normalizedOutline);
+
+      if (writeUnitLabels.length === 0) {
+        toast('当前章节契约还没有有效写作单元，无法生成章节初稿', 'warning');
         return '';
       }
 
@@ -340,8 +339,8 @@ export function GenerationLabDialog({
         return '';
       }
 
-      for (let index = 0; index < activeOutline.beats.length; index += 1) {
-        const beat = activeOutline.beats[index];
+      for (let index = 0; index < writeUnitLabels.length; index += 1) {
+        const beat = writeUnitLabels[index];
         const response = await writeChapterBeat(settings.serverUrl, {
           projectId,
           chapterId: activeChapter.id,
@@ -358,19 +357,7 @@ export function GenerationLabDialog({
           chapterBeat: outlinePromptPayload.chapterBeat,
           nextChapterPreview: outlinePromptPayload.nextChapterPreview,
           forbiddenZone: outlinePromptPayload.forbiddenZone,
-          outline: {
-            goal: activeOutline.goal,
-            obstacle: activeOutline.obstacle,
-            cost: activeOutline.cost,
-            beats: activeOutline.beats,
-            timeAnchor: activeOutline.timeAnchor,
-            chapterTimeSpan: activeOutline.chapterTimeSpan,
-            gapFromPrevious: activeOutline.gapFromPrevious,
-            strand: activeOutline.strand,
-            hookType: activeOutline.hookType,
-            hookStrength: activeOutline.hookStrength,
-            immutableFacts: activeOutline.immutableFacts,
-          },
+          outline: normalizedOutline,
           beatIndex: index,
           currentBeat: beat,
           previousText: accumulatedText,
@@ -443,21 +430,7 @@ export function GenerationLabDialog({
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
         chapterBeat: outlinePromptPayload.chapterBeat,
-        outline: outline
-          ? {
-              goal: outline.goal,
-              obstacle: outline.obstacle,
-              cost: outline.cost,
-              beats: outline.beats,
-              timeAnchor: outline.timeAnchor,
-              chapterTimeSpan: outline.chapterTimeSpan,
-              gapFromPrevious: outline.gapFromPrevious,
-              strand: outline.strand,
-              hookType: outline.hookType,
-              hookStrength: outline.hookStrength,
-              immutableFacts: outline.immutableFacts,
-            }
-          : null,
+        outline: outline ? createChapterOutlineDraft(outline) : null,
         previousSummary: await getPreviousSummaryText(),
         worldState,
         contextBundle: (await getContextBundle()).bundle,
@@ -512,21 +485,7 @@ export function GenerationLabDialog({
         projectDescription,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
-        outline: outline
-          ? {
-              goal: outline.goal,
-              obstacle: outline.obstacle,
-              cost: outline.cost,
-              beats: outline.beats,
-              timeAnchor: outline.timeAnchor,
-              chapterTimeSpan: outline.chapterTimeSpan,
-              gapFromPrevious: outline.gapFromPrevious,
-              strand: outline.strand,
-              hookType: outline.hookType,
-              hookStrength: outline.hookStrength,
-              immutableFacts: outline.immutableFacts,
-            }
-          : null,
+        outline: outline ? createChapterOutlineDraft(outline) : null,
         previousSummary: await getPreviousSummaryText(),
         worldState,
         contextBundle: (await getContextBundle()).bundle,
@@ -577,21 +536,7 @@ export function GenerationLabDialog({
         projectDescription,
         bookOutline: outlinePromptPayload.bookOutline,
         volumeOutline: outlinePromptPayload.volumeOutline,
-        outline: outline
-          ? {
-              goal: outline.goal,
-              obstacle: outline.obstacle,
-              cost: outline.cost,
-              beats: outline.beats,
-              timeAnchor: outline.timeAnchor,
-              chapterTimeSpan: outline.chapterTimeSpan,
-              gapFromPrevious: outline.gapFromPrevious,
-              strand: outline.strand,
-              hookType: outline.hookType,
-              hookStrength: outline.hookStrength,
-              immutableFacts: outline.immutableFacts,
-            }
-          : null,
+        outline: outline ? createChapterOutlineDraft(outline) : null,
         previousSummary: await getPreviousSummaryText(),
         worldState,
         contextBundle: (await getContextBundle()).bundle,
@@ -698,6 +643,7 @@ export function GenerationLabDialog({
         availableCharacterNames: outlinePromptPayload.availableCharacterNames,
         requiredForeshadowTitles: outlinePromptPayload.requiredForeshadowTitles,
         foreshadowSnapshot,
+        enableEditorRefine: false,
         outlineOverride: null,
         onStageChange: ({ stage }) => {
           setIsPlanning(stage === 'plan');
@@ -709,7 +655,9 @@ export function GenerationLabDialog({
         },
       });
 
-      const savedOutline = await saveChapterOutline(projectId, activeChapter.id, result.outline);
+      const savedOutline = await saveChapterOutline(projectId, activeChapter.id, result.outline, {
+        source: 'generated',
+      });
       setOutline(savedOutline);
       setLatestGeneratedText(result.generatedText);
       setStyleResult(result.style);
@@ -760,7 +708,7 @@ export function GenerationLabDialog({
       key: 'plan',
       label: 'Plan',
       status: isPlanning ? 'running' : outline ? 'done' : 'idle',
-      description: outline ? `${outline.beats.length} 个 beats` : '尚未生成章节契约',
+      description: outline ? `${getChapterWriteUnitCount(createChapterOutlineDraft(outline))} 个写作单元` : '尚未生成章节契约',
     },
     {
       key: 'write',
@@ -957,9 +905,9 @@ export function GenerationLabDialog({
                   <p><span className="text-neutral-500">代价：</span>{outline.cost}</p>
                   <p><span className="text-neutral-500">Strand：</span>{outline.strand}</p>
                   <div>
-                    <p className="text-neutral-500">Beats</p>
+                    <p className="text-neutral-500">写作单元</p>
                     <div className="mt-2 space-y-2">
-                      {outline.beats.map((beat, index) => (
+                      {getChapterWriteUnitLabels(createChapterOutlineDraft(outline)).map((beat, index) => (
                         <div key={`${outline.id}-${index}`} className="rounded-2xl border border-neutral-800 bg-neutral-900/70 px-3 py-2">
                           {index + 1}. {beat}
                         </div>

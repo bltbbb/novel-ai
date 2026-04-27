@@ -53,6 +53,7 @@ function initializeSchema(db: DatabaseSync) {
       review_json TEXT,
       language_qa_json TEXT,
       polish_json TEXT,
+      editor_refine_json TEXT,
       summary_json TEXT,
       state_changes_json TEXT NOT NULL,
       strand TEXT,
@@ -324,6 +325,8 @@ function initializeSchema(db: DatabaseSync) {
       foreshadow_title TEXT NOT NULL,
       type TEXT NOT NULL DEFAULT '',
       importance TEXT NOT NULL DEFAULT 'minor',
+      activation_window TEXT NOT NULL DEFAULT '',
+      resolve_window TEXT NOT NULL DEFAULT '',
       planned_activate_volume INTEGER,
       planned_resolve_volume INTEGER,
       activation_condition TEXT NOT NULL DEFAULT '',
@@ -472,6 +475,7 @@ function initializeSchema(db: DatabaseSync) {
       hidden_cost TEXT NOT NULL DEFAULT '',
       continuity_risk TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'active',
+      risk_level TEXT NOT NULL DEFAULT 'low',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -490,6 +494,7 @@ function initializeSchema(db: DatabaseSync) {
   ensureTableColumn(db, 'generation_chapter_index', 'beats_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureTableColumn(db, 'generation_chapter_index', 'immutable_facts_json', "TEXT NOT NULL DEFAULT '[]'");
   ensureTableColumn(db, 'generation_chapter_index', 'hook_type', "TEXT NOT NULL DEFAULT ''");
+  ensureTableColumn(db, 'resource_continuities', 'risk_level', "TEXT NOT NULL DEFAULT 'low'");
   ensureTableColumn(db, 'generation_chapter_index', 'hook_strength', "TEXT NOT NULL DEFAULT ''");
   ensureTableColumn(db, 'generation_chapter_index', 'chapter_order', 'INTEGER NOT NULL DEFAULT 0');
   ensureTableColumn(db, 'generation_chapter_index', 'volume_title', "TEXT NOT NULL DEFAULT ''");
@@ -503,6 +508,9 @@ function initializeSchema(db: DatabaseSync) {
   ensureTableColumn(db, 'generation_relationships', 'evidence', "TEXT NOT NULL DEFAULT ''");
   ensureTableColumn(db, 'generation_memory_embeddings', 'backend_kind', "TEXT NOT NULL DEFAULT 'json_cache'");
   ensureTableColumn(db, 'generation_jobs', 'language_qa_json', 'TEXT');
+  ensureTableColumn(db, 'generation_jobs', 'editor_refine_json', 'TEXT');
+  ensureTableColumn(db, 'foreshadow_plans', 'activation_window', "TEXT NOT NULL DEFAULT ''");
+  ensureTableColumn(db, 'foreshadow_plans', 'resolve_window', "TEXT NOT NULL DEFAULT ''");
 }
 
 export function getGenerationDatabase(env: ServerEnv) {

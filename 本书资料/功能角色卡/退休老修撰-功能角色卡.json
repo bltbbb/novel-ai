@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-functional-role-card",
+  "exportedAt": "2026-04-17T19:05:00+08:00",
+  "data": {
+    "name": "退休老修撰",
+    "description": "仙盟律法司退下来的老修撰，被请来以律法顾问身份旁听五天公审。第一卷里他几乎不发言、不站队，只在明镜高悬碎裂后说出一句足以压住全场余震的话。",
+    "tags": [
+      "功能角色",
+      "旁听者",
+      "律法顾问",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "在有生之年亲眼看见一次真正把律审到骨头里的公堂。",
+      "static_fear": "修了一辈子律，最后却发现自己熟悉的只是收束，不是真相。",
+      "static_values": "律要能照人，见证比评断更重，老眼也该认得出一场真审。",
+      "static_trueNature": "老、稳、见得多，不轻易开口，一开口就有分量。",
+      "static_speechStyle": "慢、短、旧式文气重，不多说一句。",
+      "static_decisionStyle": "先看完整场，再决定自己这一句该不该说出口。",
+      "static_conflictResponse": "不下场争，不替谁背书，只用见证人的一句真话定场。",
+      "static_taboos": "不肯轻易替任何一边作漂亮注解，不愿把没审透的案说成审透了。"
+    }
+  }
+}

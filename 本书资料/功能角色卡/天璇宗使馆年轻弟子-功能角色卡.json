@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-functional-role-card",
+  "exportedAt": "2026-04-17T19:05:00+08:00",
+  "data": {
+    "name": "天璇宗使馆年轻弟子",
+    "description": "天璇宗使馆中的年轻弟子。第一卷里在公审散场后追上商陆，替读者问出那句“长老，我们回宗吗”。",
+    "tags": [
+      "功能角色",
+      "天璇宗",
+      "使馆弟子",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "把宗门交代的事办对，也想知道长辈们到底在守什么。",
+      "static_fear": "怕自己一步跟错，就看见本不该自己看见的裂口。",
+      "static_values": "服从、师门秩序、长幼有别。",
+      "static_trueNature": "年轻、敏感、还没被宗门叙事完全磨平，会下意识替读者把问题问出口。",
+      "static_speechStyle": "规矩里带一点迟疑，像还没学会把所有问题吞回去。",
+      "static_decisionStyle": "先按长老吩咐做，但遇到明显不对劲的沉默会忍不住追问一句。",
+      "static_conflictResponse": "不正面冲撞，只会在临界时刻问出那句不合时宜但必要的话。",
+      "static_taboos": "不敢在公开场合失仪，也不敢轻易质疑长辈真正去向。"
+    }
+  }
+}

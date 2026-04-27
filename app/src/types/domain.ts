@@ -16,6 +16,11 @@ export type SnapshotSource = 'manual' | 'ai_continue';
 export type IdeaCardSource = 'manual' | 'ai_output';
 export type StrandType = 'quest' | 'fire' | 'constellation';
 export type HookStrength = 'soft' | 'medium' | 'strong';
+export type ForeshadowAction = 'shadow' | 'plant' | 'advance' | 'payoff';
+export type ForeshadowIntensity = 'light' | 'medium' | 'heavy';
+export type ChapterOutlineSource = 'manual' | 'generated';
+export type PromptModuleKey = 'strand_weave' | 'cool_points';
+export type ChapterGenerationModeHint = 'single-scene-chapter' | 'scene-by-scene';
 export type AIReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ReasoningEffortSetting = 'model_default' | AIReasoningEffort;
 export type ProjectGateSeverity = 'critical' | 'high' | 'medium' | 'low';
@@ -32,10 +37,12 @@ export type GenerationQueueProgressStage =
   | 'style'
   | 'review'
   | 'polish'
+  | 'editor_refine'
   | 'extract';
 
 export type LoreEntityType =
   | 'character'
+  | 'functional_role'
   | 'faction'
   | 'location'
   | 'magic_system'
@@ -204,6 +211,7 @@ export interface BookOutlineFields {
   worldRules: string[];
   endgameHint: string;
   toneGuide: string;
+  summary?: string;
 }
 
 export interface BookOutline extends BookOutlineFields {
@@ -229,6 +237,9 @@ export interface VolumeMilestoneDraft {
   powerCeiling: string;
   requiredEntities?: string[];
   requiredForeshadows?: string[];
+  requiredForeshadowIds?: string[];
+  foreshadowRefs?: ForeshadowRef[];
+  summary?: string;
 }
 
 export interface VolumeInheritedThreadDraft {
@@ -254,8 +265,11 @@ export interface VolumeOutlineFields {
   foreshadowSeeds: string[];
   requiredEntities?: string[];
   requiredForeshadows?: string[];
+  requiredForeshadowIds?: string[];
+  foreshadowRefs?: ForeshadowRef[];
   estimatedChapterCount: number;
   milestones: VolumeMilestoneDraft[];
+  summary?: string;
 }
 
 export interface VolumeOutline extends VolumeOutlineFields {
@@ -273,6 +287,7 @@ export interface ChapterBeatFields {
   focusCharacter: string;
   mustAppearCharacters?: string[];
   availableCharacters?: string[];
+  requiredForeshadows?: string[];
   mainPlot: string;
   subPlot: string;
   pacing: string;
@@ -292,6 +307,65 @@ export interface ChapterBeat extends ChapterBeatFields {
   chapterId?: Id;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+}
+
+export interface ForeshadowRef {
+  foreshadowId: string;
+  foreshadowTitle?: string;
+  action: ForeshadowAction;
+  intensity: ForeshadowIntensity;
+  note?: string;
+}
+
+export type ChapterSceneActorRole = 'focus' | 'support' | 'candidate';
+
+export interface ChapterSceneActorRef {
+  characterId: string;
+  role: ChapterSceneActorRole;
+  sceneFocus?: string;
+  sceneTask?: string;
+  weakHint?: string;
+}
+
+export interface ChapterOutlineBeatDraft {
+  beatId?: string;
+  sceneId?: string;
+  beatTitle: string;
+  scene: string;
+  anchors: string[];
+  actors: string[];
+  progress: string;
+  result: string;
+  entityRefs: string[];
+  foreshadowRefs: ForeshadowRef[];
+  forbiddenNotes: string[];
+}
+
+export interface PromptModuleHints {
+  extraPrewriteModules?: PromptModuleKey[];
+}
+
+export interface ChapterSceneDraft {
+  sceneId: string;
+  sceneTitle: string;
+  macroScene: string;
+  sceneRole: string;
+  sceneGoal: string;
+  sceneObstacle: string;
+  sceneTimeSpan: string;
+  scenePacing: string;
+  sceneResult: string;
+  sceneHook: string;
+  estimatedWords: number;
+  actors: ChapterSceneActorRef[];
+  availableCharacters: ChapterSceneActorRef[];
+  sceneAnchors: string[];
+  infoBudget: string;
+  powerShift: string;
+  personalConflict: string;
+  foreshadowRefs: ForeshadowRef[];
+  forbiddenNotes: string[];
+  beatRefs: string[];
 }
 
 export interface LoreEntity {
@@ -330,6 +404,7 @@ export interface EntityRelation {
 export interface Foreshadow {
   id: Id;
   projectId: Id;
+  foreshadowId?: string | null;
   title: string;
   excerpt: string;
   notes: string;
@@ -367,6 +442,8 @@ export interface ChapterOutline {
   id: Id;
   projectId: Id;
   chapterId: Id;
+  source?: ChapterOutlineSource;
+  milestoneIndex?: number | null;
   goal: string;
   obstacle: string;
   cost: string;
@@ -378,6 +455,29 @@ export interface ChapterOutline {
   hookType: string;
   hookStrength: HookStrength;
   immutableFacts: string[];
+  chapterFunction?: string;
+  chapterBoundary?: string;
+  revealCeiling?: string;
+  openingState?: string;
+  closingState?: string;
+  focusCharacter?: string;
+  mustAppearCharacters?: string[];
+  availableCharacters?: string[];
+  mainPlot?: string;
+  subPlot?: string;
+  coreScene?: string;
+  sceneAnchors?: string[];
+  infoBudget?: string;
+  powerShift?: string;
+  personalConflict?: string;
+  emotionalOutcome?: string;
+  chapterHook?: string;
+  generationModeHint?: ChapterGenerationModeHint;
+  sceneDecisionNote?: string;
+  foreshadowRefs?: ForeshadowRef[];
+  sceneDrafts?: ChapterSceneDraft[];
+  beatDrafts?: ChapterOutlineBeatDraft[];
+  promptModuleHints?: PromptModuleHints;
   createdAt: Timestamp;
   updatedAt: Timestamp;
 }
@@ -461,10 +561,12 @@ export interface ThreadLedgerAlert {
 export interface ForeshadowPlan {
   id: Id;
   projectId: Id;
-  foreshadowId: Id;
+  foreshadowId: string;
   foreshadowTitle: string;
   type: string;
   importance: ForeshadowPlanImportance;
+  activationWindow?: string;
+  resolveWindow?: string;
   plannedActivateVolume: number | null;
   plannedResolveVolume: number | null;
   activationCondition: string;
@@ -481,7 +583,7 @@ export interface ForeshadowPlan {
 export interface ForeshadowPlanAlert {
   foreshadowPlanId: Id;
   projectId: Id;
-  foreshadowId: Id;
+  foreshadowId: string;
   foreshadowTitle: string;
   plannedResolveVolume: number | null;
   currentVolumeOrder: number;
@@ -696,6 +798,25 @@ export interface GenerationQueueOutline {
   hookType: string;
   hookStrength: HookStrength;
   immutableFacts: string[];
+  chapterFunction?: string;
+  chapterBoundary?: string;
+  revealCeiling?: string;
+  openingState?: string;
+  closingState?: string;
+  focusCharacter?: string;
+  mustAppearCharacters?: string[];
+  availableCharacters?: string[];
+  mainPlot?: string;
+  subPlot?: string;
+  coreScene?: string;
+  sceneAnchors?: string[];
+  infoBudget?: string;
+  powerShift?: string;
+  personalConflict?: string;
+  emotionalOutcome?: string;
+  chapterHook?: string;
+  foreshadowRefs?: ForeshadowRef[];
+  beatDrafts?: ChapterOutlineBeatDraft[];
 }
 
 export interface GenerationQueueSummary {

@@ -2,10 +2,15 @@ import type {
   AIReasoningEffort,
   BookOutlineFields,
   ChapterBeatFields,
+  ChapterGenerationModeHint,
+  ChapterOutlineBeatDraft,
+  ChapterSceneDraft,
+  ForeshadowRef,
   HookStrength,
   Id,
   LoreEntityFieldValue,
   LoreEntityType,
+  PromptModuleHints,
   StrandType,
   TemplateAnalysisMeta,
   TemplateLibraryDraft,
@@ -84,6 +89,29 @@ export interface ChapterOutlineDraft {
   hookType: string;
   hookStrength: HookStrength;
   immutableFacts: string[];
+  chapterFunction?: string;
+  chapterBoundary?: string;
+  revealCeiling?: string;
+  openingState?: string;
+  closingState?: string;
+  focusCharacter?: string;
+  mustAppearCharacters?: string[];
+  availableCharacters?: string[];
+  mainPlot?: string;
+  subPlot?: string;
+  coreScene?: string;
+  sceneAnchors?: string[];
+  infoBudget?: string;
+  powerShift?: string;
+  personalConflict?: string;
+  emotionalOutcome?: string;
+  chapterHook?: string;
+  generationModeHint?: ChapterGenerationModeHint;
+  sceneDecisionNote?: string;
+  foreshadowRefs?: ForeshadowRef[];
+  sceneDrafts?: ChapterSceneDraft[];
+  beatDrafts?: ChapterOutlineBeatDraft[];
+  promptModuleHints?: PromptModuleHints;
 }
 
 export interface ChapterSummaryDraft {
@@ -183,6 +211,7 @@ export type GenerationForeshadowLifecycle = 'active' | 'dormant' | 'archived';
 
 export interface GenerationForeshadowSnapshot {
   id: Id;
+  foreshadowId?: string | null;
   title: string;
   excerpt: string;
   notes: string;
@@ -232,6 +261,12 @@ export interface ChapterPolishDraft {
   summary: string;
   antiAiForceCheck: AntiAIForceCheck;
   appliedChanges: string[];
+}
+
+export interface ChapterEditorRefineDraft {
+  summary: string;
+  antiAiForceCheck: AntiAIForceCheck;
+  majorAdjustments: string[];
 }
 
 export interface AIPlanRequest {
@@ -458,6 +493,33 @@ export interface AIPolishResponse {
   rawText: string;
 }
 
+export interface AIEditorRefineRequest {
+  projectId: Id;
+  chapterId: Id;
+  chapterTitle: string;
+  chapterOrder?: number;
+  volumeTitle?: string;
+  previousChapterId?: Id;
+  previousChapterTitle?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  previousSummary?: string;
+  outline?: ChapterOutlineDraft | null;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  content: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIEditorRefineResponse {
+  content: string;
+  editorRefine: ChapterEditorRefineDraft;
+  rawText: string;
+}
+
 export type BookAnalysisRange = 'full' | 'opening' | 'middle' | 'ending' | 'custom';
 
 export interface AIBookAnalysisRequest {
@@ -603,6 +665,20 @@ export interface AIBookOutlineRequest {
 
 export interface AIBookOutlineResponse extends BookOutlineFields {}
 
+export interface AIBookOutlineSummaryRequest {
+  projectTitle: string;
+  projectDescription?: string;
+  genre: string[];
+  outline: BookOutlineFields;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIBookOutlineSummaryResponse {
+  summary: string;
+}
+
 export interface AIVolumeOutlineRequest {
   projectTitle: string;
   projectDescription: string;
@@ -621,6 +697,23 @@ export interface AIVolumeOutlineRequest {
 }
 
 export interface AIVolumeOutlineResponse extends VolumeOutlineFields {}
+
+export interface AIVolumeOutlineSummaryRequest {
+  projectTitle: string;
+  projectDescription?: string;
+  volumeTitle: string;
+  volumeOrder: number;
+  bookOutlineSummary?: string;
+  outline: VolumeOutlineFields;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumeOutlineSummaryResponse {
+  summary: string;
+  milestoneSummaries: string[];
+}
 
 export interface AIVolumeMilestonesRequest {
   projectTitle: string;
@@ -690,7 +783,16 @@ export interface AIVolumeBeatsResponse {
 }
 
 export type GenerationJobStatus = 'queued' | 'running' | 'paused' | 'ready' | 'approved' | 'discarded' | 'error';
-export type GenerationJobStep = 'queued' | 'plan' | 'write' | 'style' | 'review' | 'polish' | 'extract' | 'complete';
+export type GenerationJobStep =
+  | 'queued'
+  | 'plan'
+  | 'write'
+  | 'style'
+  | 'review'
+  | 'polish'
+  | 'editor_refine'
+  | 'extract'
+  | 'complete';
 
 export interface GenerationJobRequest {
   projectId: Id;
@@ -715,6 +817,7 @@ export interface GenerationJobRequest {
   availableCharacterNames?: string[];
   requiredForeshadowTitles?: string[];
   stylePrompt?: string;
+  enableEditorRefine?: boolean;
   model: string;
   temperature: number;
   reasoningEffort?: AIReasoningEffort;
@@ -750,6 +853,7 @@ export interface GenerationJobRecord {
   review: ChapterReviewDraft | null;
   languageQa: ChapterLanguageQaDraft | null;
   polish: ChapterPolishDraft | null;
+  editorRefine: ChapterEditorRefineDraft | null;
   summary: ChapterSummaryDraft | null;
   stateChanges: StateChangeDraft[];
   strand: StrandType | null;
@@ -1072,6 +1176,51 @@ export interface GenerationDebugContext {
   lightweightRecallItems: GenerationDebugLightweightRecallItem[];
   structuredRelationshipDebug: GenerationDebugStructuredRelationshipSummary;
   sections: GenerationDebugContextSection[];
+}
+
+export type GenerationPromptPreviewStage =
+  | 'plan'
+  | 'write'
+  | 'review'
+  | 'language_qa'
+  | 'style'
+  | 'polish'
+  | 'editor_refine'
+  | 'extract';
+
+export type GenerationPromptPreviewTransport = 'openai_chat_completions' | 'claude_messages';
+
+export interface GenerationPromptPreviewStageRequest {
+  stage: GenerationPromptPreviewStage;
+  label?: string;
+  request:
+    | AIPlanRequest
+    | AIWriteRequest
+    | AIReviewRequest
+    | AILanguageQaRequest
+    | AIStyleRequest
+    | AIPolishRequest
+    | AIEditorRefineRequest
+    | AIExtractRequest;
+}
+
+export interface GenerationPromptPreviewRequest {
+  stages: GenerationPromptPreviewStageRequest[];
+}
+
+export interface GenerationPromptPreviewItem {
+  stage: GenerationPromptPreviewStage;
+  label: string;
+  model: string;
+  transport: GenerationPromptPreviewTransport;
+  requestUrl: string;
+  systemPrompt: string;
+  userPrompt: string;
+  requestBody: string;
+}
+
+export interface GenerationPromptPreviewResponse {
+  previews: GenerationPromptPreviewItem[];
 }
 
 export interface GenerationDebugVolumeRecapRecord {

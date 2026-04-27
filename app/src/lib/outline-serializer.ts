@@ -7,6 +7,7 @@ import type {
   VolumeOutline,
   VolumeOutlineFields,
 } from '@/types';
+import { serializeForeshadowRef } from '@/lib/chapter-outline';
 
 function formatList(title: string, values: string[]) {
   const sanitized = values.map((item) => item.trim()).filter(Boolean);
@@ -20,6 +21,21 @@ function formatList(title: string, values: string[]) {
 
 function formatOptionalList(title: string, values?: string[]) {
   return formatList(title, values ?? []);
+}
+
+function formatStructuredForeshadowRefs(
+  title: string,
+  values?: VolumeMilestoneDraft['foreshadowRefs'] | VolumeOutlineFields['foreshadowRefs'],
+) {
+  const sanitized = (values ?? [])
+    .map((item) => serializeForeshadowRef(item))
+    .filter(Boolean);
+
+  if (sanitized.length === 0) {
+    return '';
+  }
+
+  return `${title}${sanitized.join('；')}`;
 }
 
 function formatCharacterArcs(title: string, values: BookCharacterArcDraft[]) {
@@ -111,6 +127,9 @@ function formatMilestones(milestones: VolumeMilestoneDraft[]) {
         milestone.requiredForeshadows && milestone.requiredForeshadows.length > 0
           ? `  - 必需伏笔：${milestone.requiredForeshadows.join('；')}`
           : '',
+        milestone.foreshadowRefs && milestone.foreshadowRefs.length > 0
+          ? `  - 伏笔引用：${milestone.foreshadowRefs.map((item) => serializeForeshadowRef(item)).join('；')}`
+          : '',
       ]
         .filter(Boolean)
         .join('\n'),
@@ -137,6 +156,7 @@ export function serializeSingleMilestone(milestone: VolumeMilestoneDraft, index?
     milestone.mustPayoff.length > 0 ? `必回收：${milestone.mustPayoff.join('；')}` : '',
     formatOptionalList('必需实体：', milestone.requiredEntities),
     formatOptionalList('必需伏笔：', milestone.requiredForeshadows),
+    formatStructuredForeshadowRefs('伏笔引用：', milestone.foreshadowRefs),
   ]
     .filter(Boolean)
     .join('\n');
@@ -181,6 +201,7 @@ export function serializeVolumeOutline(outline: VolumeOutline | VolumeOutlineFie
     formatList('伏笔安排：', outline.foreshadowSeeds),
     formatOptionalList('必需实体：', outline.requiredEntities),
     formatOptionalList('必需伏笔：', outline.requiredForeshadows),
+    formatStructuredForeshadowRefs('伏笔引用：', outline.foreshadowRefs),
     formatMilestones(outline.milestones ?? []),
   ]
     .filter(Boolean)

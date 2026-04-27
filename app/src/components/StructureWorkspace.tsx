@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  ArrowRight,
   Blocks,
   CircleAlert,
   Compass,
@@ -31,6 +30,7 @@ import {
 } from '@/lib/structure-memory-client';
 import {
   useAntagonistAgendaStore,
+  useForeshadowStore,
   useForeshadowPlanStore,
   usePovPermissionStore,
   useQuestionPoolStore,
@@ -51,6 +51,8 @@ interface StructureWorkspaceProps {
   projectId: Id;
   initialSectionKey?: string | null;
   navigationToken?: number;
+  onOpenEditor?: () => void;
+  onOpenChapter?: (chapterId: Id) => void;
 }
 
 type SectionFilterMode = 'all' | 'attention' | 'unsynced';
@@ -65,7 +67,7 @@ interface SectionSummary {
   unsyncedCount: number;
   description: string;
   group: SectionGroupMode;
-  render: () => JSX.Element;
+  render: () => ReactNode;
 }
 
 const BACKFILL_SYSTEM_LABELS: Record<
@@ -109,11 +111,14 @@ export function StructureWorkspace({
   projectId,
   initialSectionKey = null,
   navigationToken = 0,
+  onOpenEditor,
+  onOpenChapter,
 }: StructureWorkspaceProps) {
   const { toast } = useToast();
   const settings = useSettingsStore((state) => state.settings);
   const [filterMode, setFilterMode] = useState<SectionFilterMode>('all');
   const [groupMode, setGroupMode] = useState<SectionGroupMode>('all');
+  const [activeSectionKey, setActiveSectionKey] = useState<string>('thread-ledger');
   const [backfillPreview, setBackfillPreview] = useState<StructureMemoryBackfillPreviewResult | null>(null);
   const [lastBackfillApply, setLastBackfillApply] = useState<StructureMemoryBackfillApplyResult | null>(null);
   const [guardAlerts, setGuardAlerts] = useState<StructureMemoryGuardAlert[]>([]);
@@ -124,6 +129,7 @@ export function StructureWorkspace({
   const threadAlerts = useThreadLedgerStore((state) => state.alerts);
   const threadSyncStatusById = useThreadLedgerStore((state) => state.syncStatusById);
   const loadThreadLedgers = useThreadLedgerStore((state) => state.loadThreadLedgers);
+  const foreshadows = useForeshadowStore((state) => state.foreshadows);
   const foreshadowPlans = useForeshadowPlanStore((state) => state.foreshadowPlans);
   const foreshadowAlerts = useForeshadowPlanStore((state) => state.alerts);
   const foreshadowSyncStatusById = useForeshadowPlanStore((state) => state.syncStatusById);
@@ -244,6 +250,7 @@ export function StructureWorkspace({
 
     setFilterMode('all');
     setGroupMode('all');
+    setActiveSectionKey(initialSectionKey);
 
     const timer = window.setTimeout(() => {
       scrollToSection(initialSectionKey);
@@ -271,14 +278,22 @@ export function StructureWorkspace({
       },
       {
         key: 'foreshadow-plan',
-        label: '伏笔规划',
+        label: '伏笔事实 / 规划',
         icon: Sparkles,
-        count: foreshadowPlans.filter((item) => item.projectId === projectId).length,
+        count:
+          foreshadows.filter((item) => item.projectId === projectId).length +
+          foreshadowPlans.filter((item) => item.projectId === projectId).length,
         attentionCount: foreshadowAlerts.length + (guardAlertCountBySystem['foreshadow-plan'] ?? 0),
         unsyncedCount: countUnsynced(foreshadowSyncStatusById),
-        description: '统一维护激活卷、回收卷、条件和回收效果。',
+        description: '在同一处维护伏笔事实状态与规划安排，并支持互相跳转。',
         group: 'planning',
-        render: () => <ForeshadowPlanPanel projectId={projectId} />,
+        render: () => (
+          <ForeshadowPlanPanel
+            projectId={projectId}
+            onOpenEditor={onOpenEditor}
+            onOpenChapter={onOpenChapter}
+          />
+        ),
       },
       {
         key: 'world-state',
@@ -338,6 +353,7 @@ export function StructureWorkspace({
     ];
   }, [
     antagonistAgendas,
+    foreshadows,
     antagonistSyncStatusById,
     guardAlertCountBySystem,
     foreshadowAlerts.length,
@@ -376,6 +392,16 @@ export function StructureWorkspace({
     });
   }, [filterMode, groupMode, sectionSummaries]);
 
+  useEffect(() => {
+    if (visibleSections.length === 0) {
+      return;
+    }
+
+    if (!visibleSections.some((section) => section.key === activeSectionKey)) {
+      setActiveSectionKey(visibleSections[0].key);
+    }
+  }, [activeSectionKey, visibleSections]);
+
   const totalAttentionCount = useMemo(
     () => sectionSummaries.reduce((sum, section) => sum + section.attentionCount, 0),
     [sectionSummaries],
@@ -388,36 +414,40 @@ export function StructureWorkspace({
     () => sectionSummaries.reduce((sum, section) => sum + section.count, 0),
     [sectionSummaries],
   );
+  const activeSection = useMemo(
+    () => visibleSections.find((section) => section.key === activeSectionKey) ?? visibleSections[0] ?? null,
+    [activeSectionKey, visibleSections],
+  );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pr-1">
-      <section className="rounded-[32px] border border-neutral-800 bg-[radial-gradient(circle_at_top_left,rgba(99,102,241,0.18),transparent_38%),linear-gradient(180deg,rgba(23,23,23,0.98),rgba(10,10,10,0.96))] px-6 py-6">
-        <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+      <section className="rounded-[28px] border border-neutral-800 bg-[linear-gradient(180deg,rgba(18,31,42,0.96),rgba(10,19,27,0.94))] px-5 py-4">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-indigo-300">Structure Workspace</p>
-            <h2 className="mt-3 text-3xl font-semibold text-white">结构记忆统一工作台</h2>
-            <p className="mt-3 max-w-3xl text-sm leading-7 text-neutral-300">
+            <p className="text-xs uppercase tracking-[0.24em] text-[color:var(--studio-secondary)]">Structure Workspace</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">结构记忆统一工作台</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-7 text-neutral-300">
               这里把分散在各面板里的结构记忆收拢成统一入口。先做统一汇总、统一筛选、统一跳转，后续再继续扩成完整工作台。
             </p>
           </div>
 
-          <div className="grid min-w-[280px] gap-3 sm:grid-cols-3 xl:w-[420px]">
-            <div className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-4 py-4">
+          <div className="grid min-w-[280px] gap-3 sm:grid-cols-3 xl:w-[380px]">
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-4 py-3">
               <p className="text-xs uppercase tracking-[0.16em] text-neutral-500">总记录数</p>
-              <p className="mt-3 text-2xl font-semibold text-white">{totalRecordCount}</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{totalRecordCount}</p>
             </div>
-            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-4">
+            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
               <p className="text-xs uppercase tracking-[0.16em] text-amber-300">联动提醒</p>
-              <p className="mt-3 text-2xl font-semibold text-amber-100">{totalAttentionCount}</p>
+              <p className="mt-2 text-2xl font-semibold text-amber-100">{totalAttentionCount}</p>
             </div>
-            <div className="rounded-2xl border border-sky-500/20 bg-sky-500/10 px-4 py-4">
+            <div className="rounded-2xl border border-sky-500/20 bg-sky-500/10 px-4 py-3">
               <p className="text-xs uppercase tracking-[0.16em] text-sky-300">待同步</p>
-              <p className="mt-3 text-2xl font-semibold text-sky-100">{totalUnsyncedCount}</p>
+              <p className="mt-2 text-2xl font-semibold text-sky-100">{totalUnsyncedCount}</p>
             </div>
           </div>
         </div>
 
-        <div className="mt-6 flex flex-wrap gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           <button
             type="button"
             onClick={() => setFilterMode('all')}
@@ -439,9 +469,6 @@ export function StructureWorkspace({
           >
             只看待同步
           </button>
-        </div>
-
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
           <span className="inline-flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-950/60 px-3 py-1.5 text-neutral-400">
             <Filter size={12} />
             分组
@@ -547,12 +574,13 @@ export function StructureWorkspace({
           </div>
         </div>
 
-        <div className="rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5">
+        <div className="flex h-[560px] max-h-[70vh] min-h-0 flex-col rounded-[28px] border border-neutral-800 bg-neutral-900/70 p-5">
           <div className="flex items-center gap-2">
             <ShieldAlert size={16} className="text-rose-300" />
             <p className="text-sm font-medium text-neutral-200">最近候选预览</p>
           </div>
-          <div className="mt-4 grid gap-3">
+          <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="grid gap-3">
             {!backfillPreview ? (
               <div className="rounded-2xl border border-dashed border-neutral-800 bg-neutral-950/50 px-4 py-6 text-sm leading-6 text-neutral-500">
                 还没有历史回填预览结果。预览后这里会显示本轮最值得先检查的候选草稿。
@@ -566,7 +594,7 @@ export function StructureWorkspace({
                 <button
                   key={candidate.candidateId}
                   type="button"
-                  onClick={() => scrollToSection(getGuardSectionSystemKey(candidate.system))}
+                  onClick={() => setActiveSectionKey(getGuardSectionSystemKey(candidate.system))}
                   className="rounded-2xl border border-neutral-800 bg-neutral-950/60 px-4 py-4 text-left transition hover:border-neutral-700 hover:bg-neutral-900"
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -595,92 +623,87 @@ export function StructureWorkspace({
                 </button>
               ))
             )}
+            </div>
           </div>
         </div>
       </section>
 
-      <StructureWorkspaceIndex projectId={projectId} guardAlerts={guardAlerts} />
-
-      <section className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
-        {sectionSummaries.map((section) => {
-          const Icon = section.icon;
-          const hiddenByFilter = !visibleSections.some((item) => item.key === section.key);
-
-          return (
-            <button
-              key={section.key}
-              type="button"
-              onClick={() => scrollToSection(section.key)}
-              className={`rounded-[28px] border p-5 text-left transition ${
-                hiddenByFilter
-                  ? 'border-neutral-900 bg-neutral-950/40 text-neutral-500 opacity-55'
-                  : 'border-neutral-800 bg-neutral-900/70 text-neutral-100 hover:border-neutral-700 hover:bg-neutral-900'
-              }`}
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <span className={`inline-flex h-11 w-11 items-center justify-center rounded-2xl ${hiddenByFilter ? 'bg-neutral-900 text-neutral-500' : 'bg-indigo-500/15 text-indigo-200'}`}>
-                    <Icon size={18} />
-                  </span>
-                  <div>
-                    <p className="text-sm font-medium">{section.label}</p>
-                    <p className="mt-1 text-xs text-neutral-500">{section.description}</p>
-                  </div>
-                </div>
-                <ArrowRight size={16} className={hiddenByFilter ? 'text-neutral-700' : 'text-neutral-500'} />
-              </div>
-
-              <div className="mt-5 flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1.5 text-neutral-300">
-                  记录 {section.count}
-                </span>
-                {section.attentionCount > 0 ? (
-                  <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-amber-100">
-                    提醒 {section.attentionCount}
-                  </span>
-                ) : null}
-                {section.unsyncedCount > 0 ? (
-                  <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-3 py-1.5 text-sky-100">
-                    待同步 {section.unsyncedCount}
-                  </span>
-                ) : null}
-              </div>
-            </button>
-          );
-        })}
-      </section>
+      <StructureWorkspaceIndex
+        projectId={projectId}
+        guardAlerts={guardAlerts}
+        onOpenSection={(sectionId) => setActiveSectionKey(sectionId)}
+      />
 
       {visibleSections.length === 0 ? (
         <section className="rounded-[28px] border border-dashed border-neutral-800 bg-neutral-900/40 px-6 py-10 text-sm leading-7 text-neutral-400">
           当前筛选下没有命中的结构记忆模块。可以切回“全部系统”，或者先处理待同步/提醒后再回来。
         </section>
       ) : (
-        visibleSections.map((section) => (
-          <section key={section.key} id={section.key} className="scroll-mt-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">Structure Section</p>
-                <h3 className="mt-2 text-2xl font-semibold text-neutral-100">{section.label}</h3>
-              </div>
-              <div className="flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1.5 text-neutral-300">
-                  记录 {section.count}
-                </span>
-                {section.attentionCount > 0 ? (
-                  <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-amber-100">
-                    提醒 {section.attentionCount}
+        <section className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {visibleSections.map((section) => {
+              const Icon = section.icon;
+              const active = activeSection?.key === section.key;
+
+              return (
+                <button
+                  key={section.key}
+                  type="button"
+                  onClick={() => setActiveSectionKey(section.key)}
+                  className={`inline-flex items-center gap-3 rounded-2xl border px-4 py-3 text-left transition ${
+                    active
+                      ? 'border-emerald-400/40 bg-emerald-500/12 text-emerald-50'
+                      : 'border-neutral-800 bg-neutral-900/70 text-neutral-200 hover:border-neutral-700 hover:bg-neutral-900'
+                  }`}
+                >
+                  <span
+                    className={`inline-flex h-10 w-10 items-center justify-center rounded-2xl ${
+                      active ? 'bg-emerald-500/15 text-emerald-100' : 'bg-neutral-950/70 text-neutral-400'
+                    }`}
+                  >
+                    <Icon size={16} />
                   </span>
-                ) : null}
-                {section.unsyncedCount > 0 ? (
-                  <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-3 py-1.5 text-sky-100">
-                    待同步 {section.unsyncedCount}
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium">{section.label}</span>
+                    <span className="mt-1 block text-xs text-neutral-500">
+                      记录 {section.count}
+                      {section.attentionCount > 0 ? ` · 提醒 ${section.attentionCount}` : ''}
+                      {section.unsyncedCount > 0 ? ` · 待同步 ${section.unsyncedCount}` : ''}
+                    </span>
                   </span>
-                ) : null}
+                </button>
+              );
+            })}
+          </div>
+
+          {activeSection ? (
+            <section key={activeSection.key} id={activeSection.key} className="scroll-mt-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">Structure Section</p>
+                  <h3 className="mt-2 text-2xl font-semibold text-neutral-100">{activeSection.label}</h3>
+                  <p className="mt-2 text-sm leading-7 text-neutral-400">{activeSection.description}</p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="rounded-full border border-neutral-800 bg-neutral-950/70 px-3 py-1.5 text-neutral-300">
+                    记录 {activeSection.count}
+                  </span>
+                  {activeSection.attentionCount > 0 ? (
+                    <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1.5 text-amber-100">
+                      提醒 {activeSection.attentionCount}
+                    </span>
+                  ) : null}
+                  {activeSection.unsyncedCount > 0 ? (
+                    <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-3 py-1.5 text-sky-100">
+                      待同步 {activeSection.unsyncedCount}
+                    </span>
+                  ) : null}
+                </div>
               </div>
-            </div>
-            {section.render()}
-          </section>
-        ))
+              {activeSection.render()}
+            </section>
+          ) : null}
+        </section>
       )}
     </div>
   );

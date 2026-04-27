@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "type": "lore-character-card",
+  "exportedAt": "2026-04-17T17:10:00+08:00",
+  "data": {
+    "name": "柳镇守使",
+    "description": "持司正印的镇守使，第一卷中从高处旁观旧案异动的人，走到夜押放印、主审五天公审、再到卷尾被外放承天城的担保者。",
+    "tags": [
+      "重要角色",
+      "镇守使",
+      "担保人",
+      "司正印",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "把三百年前该签却没签下去的字补回来。",
+      "static_fear": "怕自己再次看见真相却不敢落印，也怕自己一动就把更多人一起压下去。",
+      "static_values": "责任、分寸、担保、体制内该有人去签的字必须有人签。",
+      "static_trueNature": "沉、稳、重，知道得早也沉默得久，不卖惨，不说教，只在关键处真把自己押上去。",
+      "static_speechStyle": "平静、短、少废话，不轻易表态，一旦表态就很难回收。",
+      "static_decisionStyle": "先算代价，再判断这件事值不值得由自己签字承担。",
+      "static_conflictResponse": "不靠情绪站队，优先用权限、程序和担保给人开门。",
+      "static_taboos": "不轻许承诺，不把别人推上去替自己赎旧账。"
+    }
+  }
+}

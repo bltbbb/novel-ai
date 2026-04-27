@@ -6,6 +6,7 @@ import type { Foreshadow, ForeshadowStatus, Id } from '@/types';
 
 interface CreateForeshadowInput {
   projectId: Id;
+  foreshadowId?: string | null;
   title?: string;
   excerpt?: string;
   notes?: string;
@@ -15,6 +16,7 @@ interface CreateForeshadowInput {
 }
 
 interface UpdateForeshadowInput {
+  foreshadowId?: string | null;
   title?: string;
   excerpt?: string;
   notes?: string;
@@ -93,6 +95,7 @@ export const useForeshadowStore = create<ForeshadowStoreState>((set, get) => ({
     const foreshadow: Foreshadow = {
       id: createId(),
       projectId: input.projectId,
+      foreshadowId: input.foreshadowId?.trim() || null,
       title: normalizeText(input.title, '未命名伏笔'),
       excerpt: input.excerpt?.trim() || '',
       notes: input.notes?.trim() || '',
@@ -133,6 +136,7 @@ export const useForeshadowStore = create<ForeshadowStoreState>((set, get) => ({
     const nextStatus = input.status ?? current.status;
     const nextForeshadow: Foreshadow = {
       ...current,
+      foreshadowId: hasOwnField(input, 'foreshadowId') ? input.foreshadowId?.trim() || null : current.foreshadowId ?? null,
       title: hasOwnField(input, 'title') ? normalizeText(input.title, current.title) : current.title,
       excerpt: hasOwnField(input, 'excerpt') ? input.excerpt?.trim() || '' : current.excerpt,
       notes: hasOwnField(input, 'notes') ? input.notes?.trim() || '' : current.notes,

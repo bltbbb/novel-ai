@@ -171,17 +171,133 @@ test('buildGenerationContextBundle 会因为章节提示命中而提升剧情线
   const section = result.sections.find((item) => item.key === 'thread_ledger');
 
   assert.ok(section, '应生成剧情线提醒 section');
-  assert.equal(section.blocks.length, 2);
+  assert.equal(section.blocks.length, 3);
   assert.deepEqual(
-    section.blocks.map((block) => block.split('\n', 1)[0]),
+    [section.blocks[0].split('\n', 1)[0], section.blocks[1].split('\n', 1)[0], section.blocks[2]],
     [
       '- 夜探营帐（主线 / 活跃 / 热度 4）',
       '- 后山接头（支线 / 活跃 / 热度 5）',
+      '- 营外围堵（阶段线 / 休眠 / 热度 5）：当前阶段：兵力暂时潜伏',
     ],
   );
   assert.ok(
     result.bundle.indexOf('夜探营帐') < result.bundle.indexOf('后山接头'),
     '章节提示命中的低热 active 线应排在更高热但未命中的 active 线之前',
   );
-  assert.ok(!result.bundle.includes('营外围堵'));
+  assert.ok(!section.blocks[2].includes('\n核心问题：'));
+});
+
+test('buildGenerationContextBundle 会对同名剧情线去重并把差异折叠回单个主块', async (t) => {
+  const context = createTestEnv('generation-context-thread-ledger-canonical');
+  t.after(async () => {
+    await context.dispose();
+  });
+
+  const projectId = 'project-thread-ledger-canonical';
+
+  createThreadLedger(context.env, {
+    projectId,
+    name: '官府追缉线',
+    type: '主线',
+    coreQuestion: '林冲如何摆脱追缉',
+    currentPhase: '追兵逼近',
+    lastProgressAt: '第10章夜探军营',
+    lastProgressChapterOrder: 10,
+    nextTrigger: '林冲必须在夜里潜入营帐',
+    blockedBy: '营门巡夜加密',
+    relatedCharacterNames: ['林冲'],
+    relatedForeshadowTitles: ['旧案血诏'],
+    plannedResolveVolume: 2,
+    status: 'active',
+    audienceHeat: 5,
+  });
+  createThreadLedger(context.env, {
+    projectId,
+    name: '官府追缉线',
+    type: '阶段线',
+    coreQuestion: '林冲如何摆脱追缉',
+    currentPhase: '线索沉底',
+    lastProgressAt: '第7章旧案回溯',
+    lastProgressChapterOrder: 7,
+    nextTrigger: '林冲必须在夜里潜入营帐',
+    blockedBy: '关键证人失踪',
+    relatedCharacterNames: ['林冲', '柳承业'],
+    relatedForeshadowTitles: ['旧案血诏', '血诏残页'],
+    plannedResolveVolume: 3,
+    status: 'dormant',
+    audienceHeat: 4,
+  });
+
+  const result = await buildGenerationContextBundle(context.env, {
+    projectId,
+    chapterId: 'chapter-12',
+    chapterTitle: '林冲夜探营帐',
+    chapterOrder: 12,
+    volumeTitle: '第一卷',
+    requiredEntityNames: ['林冲'],
+    outline: createOutline({
+      goal: '林冲夜探营帐，寻找追缉令来源',
+      beats: ['林冲潜入营帐', '林冲翻出旧案卷宗'],
+    }),
+  });
+
+  const section = result.sections.find((item) => item.key === 'thread_ledger');
+
+  assert.ok(section, '应生成剧情线提醒 section');
+  assert.equal(section.blocks.length, 1);
+  assert.match(section.blocks[0], /^- 官府追缉线（主线 \/ 活跃 \/ 热度 5）/u);
+  assert.match(section.blocks[0], /核心问题：林冲如何摆脱追缉/u);
+  assert.match(section.blocks[0], /当前阶段：追兵逼近/u);
+  assert.match(section.blocks[0], /下一触发：林冲必须在夜里潜入营帐/u);
+  assert.match(section.blocks[0], /当前卡点：营门巡夜加密/u);
+  assert.match(section.blocks[0], /补充：阶段补充：线索沉底；卡点补充：关键证人失踪/u);
+  assert.equal(result.bundle.split('官府追缉线').length - 1, 1);
+});
+
+test('buildGenerationContextBundle 会在低热 active 剧情线直接命中当前章节时放宽保留', async (t) => {
+  const context = createTestEnv('generation-context-thread-ledger-low-heat-hit');
+  t.after(async () => {
+    await context.dispose();
+  });
+
+  const projectId = 'project-thread-ledger-low-heat-hit';
+
+  createThreadLedger(context.env, {
+    projectId,
+    name: '夜探营帐',
+    type: '支线',
+    coreQuestion: '夜探营帐能否拿到账册',
+    currentPhase: '今夜必须先潜进去',
+    status: 'active',
+    audienceHeat: 2,
+  });
+  createThreadLedger(context.env, {
+    projectId,
+    name: '外围杂音',
+    type: '支线',
+    coreQuestion: '外围杂音会不会干扰行动',
+    currentPhase: '暂时无实质推进',
+    status: 'active',
+    audienceHeat: 2,
+    relatedCharacterNames: ['林冲'],
+  });
+
+  const result = await buildGenerationContextBundle(context.env, {
+    projectId,
+    chapterId: 'chapter-12',
+    chapterTitle: '夜探营帐',
+    chapterOrder: 12,
+    volumeTitle: '第一卷',
+    outline: createOutline({
+      goal: '林冲趁夜探营帐，确认追缉令来源',
+      beats: ['夜探营帐时先绕开巡兵'],
+    }),
+  });
+
+  const section = result.sections.find((item) => item.key === 'thread_ledger');
+
+  assert.ok(section, '应生成剧情线提醒 section');
+  assert.equal(section.blocks.length, 1);
+  assert.match(section.blocks[0], /^- 夜探营帐（支线 \/ 活跃 \/ 热度 2）/u);
+  assert.ok(!result.bundle.includes('外围杂音'));
 });

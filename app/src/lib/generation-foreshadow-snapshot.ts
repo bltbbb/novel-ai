@@ -8,6 +8,7 @@ export function buildGenerationForeshadowSnapshot(
 
   return foreshadows.map((foreshadow) => ({
     id: foreshadow.id,
+    foreshadowId: foreshadow.foreshadowId ?? null,
     title: foreshadow.title,
     excerpt: foreshadow.excerpt,
     notes: foreshadow.notes,

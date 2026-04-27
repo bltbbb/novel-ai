@@ -9,6 +9,8 @@ import type {
   GenerationDebugVolumeRecapRecord,
   GenerationDebugEntityRecord,
   GenerationDebugOverview,
+  GenerationPromptPreviewRequest,
+  GenerationPromptPreviewResponse,
   GenerationDebugRelationshipRecord,
   GenerationMemoryChunkBackfillResult,
   GenerationMemoryEmbeddingBackfillResult,
@@ -106,6 +108,14 @@ export function fetchGenerationDebugContext(serverUrl: string, projectId: string
   return getJson<GenerationDebugContext>(
     serverUrl,
     `/api/runtime/generation-debug/context?projectId=${encodeURIComponent(projectId)}&chapterId=${encodeURIComponent(chapterId)}`,
+  );
+}
+
+export function previewGenerationPrompts(serverUrl: string, request: GenerationPromptPreviewRequest) {
+  return postJson<GenerationPromptPreviewRequest, GenerationPromptPreviewResponse>(
+    serverUrl,
+    '/api/runtime/generation-debug/prompt-preview',
+    request,
   );
 }
 

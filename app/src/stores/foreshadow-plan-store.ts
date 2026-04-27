@@ -122,6 +122,8 @@ export const useForeshadowPlanStore = create<ForeshadowPlanStoreState>((set, get
         foreshadowTitle: input.foreshadowTitle?.trim() || '未命名伏笔规划',
         type: input.type?.trim() || '',
         importance: input.importance ?? 'minor',
+        activationWindow: input.activationWindow?.trim() || '',
+        resolveWindow: input.resolveWindow?.trim() || '',
         plannedActivateVolume:
           typeof input.plannedActivateVolume === 'number' ? Math.trunc(input.plannedActivateVolume) : null,
         plannedResolveVolume:

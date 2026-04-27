@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-functional-role-card",
+  "exportedAt": "2026-04-17T19:05:00+08:00",
+  "data": {
+    "name": "暗库老看守",
+    "description": "守在暗库门口的老看守，老、聋、沉默，几乎和暗库本身一样旧。第一卷里他不阻人、不帮人，只在秦小昭退出时说一句“雨三那格，很久没人翻了”。",
+    "tags": [
+      "功能角色",
+      "暗库",
+      "守门人",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "守着门，把日子守过去，不让自己先开口惹祸。",
+      "static_fear": "怕自己多说一句，就把还没死透的旧事又翻到明面上来。",
+      "static_values": "守门、沉默、看见了也未必说，知道了也未必认。",
+      "static_trueNature": "旧、钝、像暗库的一部分，不是不会说，只是习惯什么都吞下去。",
+      "static_speechStyle": "少、慢、像自言自语，真假难分。",
+      "static_decisionStyle": "大多数时候装作没看见，只有极少数时刻才漏一句。",
+      "static_conflictResponse": "不拦、不帮、不认，只在边上像一块会开口的旧石头。",
+      "static_taboos": "不肯替任何人把暗库里的事讲圆，也不愿承认自己什么都知道。"
+    }
+  }
+}

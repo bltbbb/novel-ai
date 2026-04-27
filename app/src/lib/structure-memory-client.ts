@@ -164,6 +164,8 @@ export interface ForeshadowPlanMutationInput {
   foreshadowTitle?: string;
   type?: string;
   importance?: ForeshadowPlanImportance;
+  activationWindow?: string;
+  resolveWindow?: string;
   plannedActivateVolume?: number | null;
   plannedResolveVolume?: number | null;
   activationCondition?: string;

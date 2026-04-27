@@ -1,6 +1,12 @@
 import { create } from 'zustand';
+import { normalizeForeshadowRefs } from '@/lib/chapter-outline';
 import { db, touchProject } from '@/lib/db';
 import { createId, createTimestamp } from '@/lib/identity';
+import {
+  buildBookOutlineSummary,
+  buildVolumeMilestoneSummary,
+  buildVolumeOutlineSummary,
+} from '@/lib/outline-summary';
 import { useProjectStore } from '@/stores/project-store';
 import type {
   BookOutline,
@@ -85,6 +91,9 @@ function normalizeVolumeMilestones(milestones: VolumeMilestoneDraft[] | undefine
       powerCeiling: normalizeText(milestone.powerCeiling),
       requiredEntities: normalizeOptionalTextList(milestone.requiredEntities),
       requiredForeshadows: normalizeOptionalTextList(milestone.requiredForeshadows),
+      requiredForeshadowIds: normalizeOptionalTextList(milestone.requiredForeshadowIds),
+      foreshadowRefs: normalizeForeshadowRefs(milestone.foreshadowRefs),
+      summary: normalizeText(milestone.summary),
     }))
     .filter(
       (milestone) =>
@@ -101,13 +110,19 @@ function normalizeVolumeMilestones(milestones: VolumeMilestoneDraft[] | undefine
         milestone.mustPayoff.length > 0 ||
         milestone.requiredEntities.length > 0 ||
         milestone.requiredForeshadows.length > 0 ||
+        milestone.requiredForeshadowIds.length > 0 ||
+        (milestone.foreshadowRefs?.length ?? 0) > 0 ||
         milestone.powerCeiling ||
         milestone.targetChapterCount > 0,
-    );
+    )
+    .map((milestone, index) => ({
+      ...milestone,
+      summary: milestone.summary || buildVolumeMilestoneSummary(milestone, index),
+    }));
 }
 
 function normalizeBookOutlineFields(fields: BookOutlineFields): BookOutlineFields {
-  return {
+  const normalized: BookOutlineFields = {
     premise: normalizeText(fields.premise),
     centralConflict: normalizeText(fields.centralConflict),
     protagonistArc: normalizeText(fields.protagonistArc),
@@ -122,10 +137,15 @@ function normalizeBookOutlineFields(fields: BookOutlineFields): BookOutlineField
     endgameHint: normalizeText(fields.endgameHint),
     toneGuide: normalizeText(fields.toneGuide),
   };
+
+  return {
+    ...normalized,
+    summary: normalizeText(fields.summary) || buildBookOutlineSummary(normalized),
+  };
 }
 
 function normalizeVolumeOutlineFields(fields: VolumeOutlineFields): VolumeOutlineFields {
-  return {
+  const normalized: VolumeOutlineFields = {
     goal: normalizeText(fields.goal),
     keyConflict: normalizeText(fields.keyConflict),
     arcSummary: normalizeText(fields.arcSummary),
@@ -142,8 +162,15 @@ function normalizeVolumeOutlineFields(fields: VolumeOutlineFields): VolumeOutlin
     foreshadowSeeds: normalizeTextList(fields.foreshadowSeeds),
     requiredEntities: normalizeOptionalTextList(fields.requiredEntities),
     requiredForeshadows: normalizeOptionalTextList(fields.requiredForeshadows),
+    requiredForeshadowIds: normalizeOptionalTextList(fields.requiredForeshadowIds),
+    foreshadowRefs: normalizeForeshadowRefs(fields.foreshadowRefs),
     estimatedChapterCount: normalizePositiveInteger(fields.estimatedChapterCount),
     milestones: normalizeVolumeMilestones(fields.milestones),
+  };
+
+  return {
+    ...normalized,
+    summary: normalizeText(fields.summary) || buildVolumeOutlineSummary(normalized),
   };
 }
 

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "type": "lore-scene-anchor-card",
+  "exportedAt": "2026-04-17T18:32:00+08:00",
+  "data": {
+    "name": "第六房",
+    "description": "刑律司负责复核、解释和程序适用的房司，也是冯衍长期坐镇之处。",
+    "tags": [
+      "场景锚点",
+      "刑律司",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "scene_role": "程序墙的空间化身",
+      "public_function": "处理复核、限题、程序适用与文书解释。",
+      "space_impression": "不大，极整，案上律条注疏码得齐，没有多余摆件，连茶碗都像放在固定位置。",
+      "atmosphere": "像一间被程序打扫过的房间，空气比外面更重。",
+      "bound_character": "冯衍",
+      "story_function": "让许明每次进门都先感到自己已经站进了规则地盘，空间先压人，人物再压人。",
+      "first_appearance_note": "第一次写到时，先落‘整’与‘重’，再让冯衍开口。",
+      "reuse_note": "后续凡是许明来这里，房间的整与重都应稳定存在，不能忽松忽紧。"
+    }
+  }
+}

@@ -1,11 +1,17 @@
-import { serializeBookOutline, serializeVolumeOutline } from '@/lib/outline-serializer';
 import { collectPlanningRequirements } from '@/lib/planning-requirements';
+import { collectChapterOutlinePlanningRequirements } from '@/lib/chapter-outline';
+import { db } from '@/lib/db';
+import {
+  getBookOutlineSummary,
+  getVolumeMilestoneSummary,
+  getVolumeOutlineSummary,
+} from '@/lib/outline-summary';
 import {
   buildAutomaticForbiddenZone,
   type AutomaticForbiddenZone,
 } from './generation-repetition-pure';
 import { getEffectiveChapterText, loadGenerationQueueMap } from '@/lib/generation-storage';
-import { useChapterBeatStore, useOutlineStore } from '@/stores';
+import { useChapterBeatStore, useForeshadowStore, useOutlineStore } from '@/stores';
 import type {
   Chapter,
   ChapterBeat,
@@ -30,6 +36,34 @@ export interface ChapterPromptPayload {
   automaticForbiddenZone: AutomaticForbiddenZone;
 }
 
+function hasManualChapterOutlineControl(
+  outline: {
+    goal?: string;
+    chapterFunction?: string;
+    sceneDecisionNote?: string;
+    sceneDrafts?: Array<unknown>;
+    beatDrafts?: Array<unknown>;
+    foreshadowRefs?: Array<unknown>;
+    mustAppearCharacters?: Array<unknown>;
+    availableCharacters?: Array<unknown>;
+  } | null | undefined,
+) {
+  if (!outline) {
+    return false;
+  }
+
+  return Boolean(
+    outline.goal?.trim() ||
+      outline.chapterFunction?.trim() ||
+      outline.sceneDecisionNote?.trim() ||
+      (outline.sceneDrafts?.length ?? 0) > 0 ||
+      (outline.beatDrafts?.length ?? 0) > 0 ||
+      (outline.foreshadowRefs?.length ?? 0) > 0 ||
+      (outline.mustAppearCharacters?.length ?? 0) > 0 ||
+      (outline.availableCharacters?.length ?? 0) > 0,
+  );
+}
+
 function serializeChapterBeat(beat: ChapterBeat | ChapterBeatFields) {
   return [
     beat.titleHint.trim() ? `标题提示：${beat.titleHint.trim()}` : '',
@@ -37,6 +71,9 @@ function serializeChapterBeat(beat: ChapterBeat | ChapterBeatFields) {
     beat.focusCharacter.trim() ? `焦点角色：${beat.focusCharacter.trim()}` : '',
     (beat.mustAppearCharacters ?? []).length > 0 ? `必须出场：${(beat.mustAppearCharacters ?? []).join('；')}` : '',
     (beat.availableCharacters ?? []).length > 0 ? `可出场候选：${(beat.availableCharacters ?? []).join('；')}` : '',
+    (beat.requiredForeshadows ?? []).length > 0
+      ? `必须落地伏笔：${(beat.requiredForeshadows ?? []).join('；')}`
+      : '',
     beat.mainPlot.trim() ? `主线推进：${beat.mainPlot.trim()}` : '',
     beat.subPlot.trim() ? `支线推进：${beat.subPlot.trim()}` : '',
     beat.pacing.trim() ? `节奏：${beat.pacing.trim()}` : '',
@@ -83,8 +120,46 @@ function buildForbiddenZoneText(
   return sections.length > 0 ? sections.join('\n') : undefined;
 }
 
-function getVolumeGoal(volumeOutline?: VolumeOutline) {
-  return volumeOutline?.goal.trim() || undefined;
+function getCurrentMilestoneSummary(
+  volumeOutline: VolumeOutline | undefined,
+  milestoneIndex: number | undefined,
+) {
+  if (!volumeOutline || typeof milestoneIndex !== 'number' || milestoneIndex < 0) {
+    return undefined;
+  }
+
+  const milestone = volumeOutline.milestones[milestoneIndex] ?? null;
+  return milestone ? getVolumeMilestoneSummary(milestone, milestoneIndex) || undefined : undefined;
+}
+
+function resolveMilestoneIndexByChapterOrder(
+  volumeOutline: VolumeOutline | undefined,
+  chapterOrderInVolume: number | null,
+) {
+  if (!volumeOutline || typeof chapterOrderInVolume !== 'number' || chapterOrderInVolume <= 0) {
+    return undefined;
+  }
+
+  let chapterCursor = 1;
+
+  for (let index = 0; index < volumeOutline.milestones.length; index += 1) {
+    const milestone = volumeOutline.milestones[index];
+    const targetChapterCount = Math.max(0, milestone.targetChapterCount);
+
+    if (targetChapterCount <= 0) {
+      continue;
+    }
+
+    const endChapterNumber = chapterCursor + targetChapterCount - 1;
+
+    if (chapterOrderInVolume >= chapterCursor && chapterOrderInVolume <= endChapterNumber) {
+      return index;
+    }
+
+    chapterCursor = endChapterNumber + 1;
+  }
+
+  return undefined;
 }
 
 function getRecentChapterTexts(
@@ -101,6 +176,19 @@ function getRecentChapterTexts(
     .filter(Boolean);
 }
 
+function getChapterOrderInVolume(chapters: Chapter[], currentChapter: Chapter) {
+  if (!currentChapter.volumeId) {
+    return null;
+  }
+
+  const volumeChapters = chapters
+    .filter((chapter) => chapter.volumeId === currentChapter.volumeId)
+    .sort((left, right) => left.order - right.order);
+  const index = volumeChapters.findIndex((chapter) => chapter.id === currentChapter.id);
+
+  return index >= 0 ? index + 1 : null;
+}
+
 export async function buildChapterPromptPayload(
   projectId: Id,
   chapter: Chapter,
@@ -108,39 +196,66 @@ export async function buildChapterPromptPayload(
 ): Promise<ChapterPromptPayload> {
   const outlineStore = useOutlineStore.getState();
   const chapterBeatStore = useChapterBeatStore.getState();
-  const [bookOutlineRecord, volumeOutlineRecord, currentChapterBeat] = await Promise.all([
+  const [bookOutlineRecord, volumeOutlineRecord, chapterBeatByChapterId, volumeChapterBeats, chapterOutlineRecord] = await Promise.all([
     outlineStore.getBookOutline(projectId),
     chapter.volumeId ? outlineStore.getVolumeOutline(chapter.volumeId) : Promise.resolve(undefined),
     chapterBeatStore.getChapterBeatByChapterId(chapter.id),
+    chapter.volumeId ? chapterBeatStore.getVolumeChapterBeats(chapter.volumeId) : Promise.resolve([]),
+    db.chapterOutlines.where('[projectId+chapterId]').equals([projectId, chapter.id]).first(),
   ]);
+  const foreshadowStore = useForeshadowStore.getState();
+  const projectForeshadows =
+    foreshadowStore.loadedProjectId === projectId
+      ? foreshadowStore.foreshadows.filter((item) => item.projectId === projectId)
+      : await db.foreshadows.where('projectId').equals(projectId).toArray();
   const queueItems = await loadGenerationQueueMap(projectId);
   const queueMap = new Map(queueItems.map((item) => [item.chapterId, item] as const));
-
-  const volumeChapterBeats =
-    chapter.volumeId && currentChapterBeat
-      ? await chapterBeatStore.getVolumeChapterBeats(chapter.volumeId)
-      : [];
+  const chapterOrderInVolume = getChapterOrderInVolume(chapters, chapter);
+  const currentChapterBeat =
+    chapterBeatByChapterId ??
+    (typeof chapterOrderInVolume === 'number'
+      ? volumeChapterBeats.find((beat) => beat.orderInVolume === chapterOrderInVolume) ?? null
+      : null);
   const nextChapterBeat =
     currentChapterBeat && chapter.volumeId
       ? volumeChapterBeats.find((beat) => beat.orderInVolume === currentChapterBeat.orderInVolume + 1) ?? null
       : null;
+  // 阶段摘要直接跟随卷纲里的里程碑划分，不再优先依赖章节拍。
+  // 这样在主要使用章纲、很少维护章节拍的工作流里，
+  // 当前章只会拿到所属里程碑的阶段摘要。
+  const resolvedMilestoneIndex =
+    typeof chapterOutlineRecord?.milestoneIndex === 'number'
+      ? chapterOutlineRecord.milestoneIndex
+      : resolveMilestoneIndexByChapterOrder(volumeOutlineRecord, chapterOrderInVolume);
   const automaticForbiddenZone = buildAutomaticForbiddenZone(getRecentChapterTexts(chapters, chapter, queueMap));
   const planningRequirements = collectPlanningRequirements({
     volumeOutline: volumeOutlineRecord ?? null,
-    milestoneIndex: currentChapterBeat?.milestoneIndex,
+    milestoneIndex: resolvedMilestoneIndex,
     chapterBeat: currentChapterBeat ?? null,
+    foreshadows: projectForeshadows,
   });
+  const outlinePlanningRequirements = chapterOutlineRecord
+    ? collectChapterOutlinePlanningRequirements(chapterOutlineRecord)
+    : null;
+  const hasStrictChapterOutline = hasManualChapterOutlineControl(chapterOutlineRecord);
 
   return {
-    bookOutline: bookOutlineRecord ? serializeBookOutline(bookOutlineRecord) : undefined,
-    volumeOutline: volumeOutlineRecord ? serializeVolumeOutline(volumeOutlineRecord) : undefined,
-    volumeGoal: getVolumeGoal(volumeOutlineRecord),
-    chapterBeat: currentChapterBeat ? serializeChapterBeat(currentChapterBeat) : undefined,
-    nextChapterPreview: nextChapterBeat ? serializeNextChapterPreview(nextChapterBeat) : undefined,
-    forbiddenZone: buildForbiddenZoneText(currentChapterBeat ?? null, automaticForbiddenZone),
-    requiredEntityNames: planningRequirements.requiredEntityNames,
-    availableCharacterNames: planningRequirements.availableCharacterNames,
-    requiredForeshadowTitles: planningRequirements.requiredForeshadowTitles,
+    bookOutline: bookOutlineRecord ? getBookOutlineSummary(bookOutlineRecord) || undefined : undefined,
+    volumeOutline: volumeOutlineRecord ? getVolumeOutlineSummary(volumeOutlineRecord) || undefined : undefined,
+    volumeGoal: hasStrictChapterOutline ? undefined : getCurrentMilestoneSummary(volumeOutlineRecord, resolvedMilestoneIndex),
+    chapterBeat: hasStrictChapterOutline ? undefined : currentChapterBeat ? serializeChapterBeat(currentChapterBeat) : undefined,
+    nextChapterPreview: hasStrictChapterOutline ? undefined : nextChapterBeat ? serializeNextChapterPreview(nextChapterBeat) : undefined,
+    forbiddenZone: hasStrictChapterOutline ? undefined : buildForbiddenZoneText(currentChapterBeat ?? null, automaticForbiddenZone),
+    requiredEntityNames: hasStrictChapterOutline
+      ? (outlinePlanningRequirements?.requiredEntityNames ?? [])
+      : (outlinePlanningRequirements?.requiredEntityNames ?? planningRequirements.requiredEntityNames),
+    availableCharacterNames: hasStrictChapterOutline
+      ? (outlinePlanningRequirements?.availableCharacterNames ?? [])
+      : (outlinePlanningRequirements?.availableCharacterNames ?? planningRequirements.availableCharacterNames),
+    requiredForeshadowTitles:
+      hasStrictChapterOutline
+        ? (outlinePlanningRequirements?.requiredForeshadowTitles ?? [])
+        : (outlinePlanningRequirements?.requiredForeshadowTitles ?? planningRequirements.requiredForeshadowTitles),
     currentChapterBeat: currentChapterBeat ?? null,
     nextChapterBeat,
     automaticForbiddenZone,

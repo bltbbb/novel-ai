@@ -63,7 +63,7 @@ export type AIReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' |
 export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low';
 export type ReviewCheckerType = 'consistency' | 'continuity' | 'reader_pull';
 export type AntiAIForceCheck = 'pass' | 'fail';
-export type LoreEntityType = 'character' | 'faction' | 'location' | 'magic_system' | 'item' | 'event';
+export type LoreEntityType = 'character' | 'functional_role' | 'faction' | 'location' | 'magic_system' | 'item' | 'event';
 export type AIProviderPreset =
   | 'openai'
   | 'deepseek'
@@ -209,9 +209,73 @@ export interface GenerationRelationSnapshot {
 
 export type GenerationForeshadowSnapshotStatus = 'planted' | 'activated' | 'resolved' | 'overdue';
 export type GenerationForeshadowLifecycle = 'active' | 'dormant' | 'archived';
+export type ForeshadowAction = 'shadow' | 'plant' | 'advance' | 'payoff';
+export type ForeshadowIntensity = 'light' | 'medium' | 'heavy';
+export type PromptModuleKey = 'strand_weave' | 'cool_points';
+export type ChapterGenerationModeHint = 'single-scene-chapter' | 'scene-by-scene';
+
+export interface PromptModuleHints {
+  extraPrewriteModules?: PromptModuleKey[];
+}
+
+export interface ForeshadowRef {
+  foreshadowId: string;
+  foreshadowTitle?: string;
+  action: ForeshadowAction;
+  intensity: ForeshadowIntensity;
+  note?: string;
+}
+
+export type ChapterSceneActorRole = 'focus' | 'support' | 'candidate';
+
+export interface ChapterSceneActorRef {
+  characterId: string;
+  role: ChapterSceneActorRole;
+  sceneFocus?: string;
+  sceneTask?: string;
+  weakHint?: string;
+}
+
+export interface ChapterOutlineBeatDraft {
+  beatId?: string;
+  sceneId?: string;
+  beatTitle: string;
+  scene: string;
+  anchors: string[];
+  actors: string[];
+  progress: string;
+  result: string;
+  entityRefs: string[];
+  foreshadowRefs: ForeshadowRef[];
+  forbiddenNotes: string[];
+}
+
+export interface ChapterSceneDraft {
+  sceneId: string;
+  sceneTitle: string;
+  macroScene: string;
+  sceneRole: string;
+  sceneGoal: string;
+  sceneObstacle: string;
+  sceneTimeSpan: string;
+  scenePacing: string;
+  sceneResult: string;
+  sceneHook: string;
+  estimatedWords: number;
+  actors: ChapterSceneActorRef[];
+  availableCharacters: ChapterSceneActorRef[];
+  sceneAnchors: string[];
+  infoBudget: string;
+  powerShift: string;
+  personalConflict: string;
+  foreshadowRefs: ForeshadowRef[];
+  forbiddenNotes: string[];
+  beatRefs: string[];
+}
 
 export interface GenerationForeshadowSnapshot {
   id: string;
+  foreshadowId?: string | null;
   title: string;
   excerpt: string;
   notes: string;
@@ -241,6 +305,7 @@ export interface BookOutlineFields {
   worldRules: string[];
   endgameHint: string;
   toneGuide: string;
+  summary?: string;
 }
 
 export interface VolumeMilestoneDraft {
@@ -259,6 +324,9 @@ export interface VolumeMilestoneDraft {
   powerCeiling: string;
   requiredEntities?: string[];
   requiredForeshadows?: string[];
+  requiredForeshadowIds?: string[];
+  foreshadowRefs?: ForeshadowRef[];
+  summary?: string;
 }
 
 export interface VolumeOutlineFields {
@@ -282,8 +350,11 @@ export interface VolumeOutlineFields {
   foreshadowSeeds: string[];
   requiredEntities?: string[];
   requiredForeshadows?: string[];
+  requiredForeshadowIds?: string[];
+  foreshadowRefs?: ForeshadowRef[];
   estimatedChapterCount: number;
   milestones: VolumeMilestoneDraft[];
+  summary?: string;
 }
 
 export interface ChapterBeatFields {
@@ -293,6 +364,7 @@ export interface ChapterBeatFields {
   focusCharacter: string;
   mustAppearCharacters?: string[];
   availableCharacters?: string[];
+  requiredForeshadows?: string[];
   mainPlot: string;
   subPlot: string;
   pacing: string;
@@ -317,6 +389,29 @@ export interface ChapterOutlineDraft {
   hookType: string;
   hookStrength: HookStrength;
   immutableFacts: string[];
+  chapterFunction?: string;
+  chapterBoundary?: string;
+  revealCeiling?: string;
+  openingState?: string;
+  closingState?: string;
+  focusCharacter?: string;
+  mustAppearCharacters?: string[];
+  availableCharacters?: string[];
+  mainPlot?: string;
+  subPlot?: string;
+  coreScene?: string;
+  sceneAnchors?: string[];
+  infoBudget?: string;
+  powerShift?: string;
+  personalConflict?: string;
+  emotionalOutcome?: string;
+  chapterHook?: string;
+  generationModeHint?: ChapterGenerationModeHint;
+  sceneDecisionNote?: string;
+  foreshadowRefs?: ForeshadowRef[];
+  sceneDrafts?: ChapterSceneDraft[];
+  beatDrafts?: ChapterOutlineBeatDraft[];
+  promptModuleHints?: PromptModuleHints;
 }
 
 export interface ChapterSummaryDraft {
@@ -370,6 +465,12 @@ export interface ChapterPolishDraft {
   summary: string;
   antiAiForceCheck: AntiAIForceCheck;
   appliedChanges: string[];
+}
+
+export interface ChapterEditorRefineDraft {
+  summary: string;
+  antiAiForceCheck: AntiAIForceCheck;
+  majorAdjustments: string[];
 }
 
 export interface TemplatePromptBundle {
@@ -664,6 +765,33 @@ export interface AIPolishResponse {
   rawText: string;
 }
 
+export interface AIEditorRefineRequest {
+  projectId: string;
+  chapterId: string;
+  chapterTitle: string;
+  chapterOrder?: number;
+  volumeTitle?: string;
+  previousChapterId?: string;
+  previousChapterTitle?: string;
+  bookOutline?: string;
+  volumeOutline?: string;
+  previousSummary?: string;
+  outline?: ChapterOutlineDraft | null;
+  entitySnapshot?: GenerationEntitySnapshot[];
+  requiredEntityNames?: string[];
+  availableCharacterNames?: string[];
+  content: string;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIEditorRefineResponse {
+  content: string;
+  editorRefine: ChapterEditorRefineDraft;
+  rawText: string;
+}
+
 export type BookAnalysisRange = 'full' | 'opening' | 'middle' | 'ending' | 'custom';
 
 export interface AIBookAnalysisRequest {
@@ -809,6 +937,20 @@ export interface AIBookOutlineRequest {
 
 export interface AIBookOutlineResponse extends BookOutlineFields {}
 
+export interface AIBookOutlineSummaryRequest {
+  projectTitle: string;
+  projectDescription?: string;
+  genre: string[];
+  outline: BookOutlineFields;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIBookOutlineSummaryResponse {
+  summary: string;
+}
+
 export interface AIVolumeOutlineRequest {
   projectTitle: string;
   projectDescription: string;
@@ -827,6 +969,23 @@ export interface AIVolumeOutlineRequest {
 }
 
 export interface AIVolumeOutlineResponse extends VolumeOutlineFields {}
+
+export interface AIVolumeOutlineSummaryRequest {
+  projectTitle: string;
+  projectDescription?: string;
+  volumeTitle: string;
+  volumeOrder: number;
+  bookOutlineSummary?: string;
+  outline: VolumeOutlineFields;
+  model: string;
+  temperature: number;
+  reasoningEffort?: AIReasoningEffort;
+}
+
+export interface AIVolumeOutlineSummaryResponse {
+  summary: string;
+  milestoneSummaries: string[];
+}
 
 export interface AIVolumeMilestonesRequest {
   projectTitle: string;
@@ -896,7 +1055,16 @@ export interface AIVolumeBeatsResponse {
 }
 
 export type GenerationJobStatus = 'queued' | 'running' | 'paused' | 'ready' | 'approved' | 'discarded' | 'error';
-export type GenerationJobStep = 'queued' | 'plan' | 'write' | 'style' | 'review' | 'polish' | 'extract' | 'complete';
+export type GenerationJobStep =
+  | 'queued'
+  | 'plan'
+  | 'write'
+  | 'style'
+  | 'review'
+  | 'polish'
+  | 'editor_refine'
+  | 'extract'
+  | 'complete';
 
 export interface GenerationJobRequest {
   projectId: string;
@@ -921,6 +1089,7 @@ export interface GenerationJobRequest {
   availableCharacterNames?: string[];
   requiredForeshadowTitles?: string[];
   stylePrompt?: string;
+  enableEditorRefine?: boolean;
   model: string;
   temperature: number;
   reasoningEffort?: AIReasoningEffort;
@@ -956,6 +1125,7 @@ export interface GenerationJobRecord {
   review: ChapterReviewDraft | null;
   languageQa: ChapterLanguageQaDraft | null;
   polish: ChapterPolishDraft | null;
+  editorRefine: ChapterEditorRefineDraft | null;
   summary: ChapterSummaryDraft | null;
   stateChanges: StateChangeDraft[];
   strand: StrandType | null;
@@ -1162,6 +1332,51 @@ export interface GenerationDebugContext {
   lightweightRecallItems: GenerationDebugLightweightRecallItem[];
   structuredRelationshipDebug: GenerationDebugStructuredRelationshipSummary;
   sections: GenerationDebugContextSection[];
+}
+
+export type GenerationPromptPreviewStage =
+  | 'plan'
+  | 'write'
+  | 'review'
+  | 'language_qa'
+  | 'style'
+  | 'polish'
+  | 'editor_refine'
+  | 'extract';
+
+export type GenerationPromptPreviewTransport = 'openai_chat_completions' | 'claude_messages';
+
+export interface GenerationPromptPreviewStageRequest {
+  stage: GenerationPromptPreviewStage;
+  label?: string;
+  request:
+    | AIPlanRequest
+    | AIWriteRequest
+    | AIReviewRequest
+    | AILanguageQaRequest
+    | AIStyleRequest
+    | AIPolishRequest
+    | AIEditorRefineRequest
+    | AIExtractRequest;
+}
+
+export interface GenerationPromptPreviewRequest {
+  stages: GenerationPromptPreviewStageRequest[];
+}
+
+export interface GenerationPromptPreviewItem {
+  stage: GenerationPromptPreviewStage;
+  label: string;
+  model: string;
+  transport: GenerationPromptPreviewTransport;
+  requestUrl: string;
+  systemPrompt: string;
+  userPrompt: string;
+  requestBody: string;
+}
+
+export interface GenerationPromptPreviewResponse {
+  previews: GenerationPromptPreviewItem[];
 }
 
 export interface GenerationDebugVolumeRecapRecord {

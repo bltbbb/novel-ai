@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-functional-role-card",
+  "exportedAt": "2026-04-17T19:05:00+08:00",
+  "data": {
+    "name": "物证库年轻主事",
+    "description": "吴墨调走后接替物证库位置的年轻主事。第一卷中只在前后两次露面，一次在架后听见吴墨挡人，一次在卷尾接过许明归还的无名索引。",
+    "tags": [
+      "功能角色",
+      "物证库",
+      "承接角色",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "把库房守稳，不在自己手里出错漏。",
+      "static_fear": "怕接手的是一间自己根本不懂的库房，也怕无意碰到旧主事不肯说的事。",
+      "static_values": "规矩、交接、按簿做事，别给自己惹麻烦。",
+      "static_trueNature": "年轻、谨慎、还没真正见过库房最深的旧账。",
+      "static_speechStyle": "规矩、客气、偏书吏口气。",
+      "static_decisionStyle": "先按交接来的规矩走，不轻易问多余的问题。",
+      "static_conflictResponse": "遇到不懂的旧事会先收起，不主动伸手，也不主动多嘴。",
+      "static_taboos": "不愿在还没摸清底细前就贸然碰旧主事留下来的东西。"
+    }
+  }
+}

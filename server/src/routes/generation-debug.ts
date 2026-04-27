@@ -15,12 +15,42 @@ import {
   listGenerationDebugVolumeRecaps,
   listGenerationDebugRelationships,
 } from '../services/generation-debug-store.js';
+import { previewGenerationPrompts } from '../services/generation.js';
+import type { GenerationPromptPreviewRequest } from '../types/ai.js';
 
 interface ProjectQuerystring {
   projectId?: string;
   chapterId?: string;
   q?: string;
   entityName?: string;
+}
+
+function isGenerationPromptPreviewRequest(body: unknown): body is GenerationPromptPreviewRequest {
+  if (!body || typeof body !== 'object') {
+    return false;
+  }
+
+  const candidate = body as Partial<GenerationPromptPreviewRequest>;
+  return (
+    Array.isArray(candidate.stages) &&
+    candidate.stages.every(
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        (
+          item.stage === 'plan' ||
+          item.stage === 'write' ||
+          item.stage === 'review' ||
+          item.stage === 'language_qa' ||
+          item.stage === 'style' ||
+          item.stage === 'polish' ||
+          item.stage === 'editor_refine' ||
+          item.stage === 'extract'
+        ) &&
+        item.request &&
+        typeof item.request === 'object',
+    )
+  );
 }
 
 function getProjectIdOrReply(
@@ -102,6 +132,26 @@ export async function registerGenerationDebugRoutes(app: FastifyInstance, env: S
       }
 
       return detail;
+    },
+  );
+
+  app.post(
+    '/api/runtime/generation-debug/prompt-preview',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      if (!isGenerationPromptPreviewRequest(request.body)) {
+        return reply.status(400).send({
+          message: '请求体不符合 GenerationPromptPreviewRequest 结构',
+        });
+      }
+
+      try {
+        return await previewGenerationPrompts(env, request.body);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '生成 Prompt 预览失败';
+        return reply.status(500).send({
+          message,
+        });
+      }
     },
   );
 

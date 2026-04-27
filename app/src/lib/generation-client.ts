@@ -7,6 +7,10 @@ import type {
   AIEpubExtractResponse,
   AIBookOutlineRequest,
   AIBookOutlineResponse,
+  AIBookOutlineSummaryRequest,
+  AIBookOutlineSummaryResponse,
+  AIEditorRefineRequest,
+  AIEditorRefineResponse,
   BookAnalysisJobRecord,
   AIExtractRequest,
   AIExtractResponse,
@@ -26,6 +30,8 @@ import type {
   AIVolumeMilestonesResponse,
   AIVolumeOutlineRequest,
   AIVolumeOutlineResponse,
+  AIVolumeOutlineSummaryRequest,
+  AIVolumeOutlineSummaryResponse,
   AIVolumePlanReconcileRequest,
   AIVolumePlanReconcileResponse,
   GenerationArtifactSyncRequest,
@@ -164,6 +170,14 @@ export function createBookOutline(serverUrl: string, request: AIBookOutlineReque
   );
 }
 
+export function createBookOutlineSummary(serverUrl: string, request: AIBookOutlineSummaryRequest) {
+  return postJson<AIBookOutlineSummaryRequest, AIBookOutlineSummaryResponse>(
+    serverUrl,
+    '/api/ai/book-outline-summary',
+    request,
+  );
+}
+
 export function createInspirationBlueprint(serverUrl: string, request: AIInspirationBlueprintRequest) {
   return postJson<AIInspirationBlueprintRequest, AIInspirationBlueprint>(
     serverUrl,
@@ -287,6 +301,14 @@ export function createVolumeOutline(serverUrl: string, request: AIVolumeOutlineR
   );
 }
 
+export function createVolumeOutlineSummary(serverUrl: string, request: AIVolumeOutlineSummaryRequest) {
+  return postJson<AIVolumeOutlineSummaryRequest, AIVolumeOutlineSummaryResponse>(
+    serverUrl,
+    '/api/ai/volume-outline-summary',
+    request,
+  );
+}
+
 export function createVolumeMilestones(serverUrl: string, request: AIVolumeMilestonesRequest) {
   return postJson<AIVolumeMilestonesRequest, AIVolumeMilestonesResponse>(
     serverUrl,
@@ -360,6 +382,18 @@ export function polishChapterDraft(serverUrl: string, request: AIPolishRequest, 
   return postJson<AIPolishRequest, AIPolishResponse>(serverUrl, '/api/ai/polish', request, {
     timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
     timeoutMessage: 'Polish 请求超时，请重试',
+    ...options,
+  });
+}
+
+export function editorRefineChapterDraft(
+  serverUrl: string,
+  request: AIEditorRefineRequest,
+  options?: JsonRequestOptions,
+) {
+  return postJson<AIEditorRefineRequest, AIEditorRefineResponse>(serverUrl, '/api/ai/editor-refine', request, {
+    timeoutMs: LONG_AI_REQUEST_TIMEOUT_MS,
+    timeoutMessage: 'Editor Refine 请求超时，请重试',
     ...options,
   });
 }

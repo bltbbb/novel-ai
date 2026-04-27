@@ -1,6 +1,5 @@
 import { richTextToPlainText } from '@/lib/editor-content';
 import {
-  CHARACTER_DYNAMIC_FIELD_DEFINITIONS,
   CHARACTER_STATIC_FIELD_DEFINITIONS,
   getLoreEntityMatchTerms,
 } from '@/lib/lore-entity';
@@ -61,6 +60,10 @@ function normalizeText(text: string) {
   return text.trim().toLowerCase();
 }
 
+function isCurrentFieldKey(key: string) {
+  return key.startsWith('current_');
+}
+
 function deduplicateEntities(entities: LoreEntity[]) {
   const seen = new Set<string>();
 
@@ -86,21 +89,20 @@ function matchEntitiesByContent(content: string, entities: LoreEntity[]) {
       return true;
     }
 
-    return Object.values(entity.fields).some((value) => {
-      return typeof value === 'string' && value.trim() && normalizedContent.includes(normalizeText(value));
+    return Object.entries(entity.fields).some(([key, value]) => {
+      return !isCurrentFieldKey(key) && typeof value === 'string' && value.trim() && normalizedContent.includes(normalizeText(value));
     });
   });
 }
 
 function buildEntityReference(entity: LoreEntity): AIContextReference {
   const orderedFieldKeys =
-    entity.type === 'character'
+    entity.type === 'character' || entity.type === 'functional_role'
       ? [
           ...CHARACTER_STATIC_FIELD_DEFINITIONS.map((item) => item.key),
-          ...CHARACTER_DYNAMIC_FIELD_DEFINITIONS.map((item) => item.key),
-          ...Object.keys(entity.fields),
+          ...Object.keys(entity.fields).filter((key) => !isCurrentFieldKey(key)),
         ]
-      : Object.keys(entity.fields);
+      : Object.keys(entity.fields).filter((key) => !isCurrentFieldKey(key));
   const seenFieldKeys = new Set<string>();
   const fieldPreview = orderedFieldKeys
     .filter((key) => {
@@ -111,6 +113,7 @@ function buildEntityReference(entity: LoreEntity): AIContextReference {
       seenFieldKeys.add(key);
       return true;
     })
+    .filter((key) => !isCurrentFieldKey(key))
     .map((key) => [key, entity.fields[key]] as const)
     .filter(([, value]) => typeof value !== 'undefined' && value !== null && String(value).trim())
     .slice(0, CONTEXT_ASSEMBLER_LIMITS.entityFieldPreviewMax)

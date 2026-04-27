@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle,
   ArrowRightCircle,
@@ -6,26 +6,61 @@ import {
   CheckCircle2,
   CircleDashed,
   Clock3,
+  Download,
   Plus,
   Save,
   Target,
   Trash2,
+  Upload,
 } from 'lucide-react';
 import { EmptyState } from '@/components/EmptyState';
 import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { useToast } from '@/components/Toast';
 import { richTextToPlainText } from '@/lib/editor-content';
+import { sanitizeFileName } from '@/lib/export';
 import { fetchGenerationDebugForeshadows } from '@/lib/generation-debug-client';
-import { useEditorStore, useForeshadowStore, useSettingsStore } from '@/stores';
-import type { ForeshadowStatus, GenerationDebugForeshadowRecord, Id } from '@/types';
+import { useEditorStore, useForeshadowPlanStore, useForeshadowStore, useSettingsStore } from '@/stores';
+import type { Foreshadow, ForeshadowStatus, GenerationDebugForeshadowRecord, Id } from '@/types';
 
 interface ForeshadowWorkspaceProps {
   projectId: Id;
-  onOpenEditor: () => void;
-  onOpenChapter: (chapterId: Id) => void;
+  onOpenEditor?: () => void;
+  onOpenChapter?: (chapterId: Id) => void;
+  onOpenLinkedPlan?: (foreshadowTitle: string) => void;
+  embedded?: boolean;
 }
 
 type StatusFilter = 'all' | ForeshadowStatus;
+
+interface ForeshadowFactJsonPayload {
+  version: 1;
+  type: 'lore-foreshadow-fact';
+  exportedAt: string;
+  data: {
+    foreshadowId: string;
+    title: string;
+    excerpt: string;
+    notes: string;
+    status: ForeshadowStatus;
+    sourceChapterTitle: string;
+    resolvedChapterTitle: string;
+  };
+}
+
+interface ForeshadowFactsJsonPayload {
+  version: 1;
+  type: 'lore-foreshadow-facts';
+  exportedAt: string;
+  items: Array<{
+    foreshadowId: string;
+    title: string;
+    excerpt: string;
+    notes: string;
+    status: ForeshadowStatus;
+    sourceChapterTitle: string;
+    resolvedChapterTitle: string;
+  }>;
+}
 
 const statusOptions: Array<{ key: StatusFilter; label: string }> = [
   { key: 'all', label: '全部' },
@@ -77,7 +112,25 @@ function resolveChapterLabel(chapterTitleMap: Map<Id, string>, chapterId: Id | n
   return chapterTitleMap.get(chapterId) ?? '章节已删除';
 }
 
-export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: ForeshadowWorkspaceProps) {
+function asRecord(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function readString(value: unknown, fallback = '') {
+  return typeof value === 'string' ? value : fallback;
+}
+
+export function ForeshadowWorkspace({
+  projectId,
+  onOpenEditor,
+  onOpenChapter,
+  onOpenLinkedPlan,
+  embedded = false,
+}: ForeshadowWorkspaceProps) {
   const chapters = useEditorStore((state) => state.chapters);
   const activeChapterId = useEditorStore((state) => state.activeChapterId);
   const settings = useSettingsStore((state) => state.settings);
@@ -91,16 +144,28 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
     updateForeshadow,
     deleteForeshadow,
   } = useForeshadowStore();
+  const foreshadowPlans = useForeshadowPlanStore((state) => state.foreshadowPlans);
   const { toast } = useToast();
   const [activeFilter, setActiveFilter] = useState<StatusFilter>('all');
   const [draftTitle, setDraftTitle] = useState('');
+  const [draftForeshadowId, setDraftForeshadowId] = useState('');
   const [draftExcerpt, setDraftExcerpt] = useState('');
   const [draftNotes, setDraftNotes] = useState('');
   const [runtimeForeshadows, setRuntimeForeshadows] = useState<GenerationDebugForeshadowRecord[]>([]);
   const [runtimeError, setRuntimeError] = useState('');
+  const [selectedForeshadowIds, setSelectedForeshadowIds] = useState<Id[]>([]);
+  const foreshadowImportInputRef = useRef<HTMLInputElement | null>(null);
+  const replaceForeshadowImportInputRef = useRef<HTMLInputElement | null>(null);
 
   const chapterTitleMap = useMemo(() => {
     return new Map(chapters.map((chapter) => [chapter.id, chapter.title] as const));
+  }, [chapters]);
+  const chapterIdByTitle = useMemo(() => {
+    return new Map(
+      chapters
+        .map((chapter) => [chapter.title.trim().toLowerCase(), chapter.id] as const)
+        .filter(([title]) => Boolean(title)),
+    );
   }, [chapters]);
 
   const filteredForeshadows = useMemo(() => {
@@ -114,6 +179,28 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
   const currentForeshadow = useMemo(() => {
     return foreshadows.find((item) => item.id === activeForeshadowId) ?? null;
   }, [activeForeshadowId, foreshadows]);
+  const projectForeshadowPlans = useMemo(
+    () => foreshadowPlans.filter((item) => item.projectId === projectId),
+    [foreshadowPlans, projectId],
+  );
+  const matchedPlanMap = useMemo(() => {
+    const map = new Map<string, string>();
+
+    for (const plan of projectForeshadowPlans) {
+      const idKey = plan.foreshadowId?.trim();
+      const titleKey = plan.foreshadowTitle.trim().toLowerCase();
+
+      if (idKey && !map.has(idKey)) {
+        map.set(idKey, plan.foreshadowTitle);
+      }
+
+      if (titleKey && !map.has(titleKey)) {
+        map.set(titleKey, plan.foreshadowTitle);
+      }
+    }
+
+    return map;
+  }, [projectForeshadowPlans]);
 
   const plantedCount = useMemo(
     () => foreshadows.filter((item) => item.status === 'planted').length,
@@ -139,6 +226,14 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
       return !localTitleSet.has(item.title.trim().toLowerCase());
     });
   }, [activeFilter, foreshadows, runtimeForeshadows]);
+  const selectedForeshadowIdSet = useMemo(() => new Set(selectedForeshadowIds), [selectedForeshadowIds]);
+  const allFilteredForeshadowIds = useMemo(
+    () => filteredForeshadows.map((item) => item.id),
+    [filteredForeshadows],
+  );
+  const isAllFilteredSelected =
+    allFilteredForeshadowIds.length > 0 &&
+    allFilteredForeshadowIds.every((id) => selectedForeshadowIdSet.has(id));
 
   useEffect(() => {
     if (loadedProjectId === projectId) {
@@ -173,6 +268,10 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
   }, [projectId, settings.serverUrl]);
 
   useEffect(() => {
+    setSelectedForeshadowIds((current) => current.filter((id) => foreshadows.some((item) => item.id === id)));
+  }, [foreshadows]);
+
+  useEffect(() => {
     if (filteredForeshadows.length === 0) {
       if (activeFilter !== 'all') {
         setActiveForeshadow(null);
@@ -187,12 +286,14 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
 
   useEffect(() => {
     if (!currentForeshadow) {
+      setDraftForeshadowId('');
       setDraftTitle('');
       setDraftExcerpt('');
       setDraftNotes('');
       return;
     }
 
+    setDraftForeshadowId(currentForeshadow.foreshadowId?.trim() || '');
     setDraftTitle(currentForeshadow.title);
     setDraftExcerpt(currentForeshadow.excerpt);
     setDraftNotes(currentForeshadow.notes);
@@ -204,10 +305,12 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
     }
 
     const nextTitle = draftTitle.trim() || currentForeshadow.title;
+    const nextForeshadowId = draftForeshadowId.trim();
     const nextExcerpt = draftExcerpt.trim();
     const nextNotes = draftNotes.trim();
 
     if (
+      nextForeshadowId === (currentForeshadow.foreshadowId?.trim() || '') &&
       nextTitle === currentForeshadow.title &&
       nextExcerpt === currentForeshadow.excerpt &&
       nextNotes === currentForeshadow.notes
@@ -216,6 +319,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
     }
 
     await updateForeshadow(currentForeshadow.id, {
+      foreshadowId: nextForeshadowId || null,
       title: nextTitle,
       excerpt: nextExcerpt,
       notes: nextNotes,
@@ -294,6 +398,286 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
     toast(`已删除伏笔「${currentForeshadow.title}」`, 'warning');
   }
 
+  function toggleForeshadowSelection(foreshadowId: Id) {
+    setSelectedForeshadowIds((current) =>
+      current.includes(foreshadowId)
+        ? current.filter((id) => id !== foreshadowId)
+        : [...current, foreshadowId],
+    );
+  }
+
+  function handleToggleSelectAllForeshadows() {
+    if (allFilteredForeshadowIds.length === 0) {
+      toast('当前筛选下没有可选择的伏笔', 'warning');
+      return;
+    }
+
+    setSelectedForeshadowIds((current) => {
+      if (isAllFilteredSelected) {
+        return current.filter((id) => !allFilteredForeshadowIds.includes(id));
+      }
+
+      return Array.from(new Set([...current, ...allFilteredForeshadowIds]));
+    });
+  }
+
+  async function handleDeleteSelectedForeshadows() {
+    if (selectedForeshadowIds.length === 0) {
+      toast('请先勾选要删除的伏笔', 'warning');
+      return;
+    }
+
+    const selectedItems = foreshadows.filter((item) => selectedForeshadowIdSet.has(item.id));
+    const confirmed = window.confirm(`确认批量删除这 ${selectedItems.length} 条伏笔吗？`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    for (const item of selectedItems) {
+      await deleteForeshadow(item.id);
+    }
+
+    setSelectedForeshadowIds([]);
+    toast(`已删除 ${selectedItems.length} 条伏笔`, 'warning');
+  }
+
+  function openNewForeshadowImportDialog() {
+    if (!foreshadowImportInputRef.current) {
+      toast('导入控件尚未就绪，请稍后重试', 'warning');
+      return;
+    }
+
+    foreshadowImportInputRef.current.value = '';
+    foreshadowImportInputRef.current.click();
+  }
+
+  function openReplaceForeshadowImportDialog() {
+    if (!currentForeshadow) {
+      toast('请先选中一条伏笔', 'warning');
+      return;
+    }
+
+    if (!replaceForeshadowImportInputRef.current) {
+      toast('导入控件尚未就绪，请稍后重试', 'warning');
+      return;
+    }
+
+    replaceForeshadowImportInputRef.current.value = '';
+    replaceForeshadowImportInputRef.current.click();
+  }
+
+  function buildForeshadowFactPayload(foreshadow: typeof currentForeshadow) {
+    if (!foreshadow) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      type: 'lore-foreshadow-fact',
+      exportedAt: new Date().toISOString(),
+      data: {
+        title: draftTitle.trim() || foreshadow.title,
+        excerpt: draftExcerpt.trim(),
+        notes: draftNotes.trim(),
+        status: foreshadow.status,
+        sourceChapterTitle: resolveChapterLabel(chapterTitleMap, foreshadow.sourceChapterId, ''),
+        resolvedChapterTitle: resolveChapterLabel(chapterTitleMap, foreshadow.resolvedChapterId, ''),
+        foreshadowId: draftForeshadowId.trim() || foreshadow.foreshadowId?.trim() || '',
+      },
+    } satisfies ForeshadowFactJsonPayload;
+  }
+
+  function handleExportCurrentForeshadow() {
+    const payload = buildForeshadowFactPayload(currentForeshadow);
+
+    if (!payload || !currentForeshadow) {
+      toast('请先选中一条伏笔', 'warning');
+      return;
+    }
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const objectUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = sanitizeFileName(`${payload.data.title || currentForeshadow.title}-伏笔事实.json`);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
+  }
+
+  function handleExportAllForeshadows() {
+    const payload = {
+      version: 1,
+      type: 'lore-foreshadow-facts',
+      exportedAt: new Date().toISOString(),
+      items: filteredForeshadows.map((foreshadow) => ({
+        foreshadowId: foreshadow.foreshadowId?.trim() || '',
+        title: foreshadow.title,
+        excerpt: foreshadow.excerpt,
+        notes: foreshadow.notes,
+        status: foreshadow.status,
+        sourceChapterTitle: resolveChapterLabel(chapterTitleMap, foreshadow.sourceChapterId, ''),
+        resolvedChapterTitle: resolveChapterLabel(chapterTitleMap, foreshadow.resolvedChapterId, ''),
+      })),
+    };
+
+    if (payload.items.length === 0) {
+      toast('当前筛选下没有可导出的伏笔事实', 'warning');
+      return;
+    }
+
+    const suffix = activeFilter === 'all' ? '全部' : statusOptions.find((option) => option.key === activeFilter)?.label ?? '筛选';
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const objectUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = sanitizeFileName(`${projectId}-${suffix}-伏笔事实合集.json`);
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
+  }
+
+  function parseForeshadowFactPayload(raw: unknown) {
+    const rootRecord = asRecord(raw);
+    const payloadRecord =
+      rootRecord && rootRecord.type === 'lore-foreshadow-fact' && 'data' in rootRecord
+        ? asRecord(rootRecord.data)
+        : rootRecord;
+
+    if (!payloadRecord) {
+      throw new Error('导入文件结构无效');
+    }
+
+    const status = readString(payloadRecord.status, 'planted');
+    const normalizedStatus: ForeshadowStatus =
+      status === 'activated' || status === 'resolved' || status === 'overdue' ? status : 'planted';
+
+    return {
+      foreshadowId: readString(payloadRecord.foreshadowId).trim(),
+      title: readString(payloadRecord.title).trim(),
+      excerpt: readString(payloadRecord.excerpt).trim(),
+      notes: readString(payloadRecord.notes).trim(),
+      status: normalizedStatus,
+      sourceChapterTitle: readString(payloadRecord.sourceChapterTitle).trim(),
+      resolvedChapterTitle: readString(payloadRecord.resolvedChapterTitle).trim(),
+    };
+  }
+
+  function parseForeshadowFactPayloads(raw: unknown) {
+    const rootRecord = asRecord(raw);
+
+    if (rootRecord?.type === 'lore-foreshadow-facts' && Array.isArray(rootRecord.items)) {
+      return rootRecord.items.map((item) => parseForeshadowFactPayload(item));
+    }
+
+    return [parseForeshadowFactPayload(raw)];
+  }
+
+  async function handleImportForeshadowAsNew(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const importedItems = parseForeshadowFactPayloads(parsed);
+      const createdForeshadows: Foreshadow[] = [];
+
+      for (const imported of importedItems) {
+        const foreshadow = await createForeshadow({
+          projectId,
+          foreshadowId: imported.foreshadowId || null,
+          title: imported.title || '未命名伏笔',
+          excerpt: imported.excerpt,
+          notes: imported.notes,
+          status: imported.status,
+          sourceChapterId: chapterIdByTitle.get(imported.sourceChapterTitle.toLowerCase()) ?? null,
+          resolvedChapterId:
+            imported.status === 'resolved'
+              ? chapterIdByTitle.get(imported.resolvedChapterTitle.toLowerCase()) ?? null
+              : null,
+        });
+        createdForeshadows.push(foreshadow);
+      }
+
+      if (createdForeshadows.length > 0) {
+        const lastForeshadow = createdForeshadows[createdForeshadows.length - 1];
+        setActiveFilter('all');
+        setActiveForeshadow(lastForeshadow.id);
+        toast(
+          createdForeshadows.length === 1
+            ? `已导入伏笔「${lastForeshadow.title}」`
+            : `已批量导入 ${createdForeshadows.length} 条伏笔`,
+          'success',
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`导入伏笔失败：${message}`, 'error');
+    }
+  }
+
+  async function handleImportForeshadowToCurrent(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    if (!currentForeshadow) {
+      toast('请先选中一条伏笔', 'warning');
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const importedItems = parseForeshadowFactPayloads(parsed);
+
+      if (importedItems.length !== 1) {
+        throw new Error('覆盖当前伏笔时只支持单条伏笔事实 JSON');
+      }
+
+      const imported = importedItems[0];
+      const sourceChapterId = imported.sourceChapterTitle
+        ? chapterIdByTitle.get(imported.sourceChapterTitle.toLowerCase()) ?? null
+        : null;
+      const resolvedChapterId =
+        imported.status === 'resolved' && imported.resolvedChapterTitle
+          ? chapterIdByTitle.get(imported.resolvedChapterTitle.toLowerCase()) ?? null
+          : null;
+
+      setDraftTitle(imported.title || currentForeshadow.title);
+      setDraftForeshadowId(imported.foreshadowId || currentForeshadow.foreshadowId?.trim() || '');
+      setDraftExcerpt(imported.excerpt);
+      setDraftNotes(imported.notes);
+
+      await updateForeshadow(currentForeshadow.id, {
+        foreshadowId: imported.foreshadowId || null,
+        title: imported.title || currentForeshadow.title,
+        excerpt: imported.excerpt,
+        notes: imported.notes,
+        status: imported.status,
+        sourceChapterId,
+        resolvedChapterId,
+      });
+      toast(`已导入伏笔到「${imported.title || currentForeshadow.title}」`, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
+      toast(`导入伏笔失败：${message}`, 'error');
+    }
+  }
+
   async function handleOpenLinkedChapter(chapterId: Id | null, fallbackMessage: string) {
     await persistDraft();
 
@@ -307,6 +691,11 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
       return;
     }
 
+    if (!onOpenChapter) {
+      toast('当前入口不支持直接跳转章节', 'warning');
+      return;
+    }
+
     onOpenChapter(chapterId);
   }
 
@@ -316,25 +705,72 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
   const resolvedChapterLabel = currentForeshadow
     ? resolveChapterLabel(chapterTitleMap, currentForeshadow.resolvedChapterId, '尚未回收')
     : '尚未回收';
+  const matchedPlanTitle = currentForeshadow
+    ? matchedPlanMap.get(currentForeshadow.id) ?? matchedPlanMap.get(currentForeshadow.title.trim().toLowerCase()) ?? ''
+    : '';
+  const containerClassName = embedded
+    ? 'flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row'
+    : 'flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-900/70 xl:flex-row';
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-900/70 xl:flex-row">
-      <aside className="flex w-full flex-shrink-0 flex-col border-b border-neutral-800 bg-neutral-950/70 xl:w-80 xl:border-b-0 xl:border-r">
-        <div className="border-b border-neutral-800 px-5 py-4">
+    <div className={containerClassName}>
+      <aside className={`flex min-h-0 w-full flex-shrink-0 flex-col ${embedded ? 'xl:w-80 xl:border-r xl:border-neutral-800' : 'border-b border-neutral-800 bg-neutral-950/70 xl:w-80 xl:border-b-0 xl:border-r'}`}>
+        <div className={`border-b border-neutral-800 px-5 py-4 ${embedded ? 'bg-transparent' : ''}`}>
           <div className="flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">伏笔追踪</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">{embedded ? '伏笔事实' : '伏笔追踪'}</p>
               <p className="mt-1 text-sm text-neutral-300">当前共 {foreshadows.length} 条伏笔</p>
             </div>
-            <button
-              type="button"
-              onClick={() => void handleCreateForeshadow()}
-              disabled={chapters.length === 0}
-              className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Plus size={15} />
-              新建
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleToggleSelectAllForeshadows}
+                disabled={allFilteredForeshadowIds.length === 0}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+                title={isAllFilteredSelected ? '清空当前筛选下的选择' : '全选当前筛选下的伏笔事实'}
+                aria-label={isAllFilteredSelected ? '清空当前筛选下的选择' : '全选当前筛选下的伏笔事实'}
+              >
+                <CheckCircle2 size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteSelectedForeshadows()}
+                disabled={selectedForeshadowIds.length === 0}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-red-500/50 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                title="批量删除已选伏笔事实"
+                aria-label="批量删除已选伏笔事实"
+              >
+                <Trash2 size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={handleExportAllForeshadows}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                title="导出当前筛选下全部伏笔事实"
+                aria-label="导出当前筛选下全部伏笔事实"
+              >
+                <Download size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={openNewForeshadowImportDialog}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                title="导入伏笔事实"
+                aria-label="导入伏笔事实"
+              >
+                <Upload size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCreateForeshadow()}
+                disabled={chapters.length === 0}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-indigo-600 text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+                title="新建伏笔事实"
+                aria-label="新建伏笔事实"
+              >
+                <Plus size={15} />
+              </button>
+            </div>
           </div>
           <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
             <div className="rounded-2xl bg-neutral-900 px-3 py-3 text-center">
@@ -382,22 +818,49 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
                 const StatusIcon = meta.icon;
 
                 return (
-                  <button
+                  <article
                     key={foreshadow.id}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => void handleSelectForeshadow(foreshadow.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        void handleSelectForeshadow(foreshadow.id);
+                      }
+                    }}
                     className={`w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
                       foreshadow.id === currentForeshadow?.id
                         ? 'border-indigo-500/50 bg-indigo-500/10 text-indigo-200'
                         : 'border-neutral-800 bg-neutral-900/70 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-900'
-                    }`}
+                    } cursor-pointer`}
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-sm font-medium">{foreshadow.title}</p>
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs ${meta.badgeClass}`}>
-                        <StatusIcon size={12} />
-                        {meta.label}
-                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium">{foreshadow.title}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleForeshadowSelection(foreshadow.id);
+                          }}
+                          className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition-colors ${
+                            selectedForeshadowIdSet.has(foreshadow.id)
+                              ? 'border-indigo-400/40 bg-indigo-500/15 text-indigo-200'
+                              : 'border-neutral-700 text-neutral-500 hover:border-neutral-600 hover:bg-neutral-800 hover:text-neutral-200'
+                          }`}
+                          title={selectedForeshadowIdSet.has(foreshadow.id) ? '取消选择' : '选择用于批量删除'}
+                          aria-label={selectedForeshadowIdSet.has(foreshadow.id) ? '取消选择伏笔' : '选择伏笔'}
+                        >
+                          <CheckCircle2 size={14} />
+                        </button>
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs ${meta.badgeClass}`}>
+                          <StatusIcon size={12} />
+                          {meta.label}
+                        </span>
+                      </div>
                     </div>
                     <p className="mt-2 line-clamp-2 text-xs leading-5 text-neutral-500">
                       {foreshadow.excerpt || '暂无摘录内容'}
@@ -405,7 +868,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
                     <p className="mt-2 text-xs text-neutral-500">
                       来源：{resolveChapterLabel(chapterTitleMap, foreshadow.sourceChapterId, '未关联章节')}
                     </p>
-                  </button>
+                  </article>
                 );
               })}
               {filteredRuntimeForeshadows.map((foreshadow) => {
@@ -438,7 +901,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
         </div>
       </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {!currentForeshadow ? (
           <div className="flex flex-1 p-8">
             {filteredRuntimeForeshadows.length > 0 ? (
@@ -474,7 +937,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
                           <p>来源：{foreshadow.sourceChapterTitle || '未关联章节'}</p>
                           <p>回收：{foreshadow.resolvedChapterTitle || '尚未回收'}</p>
                         </div>
-                        {foreshadow.sourceChapterId && chapterTitleMap.has(foreshadow.sourceChapterId) ? (
+                        {onOpenChapter && foreshadow.sourceChapterId && chapterTitleMap.has(foreshadow.sourceChapterId) ? (
                           <button
                             type="button"
                             onClick={() => onOpenChapter(foreshadow.sourceChapterId as Id)}
@@ -513,7 +976,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
                       foreshadows.length > 0
                         ? () => setActiveFilter('all')
                         : chapters.length === 0
-                          ? onOpenEditor
+                          ? onOpenEditor ?? (() => undefined)
                           : () => void handleCreateForeshadow()
                     }
                     className="inline-flex items-center gap-2 rounded-2xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-500"
@@ -550,7 +1013,7 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
             )}
           </div>
         ) : (
-          <div className="flex flex-1 flex-col gap-4 px-5 py-5">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 px-5 py-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-neutral-500">当前伏笔</p>
@@ -559,25 +1022,68 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={handleExportCurrentForeshadow}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                  title="导出当前伏笔事实"
+                  aria-label="导出当前伏笔事实"
+                >
+                  <Download size={15} />
+                </button>
+                <button
+                  type="button"
+                  onClick={openReplaceForeshadowImportDialog}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                  title="导入到当前伏笔事实"
+                  aria-label="导入到当前伏笔事实"
+                >
+                  <Upload size={15} />
+                </button>
+                <button
+                  type="button"
                   onClick={() => void persistDraft()}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-neutral-600 hover:bg-neutral-800"
+                  title="保存当前伏笔事实"
+                  aria-label="保存当前伏笔事实"
                 >
                   <Save size={15} />
-                  保存
                 </button>
                 <button
                   type="button"
                   onClick={() => void handleDeleteCurrentForeshadow()}
-                  className="inline-flex items-center gap-2 rounded-2xl border border-neutral-700 px-3 py-2 text-sm text-neutral-200 transition-colors hover:border-red-500/50 hover:bg-red-500/10 hover:text-red-300"
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-neutral-700 text-neutral-200 transition-colors hover:border-red-500/50 hover:bg-red-500/10 hover:text-red-300"
+                  title="删除当前伏笔事实"
+                  aria-label="删除当前伏笔事实"
                 >
                   <Trash2 size={15} />
-                  删除
                 </button>
               </div>
             </div>
 
             <div className="grid gap-4 xl:grid-cols-[1.3fr_0.9fr]">
               <div className="space-y-4 rounded-3xl border border-neutral-800 bg-neutral-950/40 p-4">
+                {matchedPlanTitle && onOpenLinkedPlan ? (
+                  <div className="rounded-2xl border border-indigo-500/20 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-100">
+                    <p>已关联规划：{matchedPlanTitle}</p>
+                    <button
+                      type="button"
+                      onClick={() => onOpenLinkedPlan(matchedPlanTitle)}
+                      className="mt-2 inline-flex items-center gap-2 text-sm text-indigo-200 transition-colors hover:text-indigo-100"
+                    >
+                      <ArrowRightCircle size={15} />
+                      查看对应规划
+                    </button>
+                  </div>
+                ) : null}
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-neutral-300">伏笔 ID</label>
+                  <input
+                    value={draftForeshadowId}
+                    onChange={(event) => setDraftForeshadowId(event.target.value)}
+                    onBlur={() => void persistDraft()}
+                    placeholder="例如：fs_v1_missing_clause_7"
+                    className="w-full rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-sm text-neutral-100 outline-none transition-colors placeholder:text-neutral-600 focus:border-indigo-500"
+                  />
+                </div>
                 <div>
                   <label className="mb-2 block text-sm font-medium text-neutral-300">伏笔标题</label>
                   <input
@@ -707,6 +1213,20 @@ export function ForeshadowWorkspace({ projectId, onOpenEditor, onOpenChapter }: 
           </div>
         )}
       </section>
+      <input
+        ref={foreshadowImportInputRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={(event) => void handleImportForeshadowAsNew(event)}
+        className="hidden"
+      />
+      <input
+        ref={replaceForeshadowImportInputRef}
+        type="file"
+        accept="application/json,.json"
+        onChange={(event) => void handleImportForeshadowToCurrent(event)}
+        className="hidden"
+      />
     </div>
   );
 }

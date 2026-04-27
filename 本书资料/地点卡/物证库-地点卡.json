@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "type": "lore-location-card",
+  "exportedAt": "2026-04-17T17:35:00+08:00",
+  "data": {
+    "name": "物证库",
+    "description": "刑律司存放旧卷、物证、封蜡、领用簿与流转记录的核心库房，也是吴墨把守的第一道现实卷宗墙。",
+    "tags": [
+      "地点",
+      "刑律司",
+      "库房",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "location_type": "库房与证物保管场所",
+      "public_function": "保管物证、旧卷、领用簿与封存记录。",
+      "true_function": "决定谁能接近证据、谁只能停在门外的权限场。",
+      "physical_impression": "冷、深、窄，木架、卷箱、封蜡气味和旧纸味混在一起。",
+      "atmosphere": "不吵，但压人；比喊打喊杀更像一堵站着的墙。",
+      "symbolic_meaning": "真相并不只藏在纸上，也藏在谁被允许碰纸这件事里。",
+      "controllers": "吴墨与库房体系。",
+      "key_people": "吴墨、许明、秦小昭。",
+      "hidden_layers": "新补封、雨三暗库存位、流转漏洞、魔气玉简去向。",
+      "danger_level": "中高，程序与权限在这里比刀更难过。",
+      "volume1_function": "调卷受阻、封阅破绽、缺三册与吴墨立场全部在这里成立。",
+      "future_hook": "魔气玉简、暗库与更深层的待净化库线索会继续从这里往下走。"
+    }
+  }
+}

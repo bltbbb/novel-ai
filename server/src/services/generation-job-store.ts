@@ -32,6 +32,7 @@ type GenerationJobPatch = Partial<
     | 'review'
     | 'languageQa'
     | 'polish'
+    | 'editorRefine'
     | 'summary'
     | 'stateChanges'
     | 'strand'
@@ -86,6 +87,7 @@ function inferStep(candidate: Partial<GenerationJobRecord>, status: GenerationJo
     candidate.currentStep === 'style' ||
     candidate.currentStep === 'review' ||
     candidate.currentStep === 'polish' ||
+    candidate.currentStep === 'editor_refine' ||
     candidate.currentStep === 'extract' ||
     candidate.currentStep === 'complete') {
     return candidate.currentStep;
@@ -97,6 +99,10 @@ function inferStep(candidate: Partial<GenerationJobRecord>, status: GenerationJo
 
   if (candidate.summary) {
     return 'extract';
+  }
+
+  if (candidate.editorRefine) {
+    return 'editor_refine';
   }
 
   if (candidate.polish) {
@@ -185,6 +191,10 @@ function normalizeRequest(
           .filter(Boolean)
       : undefined,
     stylePrompt: typeof requestCandidate.stylePrompt === 'string' ? requestCandidate.stylePrompt : undefined,
+    enableEditorRefine:
+      typeof requestCandidate.enableEditorRefine === 'boolean'
+        ? requestCandidate.enableEditorRefine
+        : false,
     model: typeof requestCandidate.model === 'string' ? requestCandidate.model : '',
     temperature: typeof requestCandidate.temperature === 'number' ? requestCandidate.temperature : 0.7,
     reasoningEffort:
@@ -350,6 +360,10 @@ function normalizeGenerationJob(raw: unknown): GenerationJobRecord {
       candidate.polish && typeof candidate.polish === 'object'
         ? candidate.polish
         : null,
+    editorRefine:
+      candidate.editorRefine && typeof candidate.editorRefine === 'object'
+        ? candidate.editorRefine
+        : null,
     summary:
       candidate.summary && typeof candidate.summary === 'object'
         ? candidate.summary
@@ -411,6 +425,7 @@ function mapRowToJob(row: Record<string, unknown>) {
     review: parseJsonText(String(row.review_json ?? 'null')),
     languageQa: parseJsonText(String(row.language_qa_json ?? 'null')),
     polish: parseJsonText(String(row.polish_json ?? 'null')),
+    editorRefine: parseJsonText(String(row.editor_refine_json ?? 'null')),
     summary: parseJsonText(String(row.summary_json ?? 'null')),
     stateChanges: parseJsonText(String(row.state_changes_json ?? '[]')),
     strand: row.strand,
@@ -427,13 +442,13 @@ function upsertJobRow(env: ServerEnv, job: GenerationJobRecord) {
       id, project_id, chapter_id, chapter_title, status, priority, current_step,
       completed_beat_count, total_beat_count, current_beat_index, current_beat_label,
       attempt_count, review_rewrite_count, review_gate_reason, rewrite_guidance, paused_at,
-      request_json, outline_json, generated_text, style_json, review_json, language_qa_json, polish_json,
+      request_json, outline_json, generated_text, style_json, review_json, language_qa_json, polish_json, editor_refine_json,
       summary_json, state_changes_json, strand, error_message, created_at, updated_at
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?, ?, 
       ?, ?, ?, ?, ?, ?
     )
     ON CONFLICT(id) DO UPDATE SET
@@ -459,6 +474,7 @@ function upsertJobRow(env: ServerEnv, job: GenerationJobRecord) {
       review_json = excluded.review_json,
       language_qa_json = excluded.language_qa_json,
       polish_json = excluded.polish_json,
+      editor_refine_json = excluded.editor_refine_json,
       summary_json = excluded.summary_json,
       state_changes_json = excluded.state_changes_json,
       strand = excluded.strand,
@@ -491,6 +507,7 @@ function upsertJobRow(env: ServerEnv, job: GenerationJobRecord) {
     serializeJson(job.review),
     serializeJson(job.languageQa),
     serializeJson(job.polish),
+    serializeJson(job.editorRefine),
     serializeJson(job.summary),
     JSON.stringify(job.stateChanges),
     job.strand,

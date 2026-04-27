@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "type": "lore-character-card",
+  "exportedAt": "2026-04-17T17:10:00+08:00",
+  "data": {
+    "name": "周垣",
+    "description": "老修士的师弟，五十年前也在同一份卷宗上写过字的人。第一卷中先以残痕和旧伤存在，直到卷尾才真正长出名字和死法，成为许明之前那一代被抹掉的追查者。",
+    "tags": [
+      "重要角色",
+      "前代追查者",
+      "第七房",
+      "卷一状态"
+    ],
+    "aliases": [],
+    "draft": true,
+    "fields": {
+      "static_desire": "把写错的卷宗扳回来，让自己看见的不对真正留下痕。",
+      "static_fear": "怕还没把字写进卷里，自己就先被从世上和卷上一起抹掉。",
+      "static_values": "真相、留痕、前人有责、看见了就不能当没看见。",
+      "static_trueNature": "比许明更早一步站出来的失败者，敏感、执拗、敢写，也因此成了第七房断掉的一环。",
+      "static_speechStyle": "谨慎、压低、不到必要不把话说满。",
+      "static_decisionStyle": "一旦认准不对，就会往前顶，哪怕明知前面没有好下场。",
+      "static_conflictResponse": "以留字、留痕、留疑去对抗被安排好的结案词。",
+      "static_taboos": "不肯把自己已经看见的不对装作没看见。"
+    }
+  }
+}

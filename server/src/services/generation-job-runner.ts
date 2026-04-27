@@ -12,6 +12,7 @@ import {
 } from './generation-job-store.js';
 import {
   checkChapterLanguageQa,
+  editorRefineChapterDraft,
   extractChapterArtifacts,
   generateBeatDraft,
   generateChapterOutline,
@@ -78,6 +79,7 @@ function createGenerationJob(request: GenerationJobRequest): GenerationJobRecord
     review: null,
     languageQa: null,
     polish: null,
+    editorRefine: null,
     summary: null,
     stateChanges: [],
     strand: null,
@@ -354,6 +356,7 @@ export async function retryGenerationJob(env: ServerEnv, jobId: string) {
     review: shouldResetForReviewGate ? null : current.review,
     languageQa: shouldResetForReviewGate ? null : current.languageQa,
     polish: shouldResetForReviewGate || shouldResetForPolishGate ? null : current.polish,
+    editorRefine: shouldResetForReviewGate || shouldResetForPolishGate ? null : current.editorRefine,
     summary: shouldResetForReviewGate || shouldResetForPolishGate ? null : current.summary,
     stateChanges: shouldResetForReviewGate || shouldResetForPolishGate ? [] : current.stateChanges,
     strand: shouldResetForReviewGate || shouldResetForPolishGate ? null : current.strand,
@@ -422,6 +425,7 @@ export async function rollbackGenerationJobStage(
       review: null,
       languageQa: null,
       polish: null,
+      editorRefine: null,
       summary: null,
       stateChanges: [],
       strand: null,
@@ -439,6 +443,7 @@ export async function rollbackGenerationJobStage(
   return updateGenerationJob(env, jobId, {
     status: 'queued',
     polish: null,
+    editorRefine: null,
     summary: null,
     stateChanges: [],
     strand: null,
@@ -499,14 +504,18 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
       return;
     }
 
-    await updateGenerationJob(env, jobId, {
-      currentStep: 'plan',
-      currentBeatIndex: null,
-      currentBeatLabel: '',
-      updatedAt: nowIsoString(),
-    });
+    const hasOutlineOverride = Boolean(runnableJob.request.outlineOverride);
 
-    const outline = runnableJob.request.outlineOverride
+    if (!hasOutlineOverride) {
+      await updateGenerationJob(env, jobId, {
+        currentStep: 'plan',
+        currentBeatIndex: null,
+        currentBeatLabel: '',
+        updatedAt: nowIsoString(),
+      });
+    }
+
+    const outline = hasOutlineOverride
       ? runnableJob.request.outlineOverride
       : (
           await generateChapterOutline(env, {
@@ -563,7 +572,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
     const currentOutline = currentJob.outline;
 
     if (!currentOutline || currentOutline.beats.length === 0) {
-      throw new Error('章节契约没有可执行的 beats');
+      throw new Error('章节契约没有可执行的写作单元');
     }
 
     if (currentJob.totalBeatCount !== currentOutline.beats.length) {
@@ -588,7 +597,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
       const beat = runnableJob.outline.beats[index];
 
       if (!beat) {
-        throw new Error('章节契约中的 beat 缺失，无法继续生成');
+        throw new Error('章节契约中的当前写作单元缺失，无法继续生成');
       }
 
       await updateGenerationJob(env, jobId, {
@@ -712,6 +721,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         review: null,
         languageQa: null,
         polish: null,
+        editorRefine: null,
         summary: null,
         stateChanges: [],
         strand: null,
@@ -845,6 +855,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
           review: null,
           languageQa: null,
           polish: null,
+          editorRefine: null,
           summary: null,
           stateChanges: [],
           strand: null,
@@ -868,6 +879,7 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
         reviewGateReason: '',
         rewriteGuidance: '',
         polish: null,
+        editorRefine: null,
         currentStep: 'polish',
         currentBeatIndex: null,
         currentBeatLabel: '',
@@ -943,6 +955,60 @@ async function executeGenerationJob(env: ServerEnv, jobId: string) {
       await updateGenerationJob(env, jobId, {
         generatedText: polishResponse.content,
         polish: polishResponse.polish,
+        editorRefine: null,
+        currentStep: runnableJob.request.enableEditorRefine ? 'editor_refine' : 'extract',
+        currentBeatIndex: null,
+        currentBeatLabel: '',
+        updatedAt: nowIsoString(),
+      });
+    }
+
+    currentJob = await loadJobOrThrow(env, jobId);
+
+    if (currentJob.request.enableEditorRefine && !currentJob.editorRefine) {
+      const runnableJob = await loadRunnableJob(env, jobId);
+
+      if (!runnableJob) {
+        return;
+      }
+
+      await updateGenerationJob(env, jobId, {
+        currentStep: 'editor_refine',
+        currentBeatIndex: null,
+        currentBeatLabel: '',
+        updatedAt: nowIsoString(),
+      });
+
+      const editorRefineResponse = await editorRefineChapterDraft(env, {
+        projectId: runnableJob.projectId,
+        chapterId: runnableJob.chapterId,
+        chapterTitle: runnableJob.request.chapterTitle,
+        chapterOrder: runnableJob.request.chapterOrder,
+        volumeTitle: runnableJob.request.volumeTitle,
+        previousChapterId: runnableJob.request.previousChapterId,
+        previousChapterTitle: runnableJob.request.previousChapterTitle,
+        bookOutline: runnableJob.request.bookOutline,
+        volumeOutline: runnableJob.request.volumeOutline,
+        previousSummary: runnableJob.request.previousSummary,
+        outline: runnableJob.outline,
+        entitySnapshot: runnableJob.request.entitySnapshot,
+        requiredEntityNames: runnableJob.request.requiredEntityNames,
+        availableCharacterNames: runnableJob.request.availableCharacterNames,
+        content: runnableJob.generatedText,
+        model: runnableJob.request.model,
+        temperature: runnableJob.request.temperature,
+        reasoningEffort: runnableJob.request.reasoningEffort,
+      });
+
+      const afterEditorRefineJob = await loadJobOrThrow(env, jobId);
+
+      if (afterEditorRefineJob.status === 'approved' || afterEditorRefineJob.status === 'discarded') {
+        return;
+      }
+
+      await updateGenerationJob(env, jobId, {
+        generatedText: editorRefineResponse.content,
+        editorRefine: editorRefineResponse.editorRefine,
         currentStep: 'extract',
         currentBeatIndex: null,
         currentBeatLabel: '',

@@ -6,6 +6,10 @@ import { createBookOutline, createInspirationBlueprint, createVolumeOutline, fet
 import { createId } from '@/lib/identity';
 import { normalizeLoreEntity } from '@/lib/lore-entity';
 import { serializeBookOutline, serializeVolumeOutline } from '@/lib/outline-serializer';
+import {
+  resolveBookOutlineWithAiSummary,
+  resolveVolumeOutlineWithAiSummary,
+} from '@/lib/outline-summary-client';
 import { buildModelRequestConfig } from '@/lib/runtime-config';
 import { useForeshadowStore, useLoreStore, useOutlineStore, useProjectStore, useSettingsStore, useVolumeStore } from '@/stores';
 import { useToast } from '@/components/Toast';
@@ -264,13 +268,27 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
       }
 
       setProgressText('正在生成书纲...');
-      const bookOutline = await createBookOutline(settings.serverUrl, {
+      const rawBookOutline = await createBookOutline(settings.serverUrl, {
         projectTitle: blueprint.projectTitle,
         projectDescription: blueprint.projectDescription,
         genre: blueprint.genres,
         hint: blueprint.bookOutlineHint || blueprint.discussionSummary,
         ...buildModelRequestConfig(settings),
       });
+      const summarizedBookResult = await resolveBookOutlineWithAiSummary({
+        serverUrl: settings.serverUrl,
+        modelConfig: buildModelRequestConfig(settings),
+        projectTitle: blueprint.projectTitle,
+        projectDescription: blueprint.projectDescription,
+        genre: blueprint.genres,
+        fields: rawBookOutline,
+      });
+
+      if (summarizedBookResult.usedFallback) {
+        toast(`书纲模型摘要失败，已回退本地摘要：${summarizedBookResult.errorMessage || '未知错误'}`, 'warning');
+      }
+
+      const bookOutline = summarizedBookResult.fields;
       await saveBookOutline(project.id, bookOutline);
 
       await loadVolumes(project.id);
@@ -299,7 +317,7 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
         const volumePlan = volumePlans[index];
         setProgressText(`正在生成第 ${index + 1} 卷卷纲...`);
 
-        const generatedVolumeOutline = await createVolumeOutline(settings.serverUrl, {
+        const rawVolumeOutline = await createVolumeOutline(settings.serverUrl, {
           projectTitle: blueprint.projectTitle,
           projectDescription: blueprint.projectDescription,
           bookOutline: serializedBookOutline,
@@ -309,6 +327,22 @@ export function InspirationDialog({ open, onClose }: InspirationDialogProps) {
           hint: buildVolumeHint(volumePlan, blueprint),
           ...buildModelRequestConfig(settings),
         });
+        const summarizedVolumeResult = await resolveVolumeOutlineWithAiSummary({
+          serverUrl: settings.serverUrl,
+          modelConfig: buildModelRequestConfig(settings),
+          projectTitle: blueprint.projectTitle,
+          projectDescription: blueprint.projectDescription,
+          volumeTitle: volume.title,
+          volumeOrder: index + 1,
+          bookOutlineSummary: bookOutline.summary,
+          fields: rawVolumeOutline,
+        });
+
+        if (summarizedVolumeResult.usedFallback) {
+          toast(`《${volume.title}》卷纲模型摘要失败，已回退本地摘要：${summarizedVolumeResult.errorMessage || '未知错误'}`, 'warning');
+        }
+
+        const generatedVolumeOutline = summarizedVolumeResult.fields;
         await saveVolumeOutline(project.id, volume.id, generatedVolumeOutline);
         const { requiredEntityNames, requiredForeshadowTitles } = collectRequiredNames(generatedVolumeOutline);
         const existingEntityRows = await db.entities.where('projectId').equals(project.id).toArray();

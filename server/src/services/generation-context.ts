@@ -1,6 +1,8 @@
 import type { ServerEnv } from '../config/env.js';
 import type {
   ChapterOutlineDraft,
+  GenerationEntitySnapshot,
+  GenerationForeshadowSnapshot,
   GenerationRelationSnapshot,
   GenerationStructuredRelationshipQueryMode,
   GenerationStructuredRelationshipQueryReason,
@@ -17,9 +19,14 @@ import {
 } from './generation-foreshadow-store.js';
 import { getGenerationDatabase } from './generation-sqlite.js';
 import {
-  buildResourceContinuityBlocks,
+  type ResourceStateRow,
   loadResourceStateRows,
 } from './generation-resource-continuity.js';
+import {
+  dedupeResourceContinuityBlocks,
+  type RuntimeResourceContinuityCandidate,
+  type StructuredResourceContinuityCandidate,
+} from './context-dedup.js';
 import {
   listForeshadowPlans,
   listThreadLedgers,
@@ -30,6 +37,10 @@ import {
 } from './structure-memory-store.js';
 import { listAntagonistAgendas, type AntagonistAgendaRecord } from './antagonist-agenda-store.js';
 import { listPovPermissions, type PovPermissionRecord } from './pov-permission-store.js';
+import {
+  listQuestionPools,
+  type QuestionPoolRecord,
+} from './question-pool-store.js';
 import {
   getResourceContinuityHintTerms,
   listResourceContinuities,
@@ -53,6 +64,8 @@ interface GenerationContextBuildInput {
   preferStoredForeshadows?: boolean;
   lightweightRecallConfig?: LightweightRecallConfig;
   relationSnapshot?: GenerationRelationSnapshot[];
+  entitySnapshot?: GenerationEntitySnapshot[];
+  foreshadowSnapshot?: GenerationForeshadowSnapshot[];
   allowDraftContext?: boolean;
   requiredEntityNames?: string[];
   availableCharacterNames?: string[];
@@ -123,6 +136,37 @@ interface ForeshadowRow {
   sourceChapterTitle: string;
   resolvedChapterTitle: string;
   updatedAt: string;
+}
+
+interface CanonicalEntityRow extends GenerationEntityRow {
+  supplementTexts: string[];
+}
+
+interface CanonicalForeshadowRow extends ForeshadowRow {
+  supplementTexts: string[];
+}
+
+interface CanonicalThreadLedgerCandidate {
+  row: ThreadLedgerRecord;
+  score: number;
+  supplementTexts: string[];
+}
+
+type PovPermissionScopeLevel = 'chapter' | 'milestone' | 'volume';
+
+interface CanonicalPovPermissionEntry {
+  row: PovPermissionRecord;
+  scopeLevel: PovPermissionScopeLevel;
+  mustHide: string[];
+  canHint: string[];
+  forbiddenReveal: string[];
+  supplementTexts: string[];
+}
+
+interface QuestionPoolHintCandidate {
+  row: QuestionPoolRecord;
+  score: number;
+  forced: boolean;
 }
 
 interface VolumeRecapBlockEntry {
@@ -227,6 +271,20 @@ const GENERATION_CONTEXT_LIMITS = {
   entityFieldPreviewMax: 4,
   entityDescriptionMaxChars: 80,
   entityTagPreviewMax: 4,
+  sectionSupplementPreviewMax: 2,
+  availableCharacterBlockMax: 5,
+  threadLedgerBlockMax: 5,
+  threadLedgerFullBlockMax: 2,
+  antagonistAgendaBlockMax: 3,
+  antagonistAgendaFullBlockMax: 2,
+  foreshadowPlanBlockMax: 4,
+  foreshadowPlanFullBlockMax: 3,
+  povPermissionBlockMax: 3,
+  povPermissionFullBlockMax: 2,
+  questionPoolHintBlockMax: 3,
+  questionPoolHintFullBlockMax: 1,
+  resourceContinuityFullBlockMaxDefault: 3,
+  resourceContinuityFullBlockMaxHighPressure: 4,
   memoryRetrievalLimit: 6,
 } as const;
 
@@ -239,13 +297,6 @@ const CHARACTER_STATIC_FIELD_LABELS = [
   ['static_decisionStyle', '决策习惯'],
   ['static_conflictResponse', '冲突反应'],
   ['static_taboos', '底线禁忌'],
-] as const;
-
-const CHARACTER_DYNAMIC_FIELD_LABELS = [
-  ['current_stance', '立场'],
-  ['current_wound', '伤口'],
-  ['current_goal', '目标'],
-  ['current_disguise', '伪装'],
 ] as const;
 
 function buildRelationPairKey(leftName: string, rightName: string) {
@@ -291,10 +342,269 @@ function normalizeText(value: string | null | undefined) {
   return (value ?? '').trim().toLowerCase();
 }
 
+function isEntityDynamicFieldKey(fieldKey: string) {
+  return fieldKey.trim().toLowerCase().startsWith('current_');
+}
+
 function getEntitySearchTerms(row: GenerationEntityRow) {
   return createUniqueList([row.entityName, ...row.aliases])
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function mapEntitySnapshotToRow(snapshot: GenerationEntitySnapshot): GenerationEntityRow | null {
+  const entityName = snapshot.name.trim();
+
+  if (!entityName) {
+    return null;
+  }
+
+  return {
+    entityName,
+    entityType: snapshot.type?.trim() || 'unknown',
+    description: snapshot.description?.trim() || '',
+    fields: Object.fromEntries(
+      Object.entries(snapshot.fields ?? {}).map(([key, value]) => [key, typeof value === 'string' ? value : String(value)]),
+    ),
+    tags: Array.isArray(snapshot.tags) ? snapshot.tags.map((tag) => tag.trim()).filter(Boolean) : [],
+    aliases: Array.isArray(snapshot.aliases) ? snapshot.aliases.map((alias) => alias.trim()).filter(Boolean) : [],
+    pinned: Boolean(snapshot.pinned),
+    draft: Boolean(snapshot.draft),
+    lastSeenChapterTitle: '',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function createCanonicalEntityRow(row: GenerationEntityRow): CanonicalEntityRow {
+  return {
+    ...row,
+    fields: { ...row.fields },
+    tags: [...row.tags],
+    aliases: [...row.aliases],
+    supplementTexts: [],
+  };
+}
+
+function mergeEntityRowsWithSnapshotPriority(
+  storedRows: GenerationEntityRow[],
+  entitySnapshots?: GenerationEntitySnapshot[],
+) {
+  const snapshotRows = (entitySnapshots ?? [])
+    .map((snapshot) => mapEntitySnapshotToRow(snapshot))
+    .filter((row): row is GenerationEntityRow => Boolean(row));
+  const mergedRows = [] as CanonicalEntityRow[];
+  const rowIndex = new Map<string, CanonicalEntityRow>();
+
+  for (const row of [...snapshotRows, ...storedRows]) {
+    const entityNameKey = normalizeText(row.entityName);
+
+    if (!entityNameKey) {
+      continue;
+    }
+
+    const existingRow = rowIndex.get(entityNameKey);
+
+    if (!existingRow) {
+      const canonicalRow = createCanonicalEntityRow(row);
+      rowIndex.set(entityNameKey, canonicalRow);
+      mergedRows.push(canonicalRow);
+      continue;
+    }
+
+    if ((!existingRow.entityType || existingRow.entityType === 'unknown') && row.entityType && row.entityType !== 'unknown') {
+      existingRow.entityType = row.entityType;
+    }
+
+    const contributesAlias = row.aliases.some(
+      (alias) => !existingRow.aliases.some((existingAlias) => normalizeText(existingAlias) === normalizeText(alias)),
+    );
+    const contributesTag = row.tags.some(
+      (tag) => !existingRow.tags.some((existingTag) => normalizeText(existingTag) === normalizeText(tag)),
+    );
+    let contributesStableField = false;
+
+    for (const [key, value] of Object.entries(row.fields)) {
+      const trimmedValue = value.trim();
+
+      if (!trimmedValue || isEntityDynamicFieldKey(key)) {
+        continue;
+      }
+
+      if (!existingRow.fields[key]?.trim()) {
+        existingRow.fields[key] = trimmedValue;
+        contributesStableField = true;
+      }
+    }
+
+    if (!existingRow.description && row.description.trim()) {
+      existingRow.description = row.description.trim();
+    } else if (
+      row.description.trim()
+      && normalizeText(row.description) !== normalizeText(existingRow.description)
+      && (contributesAlias || contributesTag || contributesStableField)
+    ) {
+      pushUniqueSupplementText(existingRow.supplementTexts, row.description);
+    }
+
+    existingRow.aliases = mergeUniqueTextValues(existingRow.aliases, row.aliases);
+    existingRow.tags = mergeUniqueTextValues(existingRow.tags, row.tags);
+
+    if (!existingRow.lastSeenChapterTitle && row.lastSeenChapterTitle.trim()) {
+      existingRow.lastSeenChapterTitle = row.lastSeenChapterTitle.trim();
+    }
+  }
+
+  return mergedRows;
+}
+
+function findChapterOrderById(chapterRows: ChapterMemoryRow[], chapterId?: string | null) {
+  if (!chapterId) {
+    return 0;
+  }
+
+  return chapterRows.find((row) => row.chapterId === chapterId)?.chapterOrder ?? 0;
+}
+
+function findChapterTitleById(chapterRows: ChapterMemoryRow[], chapterId?: string | null) {
+  if (!chapterId) {
+    return '';
+  }
+
+  return chapterRows.find((row) => row.chapterId === chapterId)?.chapterTitle ?? '';
+}
+
+function mapForeshadowSnapshotToRow(input: {
+  snapshot: GenerationForeshadowSnapshot;
+  chapterRows: ChapterMemoryRow[];
+  currentChapterOrder: number | null;
+}): ForeshadowRow | null {
+  const id = input.snapshot.id.trim();
+  const title = input.snapshot.title.trim();
+
+  if (!id && !title) {
+    return null;
+  }
+
+  const sourceChapterOrder = findChapterOrderById(input.chapterRows, input.snapshot.sourceChapterId ?? null);
+  const sourceChapterTitle =
+    input.snapshot.sourceChapterTitle?.trim()
+    || findChapterTitleById(input.chapterRows, input.snapshot.sourceChapterId ?? null);
+  const resolvedChapterTitle =
+    input.snapshot.resolvedChapterTitle?.trim()
+    || findChapterTitleById(input.chapterRows, input.snapshot.resolvedChapterId ?? null);
+  const rowBase = {
+    status: input.snapshot.status,
+    sourceChapterOrder,
+  };
+
+  return {
+    id: id || title,
+    title: title || '未命名伏笔',
+    excerpt: input.snapshot.excerpt.trim(),
+    notes: input.snapshot.notes.trim(),
+    status: input.snapshot.status,
+    lifecycle: deriveGenerationForeshadowLifecycle(rowBase, input.currentChapterOrder),
+    sourceChapterOrder,
+    sourceChapterTitle,
+    resolvedChapterTitle,
+    updatedAt: input.snapshot.updatedAt.trim() || new Date().toISOString(),
+  };
+}
+
+function createCanonicalForeshadowRow(row: ForeshadowRow): CanonicalForeshadowRow {
+  return {
+    ...row,
+    supplementTexts: [],
+  };
+}
+
+function mergeForeshadowRowsWithSnapshotPriority(input: {
+  storedRows: ForeshadowRow[];
+  chapterRows: ChapterMemoryRow[];
+  currentChapterOrder: number | null;
+  foreshadowSnapshots?: GenerationForeshadowSnapshot[];
+}) {
+  const snapshotRows = (input.foreshadowSnapshots ?? [])
+    .map((snapshot) =>
+      mapForeshadowSnapshotToRow({
+        snapshot,
+        chapterRows: input.chapterRows,
+        currentChapterOrder: input.currentChapterOrder,
+      }),
+    )
+    .filter((row): row is ForeshadowRow => Boolean(row));
+  const mergedRows = [] as CanonicalForeshadowRow[];
+  const rowIndex = new Map<string, CanonicalForeshadowRow>();
+
+  for (const row of [...snapshotRows, ...input.storedRows]) {
+    const idKey = normalizeText(row.id);
+    const titleKey = normalizeText(row.title);
+    const canonicalKey = titleKey || idKey;
+
+    if (!canonicalKey) {
+      continue;
+    }
+
+    const existingRow =
+      rowIndex.get(canonicalKey)
+      ?? (idKey ? rowIndex.get(idKey) : null)
+      ?? (titleKey ? rowIndex.get(titleKey) : null)
+      ?? null;
+
+    if (!existingRow) {
+      const canonicalRow = createCanonicalForeshadowRow(row);
+      rowIndex.set(canonicalKey, canonicalRow);
+      if (idKey) {
+        rowIndex.set(idKey, canonicalRow);
+      }
+      if (titleKey) {
+        rowIndex.set(titleKey, canonicalRow);
+      }
+      mergedRows.push(canonicalRow);
+      continue;
+    }
+
+    if (!existingRow.excerpt && row.excerpt.trim()) {
+      existingRow.excerpt = row.excerpt.trim();
+    }
+
+    if (row.notes.trim()) {
+      if (!existingRow.notes && !existingRow.excerpt) {
+        existingRow.notes = row.notes.trim();
+      } else if (
+        normalizeText(row.notes) !== normalizeText(existingRow.notes) &&
+        normalizeText(row.notes) !== normalizeText(existingRow.excerpt)
+      ) {
+        pushUniqueSupplementText(existingRow.supplementTexts, row.notes);
+      }
+    }
+
+    if (!existingRow.sourceChapterTitle && row.sourceChapterTitle.trim()) {
+      existingRow.sourceChapterTitle = row.sourceChapterTitle.trim();
+    }
+
+    if (!existingRow.resolvedChapterTitle && row.resolvedChapterTitle.trim()) {
+      existingRow.resolvedChapterTitle = row.resolvedChapterTitle.trim();
+    }
+
+    if (existingRow.sourceChapterOrder <= 0 && row.sourceChapterOrder > 0) {
+      existingRow.sourceChapterOrder = row.sourceChapterOrder;
+    }
+
+    if (!existingRow.id && row.id.trim()) {
+      existingRow.id = row.id.trim();
+    }
+
+    rowIndex.set(canonicalKey, existingRow);
+    if (idKey) {
+      rowIndex.set(idKey, existingRow);
+    }
+    if (titleKey) {
+      rowIndex.set(titleKey, existingRow);
+    }
+  }
+
+  return mergedRows;
 }
 
 function countEntityTextHits(text: string, row: GenerationEntityRow) {
@@ -507,6 +817,47 @@ function createUniqueList(values: string[]) {
   );
 }
 
+function mergeUniqueTextValues(primary: string[], supplement: string[]) {
+  const merged = [...primary];
+  const seen = new Set(primary.map((item) => normalizeText(item)).filter(Boolean));
+
+  for (const item of supplement) {
+    const trimmed = item.trim();
+    const normalized = normalizeText(trimmed);
+
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    merged.push(trimmed);
+  }
+
+  return merged;
+}
+
+function pushUniqueSupplementText(target: string[], value: string) {
+  const trimmed = value.trim();
+  const normalized = normalizeText(trimmed);
+
+  if (!normalized) {
+    return;
+  }
+
+  if (target.some((item) => normalizeText(item) === normalized)) {
+    return;
+  }
+
+  target.push(trimmed);
+}
+
+function previewSupplementTexts(values: string[], maxLength: number) {
+  return values
+    .map((value) => truncateText(value, maxLength))
+    .slice(0, GENERATION_CONTEXT_LIMITS.sectionSupplementPreviewMax)
+    .join('；');
+}
+
 function buildFocusSignalTexts(input: GenerationContextBuildInput) {
   return {
     hard: [
@@ -514,14 +865,40 @@ function buildFocusSignalTexts(input: GenerationContextBuildInput) {
       input.outline?.goal,
       input.outline?.obstacle,
       input.outline?.cost,
+      input.outline?.chapterFunction,
+      input.outline?.chapterBoundary,
+      input.outline?.revealCeiling,
+      input.outline?.openingState,
+      input.outline?.closingState,
+      input.outline?.focusCharacter,
+      input.outline?.mainPlot,
+      input.outline?.subPlot,
+      input.outline?.coreScene,
+      input.outline?.infoBudget,
+      input.outline?.powerShift,
+      input.outline?.personalConflict,
+      input.outline?.emotionalOutcome,
+      input.outline?.chapterHook,
+      ...(input.outline?.mustAppearCharacters ?? []),
+      ...(input.outline?.sceneAnchors ?? []),
+      ...((input.outline?.foreshadowRefs ?? []).flatMap((item) => [item.foreshadowId, item.foreshadowTitle ?? ''])),
       ...(input.outline?.beats ?? []),
+      ...((input.outline?.beatDrafts ?? []).flatMap((beat) => [
+        beat.beatTitle,
+        beat.scene,
+        beat.progress,
+        beat.result,
+        ...(beat.actors ?? []),
+        ...(beat.anchors ?? []),
+        ...(beat.entityRefs ?? []),
+        ...((beat.foreshadowRefs ?? []).flatMap((item) => [item.foreshadowId, item.foreshadowTitle ?? ''])),
+      ])),
       ...(input.outline?.immutableFacts ?? []),
     ].filter(Boolean) as string[],
     soft: [
       input.previousChapterTitle,
       input.previousSummary,
       input.worldState,
-      ...(input.availableCharacterNames ?? []),
     ].filter(Boolean) as string[],
   };
 }
@@ -1125,11 +1502,127 @@ function buildCurrentVolumeSnapshotBlocks(
   ];
 }
 
-function buildForeshadowBlocks(rows: ForeshadowRow[], requiredTitles: string[] = []) {
+function buildQuestionPoolHintBlocks(input: {
+  rows: QuestionPoolRecord[];
+  selectedThreadLedgerRows: ThreadLedgerRecord[];
+  requiredForeshadowTitles?: string[];
+  chapterTitle?: string;
+  outline?: ChapterOutlineDraft | null;
+}) {
+  const normalizedThreadSet = new Set(
+    input.selectedThreadLedgerRows
+      .map((row) => normalizeText(row.name))
+      .filter(Boolean),
+  );
+  const normalizedForeshadowSet = new Set(
+    (input.requiredForeshadowTitles ?? [])
+      .map((item) => normalizeText(item))
+      .filter(Boolean),
+  );
+  const chapterHintHaystack = [
+    input.chapterTitle ?? '',
+    input.outline?.goal ?? '',
+    input.outline?.obstacle ?? '',
+    input.outline?.cost ?? '',
+    ...(input.outline?.beats ?? []),
+    ...(input.outline?.immutableFacts ?? []),
+  ]
+    .join('\n')
+    .toLowerCase();
+
+  const candidates = input.rows
+    .filter((row) => row.status !== 'answered')
+    .map((row): QuestionPoolHintCandidate => {
+      const normalizedQuestion = normalizeText(row.question);
+      const normalizedClue = normalizeText(row.currentClue);
+      const normalizedThread = normalizeText(row.belongsToThreadName);
+      const clueHit =
+        (normalizedQuestion && chapterHintHaystack.includes(normalizedQuestion)) ||
+        (normalizedClue && chapterHintHaystack.includes(normalizedClue));
+      const threadHit = normalizedThread ? normalizedThreadSet.has(normalizedThread) : false;
+      const foreshadowHit = Array.from(normalizedForeshadowSet).some((item) =>
+        normalizedQuestion.includes(item) || normalizedClue.includes(item),
+      );
+      const forced = clueHit || threadHit || foreshadowHit;
+
+      return {
+        row,
+        forced,
+        score:
+          (row.status === 'open' ? 20 : 10) +
+          (forced ? 120 : 0) +
+          (clueHit ? 35 : 0) +
+          (threadHit ? 40 : 0) +
+          (foreshadowHit ? 30 : 0) +
+          (row.currentClue ? 15 : 0) +
+          (row.finalAnswerSummary ? 10 : 0),
+      };
+    })
+    .filter((item) => item.forced || item.score >= 70)
+    .sort((left, right) => {
+      if (left.forced !== right.forced) {
+        return left.forced ? -1 : 1;
+      }
+
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
+      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+    })
+    .slice(0, GENERATION_CONTEXT_LIMITS.questionPoolHintBlockMax);
+
+  return candidates.map((candidate, index) => {
+    const shouldRenderFull = index < GENERATION_CONTEXT_LIMITS.questionPoolHintFullBlockMax;
+
+    if (!shouldRenderFull) {
+      const compactParts = [];
+
+      if (candidate.row.currentClue) {
+        compactParts.push(`当前线索：${truncateText(candidate.row.currentClue, 28)}`);
+      }
+
+      if (candidate.row.expectedRevealWindow) {
+        compactParts.push(`窗口：${truncateText(candidate.row.expectedRevealWindow, 18)}`);
+      }
+
+      return `- 未解问题提醒：${candidate.row.question}${compactParts.length > 0 ? `（${compactParts.join('；')}）` : ''}`;
+    }
+
+    const lines = [`- 未解问题提醒`, `问题：${truncateText(candidate.row.question, 120)}`];
+
+    if (candidate.row.currentClue) {
+      lines.push(`当前线索：${truncateText(candidate.row.currentClue, 120)}`);
+    }
+
+    if (candidate.row.expectedRevealWindow) {
+      lines.push(`预计揭晓窗口：${truncateText(candidate.row.expectedRevealWindow, 80)}`);
+    }
+
+    if (candidate.row.finalAnswerSummary) {
+      lines.push(`作者预设答案：${truncateText(candidate.row.finalAnswerSummary, 120)}`);
+    }
+
+    return lines.join('\n');
+  });
+}
+
+function buildForeshadowBlocks(rows: CanonicalForeshadowRow[], requiredTitles: string[] = []) {
   const normalizedRequiredSet = new Set(requiredTitles.map((item) => normalizeText(item)).filter(Boolean));
+  const enforceRequiredScope = normalizedRequiredSet.size > 0;
 
   return rows
-    .filter((row) => row.lifecycle === 'active')
+    .filter((row) => {
+      if (row.lifecycle !== 'active') {
+        return false;
+      }
+
+      if (!enforceRequiredScope) {
+        return true;
+      }
+
+      return normalizedRequiredSet.has(normalizeText(row.title));
+    })
     .sort((left, right) => {
       const leftRequired = normalizedRequiredSet.has(normalizeText(left.title));
       const rightRequired = normalizedRequiredSet.has(normalizeText(right.title));
@@ -1138,7 +1631,7 @@ function buildForeshadowBlocks(rows: ForeshadowRow[], requiredTitles: string[] =
         return leftRequired ? -1 : 1;
       }
 
-      return right.updatedAt.localeCompare(left.updatedAt);
+      return left.updatedAt.localeCompare(right.updatedAt);
     })
     .slice(0, 8)
     .map((row) => {
@@ -1147,6 +1640,10 @@ function buildForeshadowBlocks(rows: ForeshadowRow[], requiredTitles: string[] =
       const statusLabel =
         row.status === 'overdue' ? '超期' : row.status === 'activated' ? '已激活' : '已埋设';
       const lines = [`- ${row.title}`, `状态：激活 / ${statusLabel}`, `来源：${sourceLabel}`, `摘要：${summary}`];
+
+      if (row.supplementTexts.length > 0) {
+        lines.push(`补充：${previewSupplementTexts(row.supplementTexts, 60)}`);
+      }
 
       if (row.resolvedChapterTitle) {
         lines.push(`预期回收：${row.resolvedChapterTitle}`);
@@ -1158,77 +1655,498 @@ function buildForeshadowBlocks(rows: ForeshadowRow[], requiredTitles: string[] =
 
 function buildForeshadowPlanBlocks(input: {
   plans: ForeshadowPlanRecord[];
-  activeForeshadowRows: ForeshadowRow[];
+  activeForeshadowRows: CanonicalForeshadowRow[];
   requiredForeshadowTitles?: string[];
 }) {
-  const activeForeshadowMap = new Map(
-    input.activeForeshadowRows
-      .filter((row) => row.lifecycle === 'active')
-      .map((row) => [row.id, row] as const),
-  );
+  const activeForeshadowById = new Map<string, CanonicalForeshadowRow>();
+  const activeForeshadowByTitle = new Map<string, CanonicalForeshadowRow>();
+
+  for (const row of input.activeForeshadowRows.filter((candidate) => candidate.lifecycle === 'active')) {
+    const idKey = normalizeText(row.id);
+    const titleKey = normalizeText(row.title);
+
+    if (idKey && !activeForeshadowById.has(idKey)) {
+      activeForeshadowById.set(idKey, row);
+    }
+
+    if (titleKey && !activeForeshadowByTitle.has(titleKey)) {
+      activeForeshadowByTitle.set(titleKey, row);
+    }
+  }
+
   const requiredTitleSet = new Set(
     (input.requiredForeshadowTitles ?? [])
       .map((item) => normalizeText(item))
       .filter(Boolean),
   );
+  const resolveMatchedForeshadow = (plan: ForeshadowPlanRecord) =>
+    activeForeshadowById.get(normalizeText(plan.foreshadowId))
+    ?? activeForeshadowByTitle.get(normalizeText(plan.foreshadowTitle))
+    ?? null;
 
-  return input.plans
-    .filter((plan) => activeForeshadowMap.has(plan.foreshadowId) || requiredTitleSet.has(normalizeText(plan.foreshadowTitle)))
+  const selectedPlans = input.plans
+    .filter((plan) => {
+      const matchedForeshadow = resolveMatchedForeshadow(plan);
+      const normalizedTitle = normalizeText(plan.foreshadowTitle);
+      const isRequired =
+        requiredTitleSet.has(normalizedTitle)
+        || (matchedForeshadow ? requiredTitleSet.has(normalizeText(matchedForeshadow.title)) : false);
+
+      return (
+        Boolean(matchedForeshadow)
+        || isRequired
+        || plan.importance === 'major'
+      );
+    })
     .sort((left, right) => {
+      const leftMatchedRow = resolveMatchedForeshadow(left);
+      const rightMatchedRow = resolveMatchedForeshadow(right);
+      const leftMatched = Boolean(leftMatchedRow);
+      const rightMatched = Boolean(rightMatchedRow);
+      const leftRequired =
+        requiredTitleSet.has(normalizeText(left.foreshadowTitle))
+        || (leftMatchedRow ? requiredTitleSet.has(normalizeText(leftMatchedRow.title)) : false);
+      const rightRequired =
+        requiredTitleSet.has(normalizeText(right.foreshadowTitle))
+        || (rightMatchedRow ? requiredTitleSet.has(normalizeText(rightMatchedRow.title)) : false);
+
+      if (leftMatched !== rightMatched) {
+        return leftMatched ? -1 : 1;
+      }
+
+      if (leftRequired !== rightRequired) {
+        return leftRequired ? -1 : 1;
+      }
+
       if (left.importance !== right.importance) {
         return left.importance === 'major' ? -1 : 1;
       }
 
-      return right.updatedAt.localeCompare(left.updatedAt);
+      return left.updatedAt.localeCompare(right.updatedAt);
     })
-    .slice(0, 2)
-    .map((plan) => {
-      const matchedForeshadow = activeForeshadowMap.get(plan.foreshadowId) ?? null;
-      const lines = [
-        `- ${plan.foreshadowTitle}（${plan.type || '未分类'} / ${plan.importance === 'major' ? '核心伏笔' : '次级伏笔'}）`,
-      ];
+    .slice(0, GENERATION_CONTEXT_LIMITS.foreshadowPlanBlockMax);
 
-      if (matchedForeshadow) {
-        const statusLabel =
-          matchedForeshadow.status === 'overdue'
-            ? '超期'
-            : matchedForeshadow.status === 'activated'
-              ? '已激活'
-              : matchedForeshadow.status === 'planted'
-                ? '已埋设'
-                : '已回收';
-        lines.push(`当前状态：${statusLabel}`);
+  return selectedPlans.map((plan, index) => {
+    const matchedForeshadow = resolveMatchedForeshadow(plan);
+    const resolvedForeshadowTitle = matchedForeshadow?.title?.trim() || plan.foreshadowTitle;
+    const isRequired =
+      requiredTitleSet.has(normalizeText(plan.foreshadowTitle))
+      || (matchedForeshadow ? requiredTitleSet.has(normalizeText(matchedForeshadow.title)) : false);
+    const shouldRenderFull =
+      index < GENERATION_CONTEXT_LIMITS.foreshadowPlanFullBlockMax || isRequired || plan.importance === 'major';
+    const statusLabel =
+      matchedForeshadow
+        ? matchedForeshadow.status === 'overdue'
+          ? '超期'
+          : matchedForeshadow.status === 'activated'
+            ? '已激活'
+            : matchedForeshadow.status === 'planted'
+              ? '已埋设'
+              : '已回收'
+        : '未挂事实';
+
+    if (!shouldRenderFull) {
+      const compactParts = [`当前状态：${statusLabel}`];
+
+      if (plan.activationWindow) {
+        compactParts.push(`激活窗口：${truncateText(plan.activationWindow, 18)}`);
       }
 
-      if (typeof plan.plannedActivateVolume === 'number' && plan.plannedActivateVolume > 0) {
-        lines.push(`计划激活：第${plan.plannedActivateVolume}卷`);
+      if (plan.resolveWindow) {
+        compactParts.push(`回收窗口：${truncateText(plan.resolveWindow, 18)}`);
       }
 
       if (typeof plan.plannedResolveVolume === 'number' && plan.plannedResolveVolume > 0) {
-        lines.push(`计划回收：第${plan.plannedResolveVolume}卷`);
+        compactParts.push(`计划回收：第${plan.plannedResolveVolume}卷`);
+      } else if (typeof plan.plannedActivateVolume === 'number' && plan.plannedActivateVolume > 0) {
+        compactParts.push(`计划激活：第${plan.plannedActivateVolume}卷`);
       }
 
       if (plan.resolveCondition) {
-        lines.push(`回收条件：${truncateText(plan.resolveCondition, 120)}`);
+        compactParts.push(`回收条件：${truncateText(plan.resolveCondition, 30)}`);
+      } else if (plan.activationCondition) {
+        compactParts.push(`激活条件：${truncateText(plan.activationCondition, 30)}`);
       }
 
-      if (plan.payoffEffect) {
-        lines.push(`回收效果：${truncateText(plan.payoffEffect, 120)}`);
-      }
+      return `- ${resolvedForeshadowTitle}（${plan.type || '未分类'} / ${plan.importance === 'major' ? '核心伏笔' : '次级伏笔'}）：${compactParts.join('；')}`;
+    }
 
-      if (plan.activationCondition) {
-        lines.push(`激活条件：${truncateText(plan.activationCondition, 100)}`);
-      }
+    const lines = [
+      `- ${resolvedForeshadowTitle}（${plan.type || '未分类'} / ${plan.importance === 'major' ? '核心伏笔' : '次级伏笔'}）`,
+    ];
 
-      return lines.join('\n');
-    });
+    if (matchedForeshadow) {
+      lines.push(`当前状态：${statusLabel}`);
+    }
+
+    if (plan.activationWindow) {
+      lines.push(`激活窗口：${truncateText(plan.activationWindow, 100)}`);
+    }
+
+    if (plan.resolveWindow) {
+      lines.push(`回收窗口：${truncateText(plan.resolveWindow, 100)}`);
+    }
+
+    if (typeof plan.plannedActivateVolume === 'number' && plan.plannedActivateVolume > 0) {
+      lines.push(`计划激活：第${plan.plannedActivateVolume}卷`);
+    }
+
+    if (typeof plan.plannedResolveVolume === 'number' && plan.plannedResolveVolume > 0) {
+      lines.push(`计划回收：第${plan.plannedResolveVolume}卷`);
+    }
+
+    if (plan.resolveCondition) {
+      lines.push(`回收条件：${truncateText(plan.resolveCondition, 120)}`);
+    }
+
+    if (plan.payoffEffect) {
+      lines.push(`回收效果：${truncateText(plan.payoffEffect, 120)}`);
+    }
+
+    if (plan.activationCondition) {
+      lines.push(`激活条件：${truncateText(plan.activationCondition, 100)}`);
+    }
+
+    return lines.join('\n');
+  });
 }
 
 function countNormalizedMatches(values: string[], normalizedSet: Set<string>) {
   return values.reduce((count, value) => count + (normalizedSet.has(normalizeText(value)) ? 1 : 0), 0);
 }
 
-function buildThreadLedgerBlocks(input: {
+function buildThreadLedgerConflictKey(row: ThreadLedgerRecord) {
+  return normalizeText(row.name) || normalizeText(row.coreQuestion) || row.id;
+}
+
+function cloneThreadLedgerRecord(row: ThreadLedgerRecord): ThreadLedgerRecord {
+  return {
+    ...row,
+    relatedCharacterIds: [...row.relatedCharacterIds],
+    relatedCharacterNames: [...row.relatedCharacterNames],
+    relatedForeshadowIds: [...row.relatedForeshadowIds],
+    relatedForeshadowTitles: [...row.relatedForeshadowTitles],
+  };
+}
+
+function mergeThreadLedgerCandidateField(input: {
+  target: CanonicalThreadLedgerCandidate;
+  value: string;
+  currentValue: string;
+  label: string;
+  assign: (value: string) => void;
+}) {
+  const trimmedValue = input.value.trim();
+
+  if (!trimmedValue) {
+    return;
+  }
+
+  if (!input.currentValue.trim()) {
+    input.assign(trimmedValue);
+    return;
+  }
+
+  if (normalizeText(trimmedValue) !== normalizeText(input.currentValue)) {
+    pushUniqueSupplementText(input.target.supplementTexts, `${input.label}：${trimmedValue}`);
+  }
+}
+
+function dedupeThreadLedgerCandidates(candidates: Array<{ row: ThreadLedgerRecord; score: number }>) {
+  const canonicalCandidates: CanonicalThreadLedgerCandidate[] = [];
+  const candidateIndex = new Map<string, CanonicalThreadLedgerCandidate>();
+
+  for (const candidate of candidates) {
+    const conflictKey = buildThreadLedgerConflictKey(candidate.row);
+
+    if (!conflictKey) {
+      continue;
+    }
+
+    const existing = candidateIndex.get(conflictKey);
+
+    if (!existing) {
+      const canonicalCandidate: CanonicalThreadLedgerCandidate = {
+        row: cloneThreadLedgerRecord(candidate.row),
+        score: candidate.score,
+        supplementTexts: [],
+      };
+      canonicalCandidates.push(canonicalCandidate);
+      candidateIndex.set(conflictKey, canonicalCandidate);
+      continue;
+    }
+
+    existing.row.relatedCharacterIds = mergeUniqueTextValues(existing.row.relatedCharacterIds, candidate.row.relatedCharacterIds);
+    existing.row.relatedCharacterNames = mergeUniqueTextValues(existing.row.relatedCharacterNames, candidate.row.relatedCharacterNames);
+    existing.row.relatedForeshadowIds = mergeUniqueTextValues(existing.row.relatedForeshadowIds, candidate.row.relatedForeshadowIds);
+    existing.row.relatedForeshadowTitles = mergeUniqueTextValues(existing.row.relatedForeshadowTitles, candidate.row.relatedForeshadowTitles);
+
+    if (!existing.row.type.trim() && candidate.row.type.trim()) {
+      existing.row.type = candidate.row.type.trim();
+    }
+
+    mergeThreadLedgerCandidateField({
+      target: existing,
+      value: candidate.row.coreQuestion,
+      currentValue: existing.row.coreQuestion,
+      label: '问题补充',
+      assign: (value) => {
+        existing.row.coreQuestion = value;
+      },
+    });
+    mergeThreadLedgerCandidateField({
+      target: existing,
+      value: candidate.row.currentPhase,
+      currentValue: existing.row.currentPhase,
+      label: '阶段补充',
+      assign: (value) => {
+        existing.row.currentPhase = value;
+      },
+    });
+    mergeThreadLedgerCandidateField({
+      target: existing,
+      value: candidate.row.nextTrigger,
+      currentValue: existing.row.nextTrigger,
+      label: '触发补充',
+      assign: (value) => {
+        existing.row.nextTrigger = value;
+      },
+    });
+    mergeThreadLedgerCandidateField({
+      target: existing,
+      value: candidate.row.blockedBy,
+      currentValue: existing.row.blockedBy,
+      label: '卡点补充',
+      assign: (value) => {
+        existing.row.blockedBy = value;
+      },
+    });
+
+    if (!existing.row.lastProgressAt.trim() && candidate.row.lastProgressAt.trim()) {
+      existing.row.lastProgressAt = candidate.row.lastProgressAt.trim();
+    }
+
+    if (!existing.row.lastProgressChapterTitle.trim() && candidate.row.lastProgressChapterTitle.trim()) {
+      existing.row.lastProgressChapterTitle = candidate.row.lastProgressChapterTitle.trim();
+    }
+
+    if (existing.row.lastProgressChapterOrder === null && candidate.row.lastProgressChapterOrder !== null) {
+      existing.row.lastProgressChapterOrder = candidate.row.lastProgressChapterOrder;
+    }
+
+    if (existing.row.plannedResolveVolume === null && candidate.row.plannedResolveVolume !== null) {
+      existing.row.plannedResolveVolume = candidate.row.plannedResolveVolume;
+    }
+  }
+
+  return canonicalCandidates;
+}
+
+function buildPovPermissionConflictKey(row: PovPermissionRecord) {
+  return row.povCharacterId?.trim() || normalizeText(row.povCharacterName) || row.id;
+}
+
+function formatPovPermissionScopeLabel(row: PovPermissionRecord, scopeLevel: PovPermissionScopeLevel) {
+  if (scopeLevel === 'chapter') {
+    return row.chapterTitle ? `章节 ${row.chapterTitle}` : '章节限制';
+  }
+
+  if (scopeLevel === 'milestone') {
+    const milestoneLabel =
+      typeof row.milestoneIndex === 'number' && Number.isFinite(row.milestoneIndex)
+        ? `里程碑 ${row.milestoneIndex}`
+        : '里程碑限制';
+    return row.volumeTitle ? `${row.volumeTitle} / ${milestoneLabel}` : milestoneLabel;
+  }
+
+  return row.volumeTitle || '卷级限制';
+}
+
+function resolvePovPermissionScopeLevel(input: {
+  row: PovPermissionRecord;
+  volumeTitle?: string;
+  chapterId?: string;
+  milestoneIndex?: number | null;
+}): PovPermissionScopeLevel | null {
+  if (input.chapterId && input.row.chapterId === input.chapterId) {
+    return 'chapter';
+  }
+
+  const normalizedVolumeKey = normalizeText(input.volumeTitle);
+
+  if (!normalizedVolumeKey || normalizeText(input.row.volumeTitle) !== normalizedVolumeKey) {
+    return null;
+  }
+
+  if (
+    typeof input.milestoneIndex === 'number' &&
+    Number.isFinite(input.milestoneIndex) &&
+    !input.row.chapterId &&
+    input.row.milestoneIndex === Math.max(0, Math.trunc(input.milestoneIndex))
+  ) {
+    return 'milestone';
+  }
+
+  if (!input.row.chapterId && input.row.milestoneIndex === null) {
+    return 'volume';
+  }
+
+  return null;
+}
+
+function mergePovPermissionFieldWithSupplement(input: {
+  currentValues: string[];
+  nextValues: string[];
+  label: string;
+}) {
+  const addedValues = input.nextValues.filter((value) =>
+    !input.currentValues.some((item) => normalizeText(item) === normalizeText(value)),
+  );
+
+  return {
+    mergedValues: mergeUniqueTextValues(input.currentValues, input.nextValues),
+    addedValues,
+    label: input.label,
+  };
+}
+
+function buildPovPermissionSupplementText(input: {
+  row: PovPermissionRecord;
+  scopeLevel: PovPermissionScopeLevel;
+  addedMustHide: string[];
+  addedCanHint: string[];
+  addedForbiddenReveal: string[];
+}) {
+  const parts: string[] = [];
+
+  if (input.addedMustHide.length > 0) {
+    parts.push(`禁止透露：${input.addedMustHide.join('、')}`);
+  }
+
+  if (input.addedCanHint.length > 0) {
+    parts.push(`允许暗示：${input.addedCanHint.join('、')}`);
+  }
+
+  if (input.addedForbiddenReveal.length > 0) {
+    parts.push(`禁止揭晓：${input.addedForbiddenReveal.join('、')}`);
+  }
+
+  if (parts.length === 0) {
+    return '';
+  }
+
+  return `${formatPovPermissionScopeLabel(input.row, input.scopeLevel)}补充：${parts.join('；')}`;
+}
+
+function buildCanonicalPovPermissionEntries(input: {
+  rows: PovPermissionRecord[];
+  volumeTitle?: string;
+  chapterId?: string;
+  milestoneIndex?: number | null;
+}) {
+  const scopePriority = (scopeLevel: PovPermissionScopeLevel) =>
+    scopeLevel === 'chapter' ? 0 : scopeLevel === 'milestone' ? 1 : 2;
+  const relevantRows = input.rows
+    .map((row) => ({
+      row,
+      scopeLevel: resolvePovPermissionScopeLevel({
+        row,
+        volumeTitle: input.volumeTitle,
+        chapterId: input.chapterId,
+        milestoneIndex: input.milestoneIndex,
+      }),
+    }))
+    .filter((item): item is { row: PovPermissionRecord; scopeLevel: PovPermissionScopeLevel } => item.scopeLevel !== null)
+    .sort((left, right) => {
+      const leftPriority = scopePriority(left.scopeLevel);
+      const rightPriority = scopePriority(right.scopeLevel);
+
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+
+      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+    });
+  const canonicalEntries: CanonicalPovPermissionEntry[] = [];
+  const entryIndex = new Map<string, CanonicalPovPermissionEntry>();
+
+  for (const item of relevantRows) {
+    const conflictKey = buildPovPermissionConflictKey(item.row);
+
+    if (!conflictKey) {
+      continue;
+    }
+
+    const existing = entryIndex.get(conflictKey);
+
+    if (!existing) {
+      const canonicalEntry: CanonicalPovPermissionEntry = {
+        row: {
+          ...item.row,
+          readerKnows: [...item.row.readerKnows],
+          protagonistKnows: [...item.row.protagonistKnows],
+          antagonistKnows: [...item.row.antagonistKnows],
+          mustHide: [...item.row.mustHide],
+          canHint: [...item.row.canHint],
+          forbiddenReveal: [...item.row.forbiddenReveal],
+        },
+        scopeLevel: item.scopeLevel,
+        mustHide: [...item.row.mustHide],
+        canHint: [...item.row.canHint],
+        forbiddenReveal: [...item.row.forbiddenReveal],
+        supplementTexts: [],
+      };
+      canonicalEntries.push(canonicalEntry);
+      entryIndex.set(conflictKey, canonicalEntry);
+      continue;
+    }
+
+    const mustHideMerge = mergePovPermissionFieldWithSupplement({
+      currentValues: existing.mustHide,
+      nextValues: item.row.mustHide,
+      label: '禁止透露',
+    });
+    const canHintMerge = mergePovPermissionFieldWithSupplement({
+      currentValues: existing.canHint,
+      nextValues: item.row.canHint,
+      label: '允许暗示',
+    });
+    const forbiddenRevealMerge = mergePovPermissionFieldWithSupplement({
+      currentValues: existing.forbiddenReveal,
+      nextValues: item.row.forbiddenReveal,
+      label: '本单元禁止揭晓',
+    });
+
+    existing.mustHide = mustHideMerge.mergedValues;
+    existing.canHint = canHintMerge.mergedValues;
+    existing.forbiddenReveal = forbiddenRevealMerge.mergedValues;
+
+    const supplementText = buildPovPermissionSupplementText({
+      row: item.row,
+      scopeLevel: item.scopeLevel,
+      addedMustHide: mustHideMerge.addedValues,
+      addedCanHint: canHintMerge.addedValues,
+      addedForbiddenReveal: forbiddenRevealMerge.addedValues,
+    });
+
+    if (supplementText) {
+      pushUniqueSupplementText(existing.supplementTexts, supplementText);
+    }
+  }
+
+  return canonicalEntries.sort((left, right) => {
+    const leftPriority = scopePriority(left.scopeLevel);
+    const rightPriority = scopePriority(right.scopeLevel);
+
+    if (leftPriority !== rightPriority) {
+      return leftPriority - rightPriority;
+    }
+
+    return left.row.povCharacterName.localeCompare(right.row.povCharacterName, 'zh-CN');
+  });
+}
+
+function selectThreadLedgerCandidates(input: {
   rows: ThreadLedgerRecord[];
   focusEntityNames: string[];
   requiredEntityNames?: string[];
@@ -1262,8 +2180,8 @@ function buildThreadLedgerBlocks(input: {
     .join('\n')
     .toLowerCase();
 
-  return input.rows
-    .filter((row) => row.status !== 'resolved' && row.audienceHeat >= 3)
+  const selectedThreads = dedupeThreadLedgerCandidates(
+    input.rows
     .map((row) => {
       const relatedCharacterMatchCount = countNormalizedMatches(row.relatedCharacterNames, normalizedCharacterSet);
       const relatedForeshadowMatchCount = countNormalizedMatches(row.relatedForeshadowTitles, normalizedForeshadowSet);
@@ -1278,6 +2196,16 @@ function buildThreadLedgerBlocks(input: {
       const chapterHintHit =
         (normalizedThreadName ? chapterHintHaystack.includes(normalizedThreadName) : false) ||
         (normalizedCoreQuestion ? chapterHintHaystack.includes(normalizedCoreQuestion) : false);
+      const hasDirectSignal =
+        chapterHintHit ||
+        relatedForeshadowMatchCount > 0 ||
+        relatedCharacterMatchCount >= 2;
+      const passesHeatGate =
+        row.status !== 'resolved' && (
+          row.status === 'active'
+            ? row.audienceHeat >= 3 || (row.audienceHeat >= 2 && hasDirectSignal)
+            : row.audienceHeat >= 4 || (row.audienceHeat >= 3 && hasDirectSignal)
+        );
       const score =
         (row.status === 'active' ? 120 : 50) +
         row.audienceHeat * 20 +
@@ -1289,8 +2217,10 @@ function buildThreadLedgerBlocks(input: {
       return {
         row,
         score,
+        passesHeatGate,
       };
     })
+    .filter((item) => item.passesHeatGate)
     .sort((left, right) => {
       if (left.score !== right.score) {
         return right.score - left.score;
@@ -1306,9 +2236,35 @@ function buildThreadLedgerBlocks(input: {
 
       return right.row.updatedAt.localeCompare(left.row.updatedAt);
     })
-    .slice(0, 2)
-    .map(({ row }) => {
+  )
+    .slice(0, GENERATION_CONTEXT_LIMITS.threadLedgerBlockMax);
+
+  return selectedThreads;
+}
+
+function buildThreadLedgerBlocks(
+  selectedThreads: CanonicalThreadLedgerCandidate[],
+) {
+
+  return selectedThreads.map(({ row, supplementTexts }, index) => {
       const statusLabel = row.status === 'dormant' ? '休眠' : '活跃';
+
+      if (index >= GENERATION_CONTEXT_LIMITS.threadLedgerFullBlockMax) {
+        const compactParts = [`当前阶段：${truncateText(row.currentPhase || row.coreQuestion || '暂无阶段说明', 42)}`];
+
+        if (row.nextTrigger) {
+          compactParts.push(`下一触发：${truncateText(row.nextTrigger, 28)}`);
+        } else if (row.blockedBy) {
+          compactParts.push(`当前卡点：${truncateText(row.blockedBy, 28)}`);
+        }
+
+        if (supplementTexts.length > 0) {
+          compactParts.push(`补充：${previewSupplementTexts(supplementTexts, 24)}`);
+        }
+
+        return `- ${row.name}（${row.type || '未分类'} / ${statusLabel} / 热度 ${row.audienceHeat}）：${compactParts.join('；')}`;
+      }
+
       const lines = [
         `- ${row.name}（${row.type || '未分类'} / ${statusLabel} / 热度 ${row.audienceHeat}）`,
         `核心问题：${truncateText(row.coreQuestion || '暂无核心问题', 120)}`,
@@ -1331,6 +2287,10 @@ function buildThreadLedgerBlocks(input: {
         lines.push(`预计收束卷：第${row.plannedResolveVolume}卷`);
       }
 
+      if (supplementTexts.length > 0) {
+        lines.push(`补充：${previewSupplementTexts(supplementTexts, 48)}`);
+      }
+
       return lines.join('\n');
     });
 }
@@ -1339,44 +2299,187 @@ function normalizeWorldStateTitle(value: string | null | undefined) {
   return normalizeText(value);
 }
 
-function selectWorldStateValue(primary: string, fallback: string) {
-  return primary.trim() ? primary.trim() : fallback.trim();
+type WorldStateDimensionKey =
+  | 'public_events'
+  | 'secret_events'
+  | 'power_balance_change'
+  | 'institution_change'
+  | 'rule_change'
+  | 'rumor_state'
+  | 'known_by_characters'
+  | 'current_risks';
+
+type WorldStateListField = 'publicEvents' | 'secretEvents' | 'knownByCharacterNames' | 'currentRisks';
+type WorldStateScalarField = 'powerBalanceChange' | 'institutionChange' | 'ruleChange' | 'rumorState';
+
+const WORLD_STATE_LIST_DIMENSIONS: ReadonlyArray<{
+  field: WorldStateListField;
+  dimension: WorldStateDimensionKey;
+}> = [
+  { field: 'publicEvents', dimension: 'public_events' },
+  { field: 'secretEvents', dimension: 'secret_events' },
+  { field: 'knownByCharacterNames', dimension: 'known_by_characters' },
+  { field: 'currentRisks', dimension: 'current_risks' },
+];
+
+const WORLD_STATE_SCALAR_DIMENSIONS: ReadonlyArray<{
+  field: WorldStateScalarField;
+  dimension: WorldStateDimensionKey;
+}> = [
+  { field: 'powerBalanceChange', dimension: 'power_balance_change' },
+  { field: 'institutionChange', dimension: 'institution_change' },
+  { field: 'ruleChange', dimension: 'rule_change' },
+  { field: 'rumorState', dimension: 'rumor_state' },
+];
+
+function buildWorldStateVolumeKey(row: Pick<WorldStateEntryRecord, 'volumeId' | 'volumeTitle'>) {
+  return row.volumeId.trim() || normalizeWorldStateTitle(row.volumeTitle);
 }
 
-function selectWorldStateList(primary: string[], fallback: string[]) {
-  return primary.length > 0 ? primary : fallback;
+function buildWorldStateConflictKey(volumeKey: string, dimension: WorldStateDimensionKey) {
+  return `world:${volumeKey}:${dimension}`;
 }
 
-function mergeWorldStateEntries(input: {
-  volumeEntry: WorldStateEntryRecord;
-  milestoneEntry?: WorldStateEntryRecord | null;
+function dedupeWorldStateListValues(values: string[]) {
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of values) {
+    const trimmed = item.trim();
+    const normalized = normalizeText(trimmed);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    result.push(trimmed);
+  }
+
+  return result;
+}
+
+function pickLatestWorldStateRow(rows: WorldStateEntryRecord[]) {
+  let winner: WorldStateEntryRecord | null = null;
+
+  for (const row of rows) {
+    if (!winner || row.updatedAt.localeCompare(winner.updatedAt) > 0) {
+      winner = row;
+    }
+  }
+
+  return winner;
+}
+
+function pickWorldStateScalarWinner(rows: WorldStateEntryRecord[], field: WorldStateScalarField) {
+  let winner = '';
+  let winnerUpdatedAt = '';
+
+  for (const row of rows) {
+    const value = row[field].trim();
+    if (!value) {
+      continue;
+    }
+
+    if (!winnerUpdatedAt || row.updatedAt.localeCompare(winnerUpdatedAt) > 0) {
+      winner = value;
+      winnerUpdatedAt = row.updatedAt;
+    }
+  }
+
+  return winner;
+}
+
+function pickWorldStateListWinner(rows: WorldStateEntryRecord[], field: WorldStateListField) {
+  let winner: string[] = [];
+  let winnerUpdatedAt = '';
+
+  for (const row of rows) {
+    const values = dedupeWorldStateListValues(row[field]);
+    if (values.length === 0) {
+      continue;
+    }
+
+    if (!winnerUpdatedAt || row.updatedAt.localeCompare(winnerUpdatedAt) > 0) {
+      winner = values;
+      winnerUpdatedAt = row.updatedAt;
+    }
+  }
+
+  return winner;
+}
+
+function mergeWorldStateListWinner(primary: string[], supplement: string[]) {
+  return mergeUniqueTextValues(primary, supplement);
+}
+
+function buildWorldStateCanonicalEntry(input: {
+  rows: WorldStateEntryRecord[];
+  milestoneIndex?: number | null;
 }) {
-  const milestoneEntry = input.milestoneEntry ?? null;
+  const volumeLevelRows = input.rows.filter((row) => row.milestoneIndex === null);
+  const volumeEntry = pickLatestWorldStateRow(volumeLevelRows);
+
+  if (!volumeEntry) {
+    return null;
+  }
+
+  const volumeKey = buildWorldStateVolumeKey(volumeEntry);
+  if (!volumeKey) {
+    return null;
+  }
+
+  const normalizedMilestoneIndex =
+    typeof input.milestoneIndex === 'number' && Number.isFinite(input.milestoneIndex)
+      ? Math.max(0, Math.trunc(input.milestoneIndex))
+      : null;
+  const milestoneRows =
+    normalizedMilestoneIndex === null
+      ? []
+      : input.rows.filter(
+        (row) =>
+          buildWorldStateVolumeKey(row) === volumeKey && row.milestoneIndex === normalizedMilestoneIndex,
+      );
+  const dimensionValues = new Map<string, string | string[]>();
+
+  for (const spec of WORLD_STATE_SCALAR_DIMENSIONS) {
+    const conflictKey = buildWorldStateConflictKey(volumeKey, spec.dimension);
+    const milestoneValue = pickWorldStateScalarWinner(milestoneRows, spec.field);
+    const volumeValue = pickWorldStateScalarWinner(volumeLevelRows, spec.field);
+
+    dimensionValues.set(conflictKey, milestoneValue || volumeValue);
+  }
+
+  for (const spec of WORLD_STATE_LIST_DIMENSIONS) {
+    const conflictKey = buildWorldStateConflictKey(volumeKey, spec.dimension);
+    const milestoneValue = pickWorldStateListWinner(milestoneRows, spec.field);
+    const volumeValue = pickWorldStateListWinner(volumeLevelRows, spec.field);
+
+    dimensionValues.set(
+      conflictKey,
+      milestoneValue.length > 0 ? mergeWorldStateListWinner(milestoneValue, volumeValue) : volumeValue,
+    );
+  }
 
   return {
-    publicEvents: selectWorldStateList(milestoneEntry?.publicEvents ?? [], input.volumeEntry.publicEvents),
-    secretEvents: selectWorldStateList(milestoneEntry?.secretEvents ?? [], input.volumeEntry.secretEvents),
-    powerBalanceChange: selectWorldStateValue(
-      milestoneEntry?.powerBalanceChange ?? '',
-      input.volumeEntry.powerBalanceChange,
-    ),
-    institutionChange: selectWorldStateValue(
-      milestoneEntry?.institutionChange ?? '',
-      input.volumeEntry.institutionChange,
-    ),
-    ruleChange: selectWorldStateValue(
-      milestoneEntry?.ruleChange ?? '',
-      input.volumeEntry.ruleChange,
-    ),
-    rumorState: selectWorldStateValue(
-      milestoneEntry?.rumorState ?? '',
-      input.volumeEntry.rumorState,
-    ),
-    knownByCharacterNames: selectWorldStateList(
-      milestoneEntry?.knownByCharacterNames ?? [],
-      input.volumeEntry.knownByCharacterNames,
-    ),
-    currentRisks: selectWorldStateList(milestoneEntry?.currentRisks ?? [], input.volumeEntry.currentRisks),
+    volumeTitle: volumeEntry.volumeTitle,
+    publicEvents:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'public_events')) as string[] | undefined) ?? [],
+    secretEvents:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'secret_events')) as string[] | undefined) ?? [],
+    powerBalanceChange:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'power_balance_change')) as string | undefined) ??
+      '',
+    institutionChange:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'institution_change')) as string | undefined) ?? '',
+    ruleChange:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'rule_change')) as string | undefined) ?? '',
+    rumorState:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'rumor_state')) as string | undefined) ?? '',
+    knownByCharacterNames:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'known_by_characters')) as string[] | undefined) ??
+      [],
+    currentRisks:
+      (dimensionValues.get(buildWorldStateConflictKey(volumeKey, 'current_risks')) as string[] | undefined) ?? [],
   };
 }
 
@@ -1455,30 +2558,30 @@ function buildWorldStateDeltaBlocks(input: {
     return [] as string[];
   }
 
-  const milestoneEntry =
-    typeof input.milestoneIndex === 'number' && Number.isFinite(input.milestoneIndex)
-      ? input.rows.find(
-        (row) =>
-          row.volumeId === currentVolumeEntry.volumeId &&
-          row.milestoneIndex === Math.max(0, Math.trunc(input.milestoneIndex ?? 0)),
-      ) ?? null
-      : null;
+  const currentVolumeKey = buildWorldStateVolumeKey(currentVolumeEntry);
+  if (!currentVolumeKey) {
+    return [] as string[];
+  }
+
+  const currentVolumeRows = input.rows.filter((row) => buildWorldStateVolumeKey(row) === currentVolumeKey);
   const previousVolumeEntry =
     volumeLevelRows.find((row) => row.volumeOrder < currentVolumeEntry.volumeOrder) ?? null;
-  const currentBlock = formatWorldStateEntryBlock('世界状态-本卷变化', {
-    volumeTitle: currentVolumeEntry.volumeTitle,
-    ...mergeWorldStateEntries({
-      volumeEntry: currentVolumeEntry,
-      milestoneEntry,
-    }),
+  const previousVolumeRows = previousVolumeEntry
+    ? input.rows.filter((row) => buildWorldStateVolumeKey(row) === buildWorldStateVolumeKey(previousVolumeEntry))
+    : [];
+  const currentCanonicalEntry = buildWorldStateCanonicalEntry({
+    rows: currentVolumeRows,
+    milestoneIndex: input.milestoneIndex ?? null,
   });
+  const previousCanonicalEntry = buildWorldStateCanonicalEntry({
+    rows: previousVolumeRows,
+  });
+  const currentBlock = currentCanonicalEntry
+    ? formatWorldStateEntryBlock('世界状态-本卷变化', currentCanonicalEntry)
+    : '';
   const previousBlock = previousVolumeEntry
-    ? formatWorldStateEntryBlock('世界状态-前一卷残留', {
-      volumeTitle: previousVolumeEntry.volumeTitle,
-      ...mergeWorldStateEntries({
-        volumeEntry: previousVolumeEntry,
-      }),
-    })
+    && previousCanonicalEntry
+    ? formatWorldStateEntryBlock('世界状态-前一卷残留', previousCanonicalEntry)
     : '';
 
   return [currentBlock, previousBlock].filter(Boolean);
@@ -1509,17 +2612,36 @@ function buildAntagonistAgendaBlocks(input: {
         (focusEntitySet.has(normalizeText(row.characterName)) ? 100 : 0) +
         (normalizeText(row.characterName) && chapterHintHaystack.includes(normalizeText(row.characterName)) ? 60 : 0) +
         (row.triggerToStrike ? 20 : 0) +
-        (row.currentAction ? 20 : 0),
+        (row.currentAction ? 20 : 0) +
+        (row.ifProtagonistDoesNothing ? 10 : 0),
     }))
-    .filter((item) => item.score >= 40)
+    .filter((item) => item.score >= 25)
     .sort((left, right) => {
       if (left.score !== right.score) {
         return right.score - left.score;
       }
-      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+      return left.row.characterName.localeCompare(right.row.characterName, 'zh-CN');
     })
-    .slice(0, 2)
-    .map(({ row }) => {
+    .slice(0, GENERATION_CONTEXT_LIMITS.antagonistAgendaBlockMax)
+    .map(({ row }, index) => {
+      const shouldRenderFull =
+        index < GENERATION_CONTEXT_LIMITS.antagonistAgendaFullBlockMax ||
+        focusEntitySet.has(normalizeText(row.characterName));
+
+      if (!shouldRenderFull) {
+        const compactParts = [];
+
+        if (row.currentObjective) {
+          compactParts.push(`目标：${truncateText(row.currentObjective, 26)}`);
+        }
+
+        if (row.currentAction) {
+          compactParts.push(`动作：${truncateText(row.currentAction, 22)}`);
+        }
+
+        return `- ${row.characterName}${row.publicRole ? `（${row.publicRole}）` : ''}：${compactParts.join('；') || '当前仍在推进'}`;
+      }
+
       const lines = [`- ${row.characterName}${row.publicRole ? `（${row.publicRole}）` : ''}`];
       if (row.currentObjective) {
         lines.push(`当前目标：${truncateText(row.currentObjective, 120)}`);
@@ -1541,53 +2663,65 @@ function selectEffectivePovPermissions(input: {
   rows: PovPermissionRecord[];
   volumeTitle?: string;
   chapterId?: string;
+  milestoneIndex?: number | null;
 }) {
-  if (input.chapterId) {
-    const chapterRows = input.rows.filter((row) => row.chapterId === input.chapterId);
-
-    if (chapterRows.length > 0) {
-      return chapterRows;
-    }
-  }
-
-  const normalizedVolumeTitle = normalizeText(input.volumeTitle);
-
-  if (!normalizedVolumeTitle) {
-    return [] as PovPermissionRecord[];
-  }
-
-  return input.rows.filter(
-    (row) =>
-      normalizeText(row.volumeTitle) === normalizedVolumeTitle &&
-      !row.chapterId,
-  );
+  return buildCanonicalPovPermissionEntries(input);
 }
 
 function buildPovPermissionBlocks(input: {
   rows: PovPermissionRecord[];
   volumeTitle?: string;
   chapterId?: string;
+  milestoneIndex?: number | null;
 }) {
   return selectEffectivePovPermissions(input)
-    .slice(0, 2)
-    .map((row) => {
+    .slice(0, GENERATION_CONTEXT_LIMITS.povPermissionBlockMax)
+    .map((entry, index) => {
+      const row = entry.row;
+      const scopeLabel =
+        row.chapterTitle
+          ? `章节 ${row.chapterTitle}`
+          : entry.scopeLevel === 'milestone'
+            ? `${row.volumeTitle || '当前卷'} / 里程碑 ${row.milestoneIndex ?? 0}`
+            : row.volumeTitle || '当前卷';
+      const shouldRenderFull =
+        entry.scopeLevel === 'chapter' ||
+        index < GENERATION_CONTEXT_LIMITS.povPermissionFullBlockMax;
+
+      if (!shouldRenderFull) {
+        const compactParts = [];
+
+        if (entry.mustHide.length > 0) {
+          compactParts.push(`禁止透露：${truncateText(entry.mustHide.join('；'), 28)}`);
+        }
+
+        if (entry.canHint.length > 0) {
+          compactParts.push(`允许暗示：${truncateText(entry.canHint.join('；'), 28)}`);
+        }
+
+        return `- ${row.povCharacterName || '未命名视角'} / ${scopeLabel}${compactParts.length > 0 ? `：${compactParts.join('；')}` : ''}`;
+      }
+
       const lines = [
-        `- ${row.povCharacterName || '未命名视角'}${row.chapterTitle ? ` / 章节 ${row.chapterTitle}` : row.volumeTitle ? ` / ${row.volumeTitle}` : ''}`,
+        `- ${row.povCharacterName || '未命名视角'} / ${scopeLabel}`,
       ];
-      if (row.mustHide.length > 0) {
-        lines.push(`禁止透露：${row.mustHide.join('；')}`);
+      if (entry.mustHide.length > 0) {
+        lines.push(`禁止透露：${entry.mustHide.join('；')}`);
       }
-      if (row.canHint.length > 0) {
-        lines.push(`允许暗示：${row.canHint.join('；')}`);
+      if (entry.canHint.length > 0) {
+        lines.push(`允许暗示：${entry.canHint.join('；')}`);
       }
-      if (row.forbiddenReveal.length > 0) {
-        lines.push(`本单元禁止揭晓：${row.forbiddenReveal.join('；')}`);
+      if (entry.forbiddenReveal.length > 0) {
+        lines.push(`本单元禁止揭晓：${entry.forbiddenReveal.join('；')}`);
+      }
+      if (entry.supplementTexts.length > 0) {
+        lines.push(`补充：${previewSupplementTexts(entry.supplementTexts, 60)}`);
       }
       return lines.join('\n');
     });
 }
 
-function buildStructuredResourceContinuityBlocks(input: {
+function buildStructuredResourceContinuityCandidates(input: {
   rows: ResourceContinuityRecord[];
   focusEntityNames: string[];
   chapterTitle?: string;
@@ -1636,15 +2770,37 @@ function buildStructuredResourceContinuityBlocks(input: {
           (input.highPressure && row.riskLevel !== 'low' ? 10 : 0),
       };
     })
-    .filter((item) => item.score >= (input.highPressure ? 35 : 60))
+    .filter((item) => item.score >= (input.highPressure ? 30 : 15))
     .sort((left, right) => {
       if (left.score !== right.score) {
         return right.score - left.score;
       }
-      return right.row.updatedAt.localeCompare(left.row.updatedAt);
+      return left.row.updatedAt.localeCompare(right.row.updatedAt);
     })
-    .slice(0, input.highPressure ? 6 : 4)
-    .map(({ row }) => {
+    .slice(0, input.highPressure ? 7 : 5)
+    .map(({ row, score }, index): StructuredResourceContinuityCandidate => {
+      const fullBlockMax = input.highPressure
+        ? GENERATION_CONTEXT_LIMITS.resourceContinuityFullBlockMaxHighPressure
+        : GENERATION_CONTEXT_LIMITS.resourceContinuityFullBlockMaxDefault;
+      const shouldRenderCompact = index >= fullBlockMax && row.riskLevel !== 'critical';
+
+      if (shouldRenderCompact) {
+        const summary =
+          row.currentState ||
+          row.performanceImpact ||
+          row.continuityRisk ||
+          row.hiddenCost ||
+          row.recoveryCondition ||
+          '存在资源连续性压力';
+
+        return {
+          source: 'structured',
+          row,
+          block: `- ${row.ownerCharacterName || '未绑定角色'} / ${row.resourceType}（${riskLabelMap[row.riskLevel]}风险）：${truncateText(summary, 60)}`,
+          sortScore: score,
+        };
+      }
+
       const lines = [`- ${row.ownerCharacterName || '未绑定角色'} / ${row.resourceType}`];
       lines.push(`风险级别：${riskLabelMap[row.riskLevel]}`);
       if (row.currentState) {
@@ -1665,8 +2821,62 @@ function buildStructuredResourceContinuityBlocks(input: {
       if (row.continuityRisk) {
         lines.push(`连续性风险：${truncateText(row.continuityRisk, 100)}`);
       }
-      return lines.join('\n');
+      return {
+        source: 'structured',
+        row,
+        block: lines.join('\n'),
+        sortScore: score,
+      };
     });
+}
+
+function buildResourceStateChapterLabel(chapterOrder: number, chapterTitle: string) {
+  if (chapterOrder <= 0) {
+    return chapterTitle.trim() || '未知章节';
+  }
+
+  const trimmedTitle = chapterTitle.trim();
+  const prefix = `第${chapterOrder}章`;
+
+  if (trimmedTitle.startsWith(prefix)) {
+    return trimmedTitle;
+  }
+
+  return `${prefix} ${trimmedTitle}`;
+}
+
+function formatResourceStateContinuityBlock(row: ResourceStateRow) {
+  const chapterLabel = buildResourceStateChapterLabel(row.chapterOrder, row.chapterTitle);
+  return `- ${chapterLabel} ${row.entityName || '未命名资源'} / ${row.field || '状态'}：${row.oldValue || '未知'} -> ${row.newValue || '未知'}`;
+}
+
+function buildRuntimeResourceContinuityCandidates(
+  rows: ResourceStateRow[],
+  currentChapterOrder: number | null,
+) {
+  return rows
+    .filter((row) => {
+      if (currentChapterOrder === null) {
+        return true;
+      }
+
+      return row.chapterOrder > 0 && row.chapterOrder < currentChapterOrder;
+    })
+    .sort((left, right) => {
+      if (left.chapterOrder !== right.chapterOrder) {
+        return right.chapterOrder - left.chapterOrder;
+      }
+
+      return right.updatedAt.localeCompare(left.updatedAt);
+    })
+    .map(
+      (row): RuntimeResourceContinuityCandidate => ({
+        source: 'runtime',
+        row,
+        block: formatResourceStateContinuityBlock(row),
+        sortScore: row.chapterOrder > 0 ? row.chapterOrder : 0,
+      }),
+    );
 }
 
 function isHighPressureResourceScene(input: {
@@ -1694,24 +2904,14 @@ function buildWorkingMemoryBlocks(
   input: GenerationContextBuildInput,
   currentVolumeSnapshotBlocks: string[],
   activeForeshadowBlocks: string[],
+  questionPoolHintBlocks: string[],
 ) {
-  const contractLines = input.outline
-    ? [
-        `- 本章目标：${input.outline.goal || '暂无'}`,
-        `阻力：${input.outline.obstacle || '暂无'}`,
-        `代价：${input.outline.cost || '暂无'}`,
-        `Strand：${input.outline.strand}`,
-        input.outline.beats.length > 0 ? `Beats：${input.outline.beats.join(' | ')}` : '',
-        input.outline.immutableFacts.length > 0 ? `不可变事实：${input.outline.immutableFacts.join('；')}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n')
-    : '';
+  const includeActiveForeshadows = (input.requiredForeshadowTitles?.length ?? 0) === 0;
   const blocks = [
-    contractLines,
     input.previousSummary?.trim() ? `- 上章承接\n${truncateText(input.previousSummary.trim(), 180)}` : '',
     ...currentVolumeSnapshotBlocks,
-    ...activeForeshadowBlocks.map((block) => `- 激活伏笔\n${block}`),
+    ...(includeActiveForeshadows ? activeForeshadowBlocks.map((block) => `- 激活伏笔\n${block}`) : []),
+    ...questionPoolHintBlocks,
   ].filter(Boolean);
 
   return blocks;
@@ -1743,8 +2943,8 @@ function buildLightweightRecallItems(items: GenerationRetrievedChunk[]) {
     }));
 }
 
-function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: string[]) {
-  const entityRowMap = new Map<string, GenerationEntityRow>();
+function buildEntityBlocks(entityRows: CanonicalEntityRow[], focusEntityNames: string[]) {
+  const entityRowMap = new Map<string, CanonicalEntityRow>();
 
   for (const row of entityRows) {
     for (const term of getEntitySearchTerms(row)) {
@@ -1758,7 +2958,7 @@ function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: 
 
   return focusEntityNames
     .map((entityName) => entityRowMap.get(normalizeText(entityName)))
-    .filter((row): row is GenerationEntityRow => Boolean(row))
+    .filter((row): row is CanonicalEntityRow => Boolean(row))
     .filter((row, index, rows) => {
       return rows.findIndex((candidate) => normalizeText(candidate.entityName) === normalizeText(row.entityName)) === index;
     })
@@ -1768,17 +2968,11 @@ function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: 
       const genericFieldEntries = Object.entries(row.fields)
         .filter(([key]) =>
           !CHARACTER_STATIC_FIELD_LABELS.some(([fieldKey]) => fieldKey === key)
-          && !CHARACTER_DYNAMIC_FIELD_LABELS.some(([fieldKey]) => fieldKey === key),
+          && !isEntityDynamicFieldKey(key),
         )
         .map(([key, value]) => `${key}=${value}`)
         .slice(0, GENERATION_CONTEXT_LIMITS.entityFieldPreviewMax);
       const staticFieldEntries = CHARACTER_STATIC_FIELD_LABELS
-        .map(([fieldKey, label]) => {
-          const value = row.fields[fieldKey];
-          return value ? `${label}：${value}` : '';
-        })
-        .filter(Boolean);
-      const dynamicFieldEntries = CHARACTER_DYNAMIC_FIELD_LABELS
         .map(([fieldKey, label]) => {
           const value = row.fields[fieldKey];
           return value ? `${label}：${value}` : '';
@@ -1797,10 +2991,6 @@ function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: 
         lines.push(`【人格内核-不可改变】${staticFieldEntries.join('；')}`);
       }
 
-      if (dynamicFieldEntries.length > 0) {
-        lines.push(`【当前阶段状态】${dynamicFieldEntries.join('；')}`);
-      }
-
       if (genericFieldEntries.length > 0) {
         lines.push(`关键状态：${genericFieldEntries.join('；')}`);
       }
@@ -1813,17 +3003,56 @@ function buildEntityBlocks(entityRows: GenerationEntityRow[], focusEntityNames: 
         lines.push(`最近出现：${row.lastSeenChapterTitle}`);
       }
 
+      if (row.supplementTexts.length > 0) {
+        lines.push(`补充说明：${previewSupplementTexts(row.supplementTexts, 48)}`);
+      }
+
       return lines.join('\n');
     });
 }
 
+function buildStableEntityHintSummary(row: GenerationEntityRow) {
+  if (row.description.trim()) {
+    return row.description.trim();
+  }
+
+  const staticRole = row.fields.static_role?.trim();
+  if (staticRole) {
+    return `角色定位：${staticRole}`;
+  }
+
+  for (const [fieldKey, label] of CHARACTER_STATIC_FIELD_LABELS) {
+    const value = row.fields[fieldKey]?.trim();
+    if (value) {
+      return `${label}：${value}`;
+    }
+  }
+
+  const genericStableField = Object.entries(row.fields).find(([key, value]) => {
+    const trimmedValue = value.trim();
+    return (
+      Boolean(trimmedValue)
+      && key !== 'static_role'
+      && !CHARACTER_STATIC_FIELD_LABELS.some(([fieldKey]) => fieldKey === key)
+      && !isEntityDynamicFieldKey(key)
+    );
+  });
+
+  if (!genericStableField) {
+    return '';
+  }
+
+  const [fieldKey, fieldValue] = genericStableField;
+  return `${fieldKey}：${fieldValue.trim()}`;
+}
+
 function buildAvailableCharacterHintBlocks(
-  entityRows: GenerationEntityRow[],
+  entityRows: CanonicalEntityRow[],
   availableCharacterNames: string[],
   focusEntityNames: string[],
 ) {
   const normalizedFocusSet = new Set(focusEntityNames.map((item) => normalizeText(item)).filter(Boolean));
-  const entityRowMap = new Map<string, GenerationEntityRow>();
+  const entityRowMap = new Map<string, CanonicalEntityRow>();
 
   for (const row of entityRows) {
     for (const term of getEntitySearchTerms(row)) {
@@ -1837,17 +3066,14 @@ function buildAvailableCharacterHintBlocks(
 
   return createUniqueList(availableCharacterNames)
     .map((entityName) => entityRowMap.get(normalizeText(entityName)))
-    .filter((row): row is GenerationEntityRow => Boolean(row))
+    .filter((row): row is CanonicalEntityRow => Boolean(row))
     .filter((row) => !normalizedFocusSet.has(normalizeText(row.entityName)))
     .filter((row, index, rows) => {
       return rows.findIndex((candidate) => normalizeText(candidate.entityName) === normalizeText(row.entityName)) === index;
     })
-    .slice(0, 4)
+    .slice(0, GENERATION_CONTEXT_LIMITS.availableCharacterBlockMax)
     .map((row) => {
-      const summary = row.description.trim()
-        || row.fields.current_status?.trim()
-        || row.fields.current_goal?.trim()
-        || row.fields.static_role?.trim();
+      const summary = buildStableEntityHintSummary(row);
 
       return [
         `- 候选人物：${row.entityName}${row.entityType ? `（${row.entityType}）` : ''}`,
@@ -1926,7 +3152,7 @@ function buildExplicitRelationshipBlocks(input: {
     coverageKeys.add(buildRelationPairKey(sourceName, targetName));
     blocks.push(
       [
-        `- 显式关系：${sourceName} <-> ${targetName}（${relation.relationType.trim()}）`,
+        `- 显式关系真源：${sourceName} <-> ${targetName}（${relation.relationType.trim()}）`,
         relation.description.trim() ? `关系本质：${truncateText(relation.description.trim(), 120)}` : '',
         relation.origin.trim() ? `建立原因：${truncateText(relation.origin.trim(), 80)}` : '',
         relation.currentStance.trim() ? `当前态度：${relation.currentStance.trim()}` : '',
@@ -2219,7 +3445,7 @@ function buildStructuredRelationshipOneHopSignalResult(input: {
 
   const edgeBlocks = acceptedEdges.map((edge) =>
     [
-      `- 强关系：${edge.sourceEntityName} -> ${edge.targetEntityName}（${edge.relationshipType}）`,
+      `- 运行态关系观察：${edge.sourceEntityName} -> ${edge.targetEntityName}（${edge.relationshipType}）`,
       `来源：${edge.chapterTitle || '未知章节'}`,
       `证据：${truncateText(edge.evidence || edge.description, 100)}`,
       `置信：${edge.confidenceLevel} (${edge.confidence.toFixed(2)})`,
@@ -2567,7 +3793,10 @@ export async function buildGenerationContextBundle(
       return right.updatedAt.localeCompare(left.updatedAt);
     })
     .slice(0, 5);
-  const entityRows = loadEntityRows(env, input.projectId).filter((row) => input.allowDraftContext || !row.draft);
+  const entityRows = mergeEntityRowsWithSnapshotPriority(
+    loadEntityRows(env, input.projectId).filter((row) => input.allowDraftContext || !row.draft),
+    input.entitySnapshot,
+  ).filter((row) => input.allowDraftContext || !row.draft);
   const relationshipRows = loadRelationshipRows(env, input.projectId);
   const resourceStateRows = loadResourceStateRows(env, input.projectId);
   const storedVolumeRecaps = listGenerationVolumeRecaps(env, input.projectId);
@@ -2580,6 +3809,9 @@ export async function buildGenerationContextBundle(
   const antagonistAgendaRows = listAntagonistAgendas(env, {
     projectId: input.projectId,
   });
+  const questionPoolRows = listQuestionPools(env, {
+    projectId: input.projectId,
+  });
   const povPermissionRows = listPovPermissions(env, {
     projectId: input.projectId,
   });
@@ -2589,20 +3821,25 @@ export async function buildGenerationContextBundle(
   const threadLedgerRows = listThreadLedgers(env, {
     projectId: input.projectId,
   });
-  const storedForeshadowRows = listGenerationForeshadows(env, input.projectId).map(
-    (row): ForeshadowRow => ({
-      id: row.id,
-      title: row.title,
-      excerpt: row.excerpt,
-      notes: row.notes,
-      status: row.status,
-      lifecycle: deriveGenerationForeshadowLifecycle(row, currentChapterOrder),
-      sourceChapterOrder: row.sourceChapterOrder,
-      sourceChapterTitle: row.sourceChapterTitle,
-      resolvedChapterTitle: row.resolvedChapterTitle,
-      updatedAt: row.updatedAt,
-    }),
-  );
+  const storedForeshadowRows = mergeForeshadowRowsWithSnapshotPriority({
+    storedRows: listGenerationForeshadows(env, input.projectId).map(
+      (row): ForeshadowRow => ({
+        id: row.id,
+        title: row.title,
+        excerpt: row.excerpt,
+        notes: row.notes,
+        status: row.status,
+        lifecycle: deriveGenerationForeshadowLifecycle(row, currentChapterOrder),
+        sourceChapterOrder: row.sourceChapterOrder,
+        sourceChapterTitle: row.sourceChapterTitle,
+        resolvedChapterTitle: row.resolvedChapterTitle,
+        updatedAt: row.updatedAt,
+      }),
+    ),
+    chapterRows,
+    currentChapterOrder,
+    foreshadowSnapshots: input.foreshadowSnapshot,
+  });
   const seedFocusEntityNames = createUniqueList([
     ...(input.requiredEntityNames ?? []),
     ...selectFocusEntityNames(input, chapterRows, entityRows),
@@ -2653,13 +3890,17 @@ export async function buildGenerationContextBundle(
     focusEntityNames,
     allowDraftContext: input.allowDraftContext,
   });
+  const automaticRelationshipBlocks =
+    structuredRelationshipResult.mode === 'degraded'
+      ? []
+      : filterAutomaticRelationshipBlocksByExplicitCoverage(
+          structuredRelationshipResult.blocks,
+          input.relationSnapshot ?? [],
+          explicitRelationshipResult.coverageKeys,
+        );
   const relationshipBlocks = [
     ...explicitRelationshipResult.blocks,
-    ...filterAutomaticRelationshipBlocksByExplicitCoverage(
-      structuredRelationshipResult.blocks,
-      input.relationSnapshot ?? [],
-      explicitRelationshipResult.coverageKeys,
-    ),
+    ...automaticRelationshipBlocks,
   ];
   const serverForeshadowBlocks = buildForeshadowBlocks(
     storedForeshadowRows,
@@ -2672,12 +3913,7 @@ export async function buildGenerationContextBundle(
     activeForeshadowRows: storedForeshadowRows,
     requiredForeshadowTitles: input.requiredForeshadowTitles,
   });
-  const workingMemoryBlocks = buildWorkingMemoryBlocks(
-    input,
-    currentVolumeSnapshotBlocks,
-    activeForeshadowBlocks,
-  );
-  const resourceContinuityBlocks = buildResourceContinuityBlocks(
+  const runtimeResourceContinuityCandidates = buildRuntimeResourceContinuityCandidates(
     resourceStateRows,
     currentChapterOrder,
   );
@@ -2685,12 +3921,17 @@ export async function buildGenerationContextBundle(
     chapterTitle: input.chapterTitle,
     outline: input.outline,
   });
-  const structuredResourceContinuityBlocks = buildStructuredResourceContinuityBlocks({
+  const structuredResourceContinuityCandidates = buildStructuredResourceContinuityCandidates({
     rows: structuredResourceContinuityRows,
     focusEntityNames,
     chapterTitle: input.chapterTitle,
     outline: input.outline,
     highPressure: highPressureResourceScene,
+  });
+  const resourceContinuityBlocks = dedupeResourceContinuityBlocks({
+    structuredCandidates: structuredResourceContinuityCandidates,
+    runtimeCandidates: runtimeResourceContinuityCandidates,
+    limit: highPressureResourceScene ? 8 : 6,
   });
   const worldStateDeltaBlocks = buildWorldStateDeltaBlocks({
     rows: worldStateRows,
@@ -2707,8 +3948,9 @@ export async function buildGenerationContextBundle(
     rows: povPermissionRows,
     volumeTitle: input.volumeTitle,
     chapterId: input.chapterId,
+    milestoneIndex: input.milestoneIndex ?? null,
   });
-  const threadLedgerBlocks = buildThreadLedgerBlocks({
+  const selectedThreadLedgerCandidates = selectThreadLedgerCandidates({
     rows: threadLedgerRows,
     focusEntityNames,
     requiredEntityNames: input.requiredEntityNames,
@@ -2718,6 +3960,20 @@ export async function buildGenerationContextBundle(
     chapterTitle: input.chapterTitle,
     outline: input.outline,
   });
+  const threadLedgerBlocks = buildThreadLedgerBlocks(selectedThreadLedgerCandidates);
+  const questionPoolHintBlocks = buildQuestionPoolHintBlocks({
+    rows: questionPoolRows,
+    selectedThreadLedgerRows: selectedThreadLedgerCandidates.map((item) => item.row),
+    requiredForeshadowTitles: input.requiredForeshadowTitles,
+    chapterTitle: input.chapterTitle,
+    outline: input.outline,
+  });
+  const workingMemoryBlocks = buildWorkingMemoryBlocks(
+    input,
+    currentVolumeSnapshotBlocks,
+    activeForeshadowBlocks,
+    questionPoolHintBlocks,
+  );
   const sections = [
     createSection('working_memory', '工作记忆', workingMemoryBlocks),
     createSection('thread_ledger', '剧情线提醒', threadLedgerBlocks),
@@ -2730,9 +3986,9 @@ export async function buildGenerationContextBundle(
     createSection('long_term_memory', '长期记忆', volumeRecapBlocks),
     createSection('retrieval_memory', '外部检索', relatedChapterBlocks),
     input.worldState?.trim() ? createSection('physical_engine', '物理引擎', [input.worldState.trim()]) : null,
-    createSection('resource_continuity', '资源连续性', [...structuredResourceContinuityBlocks, ...resourceContinuityBlocks].slice(0, highPressureResourceScene ? 8 : 6)),
-    createSection('focus_entities', '当前关注实体', entityBlocks),
-    createSection('candidate_entities', '候选出场人物', availableCharacterHintBlocks),
+    createSection('resource_continuity', '资源连续性', resourceContinuityBlocks),
+    (input.requiredEntityNames?.length ?? 0) > 0 ? null : createSection('focus_entities', '当前关注实体', entityBlocks),
+    (input.availableCharacterNames?.length ?? 0) > 0 ? null : createSection('candidate_entities', '候选出场人物', availableCharacterHintBlocks),
     createSection('relationships', '相关关系', relationshipBlocks),
     fallbackContext.residualBundle
       ? createSection('fallback_context', '前端补充上下文', [fallbackContext.residualBundle])
@@ -2752,11 +4008,7 @@ export async function buildGenerationContextBundle(
       explicitRelationshipResult.blocks.length +
       Math.max(
         0,
-        filterAutomaticRelationshipBlocksByExplicitCoverage(
-          structuredRelationshipResult.blocks,
-          input.relationSnapshot ?? [],
-          explicitRelationshipResult.coverageKeys,
-        ).length - 1,
+        automaticRelationshipBlocks.length - 1,
       ),
     hasFallbackContext: Boolean(input.fallbackContextBundle?.trim()),
     focusEntityNames,
