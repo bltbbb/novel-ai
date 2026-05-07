@@ -72,6 +72,7 @@ import type {
   ReviewCheckerType,
   ReviewIssue,
   ReviewSeverity,
+  ResponseFormatWarning,
   StateChangeDraft,
   StrandType,
   VolumeMilestoneDraft,
@@ -276,18 +277,136 @@ function collectJsonCandidates(rawText: string) {
   return [...candidates];
 }
 
-function parseJson<T>(rawText: string): T {
+interface JsonSyntaxRepairResult {
+  repairedText: string;
+  appliedStrategies: string[];
+}
+
+interface ParseJsonOptions {
+  allowSyntaxRepair?: boolean;
+  errorLabel?: string;
+  onRepair?: (result: JsonSyntaxRepairResult) => void;
+}
+
+function findNextNonWhitespaceCharacter(text: string, startIndex: number) {
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (!/\s/u.test(char)) {
+      return char;
+    }
+  }
+
+  return null;
+}
+
+function escapeInnerQuotesInJsonStrings(text: string) {
+  let changed = false;
+  let inString = false;
+  let escaped = false;
+  const output: string[] = [];
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (!inString) {
+      output.push(char);
+
+      if (char === '"') {
+        inString = true;
+      }
+
+      continue;
+    }
+
+    if (escaped) {
+      output.push(char);
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      output.push(char);
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      const nextChar = findNextNonWhitespaceCharacter(text, index + 1);
+
+      if (nextChar === null || nextChar === ',' || nextChar === '}' || nextChar === ']' || nextChar === ':') {
+        output.push(char);
+        inString = false;
+        continue;
+      }
+
+      output.push('\\"');
+      changed = true;
+      continue;
+    }
+
+    output.push(char);
+  }
+
+  return changed ? output.join('') : null;
+}
+
+function repairJsonSyntax(candidate: string): JsonSyntaxRepairResult | null {
+  const repairedText = escapeInnerQuotesInJsonStrings(candidate);
+
+  if (!repairedText) {
+    return null;
+  }
+
+  return {
+    repairedText,
+    appliedStrategies: ['转义字符串内部未转义双引号'],
+  };
+}
+
+function parseJson<T>(rawText: string, options: ParseJsonOptions = {}): T {
   const candidates = collectJsonCandidates(rawText);
+  const attemptedRepairedCandidates = new Set<string>();
 
   for (const candidate of candidates) {
     try {
       return JSON.parse(candidate) as T;
     } catch {
+      if (!options.allowSyntaxRepair) {
+        continue;
+      }
+    }
+
+    if (!options.allowSyntaxRepair) {
+      continue;
+    }
+
+    const repairResult = repairJsonSyntax(candidate);
+
+    if (!repairResult) {
+      continue;
+    }
+
+    const repairKey = repairResult.repairedText.trim();
+
+    if (attemptedRepairedCandidates.has(repairKey)) {
+      continue;
+    }
+
+    attemptedRepairedCandidates.add(repairKey);
+
+    try {
+      const parsed = JSON.parse(repairResult.repairedText) as T;
+      options.onRepair?.(repairResult);
+      return parsed;
+    } catch {
       continue;
     }
   }
 
-  throw new Error(`模型返回的 JSON 无法解析：${previewJsonParseFailure(rawText)}`);
+  throw new Error(
+    `${options.errorLabel ? `${options.errorLabel}返回格式异常，` : ''}模型返回的 JSON 无法解析：${previewJsonParseFailure(rawText)}`,
+  );
 }
 
 function normalizeHookStrength(value: unknown): HookStrength {
@@ -3345,7 +3464,6 @@ function buildWritePrompt(request: AIWriteRequest) {
       request.chapterBeat,
       outlineControlBlock,
       request.nextChapterPreview,
-      request.previousSummary,
       request.contextBundle,
       completedText,
     ],
@@ -3381,7 +3499,6 @@ function buildWritePrompt(request: AIWriteRequest) {
     outline.chapterTimeSpan ? `章节跨度：${outline.chapterTimeSpan}` : '',
     outline.gapFromPrevious ? `与上章间隔：${outline.gapFromPrevious}` : '',
     outline.immutableFacts.length > 0 ? `不可变事实：${outline.immutableFacts.join('；')}` : '',
-    request.previousSummary ? `上一章摘要：${request.previousSummary}` : '',
     request.worldState ? `当前世界状态：${request.worldState}` : '',
     request.contextBundle ? `补充上下文：\n${request.contextBundle}` : '',
     knownCharacterBlock,
@@ -3556,6 +3673,9 @@ function buildLanguageQaPrompt(request: AILanguageQaRequest) {
     'JSON 字段要求：severity, summary, issues。',
     '- severity 只能是 critical / high / medium / low',
     '- issues 每项字段包含 severity, title, description, suggestion, evidence',
+    '- 不要输出 ```json 代码块、前言、结语或任何 JSON 之外的说明',
+    '- 所有字符串值必须是合法 JSON 字符串；如需引用原文，优先使用中文全角引号“”而不是英文双引号',
+    '- 如果必须使用英文双引号，必须写成 JSON 转义形式 \\\"...\\\"',
     '- issues 重点检查：错别字与误写、病句 / 残句 / 主语缺失、搭配不当 / 用词错误、局部逻辑矛盾、未铺垫专名突然出现、指代 / 称谓 / 局部关系错乱',
     '- 额外重点检查：感官搭配错误（例如把“听”用到“发亮”上）、语义冲突句、明显的口水句和僵硬搭配',
     '- 只报细粒度语言问题和局部幻觉，不要把整章节奏、爽点、钩子强度这类问题写进来',
@@ -4655,12 +4775,32 @@ export async function checkChapterLanguageQa(
     chapterId: resolvedRequest.chapterId,
     chapterTitle: resolvedRequest.chapterTitle,
   });
-  const parsed = parseJson<unknown>(rawText);
+  let formatWarning: ResponseFormatWarning | null = null;
+  const parsed = parseJson<unknown>(rawText, {
+    allowSyntaxRepair: true,
+    errorLabel: '语言校对',
+    onRepair: (repairResult) => {
+      formatWarning = {
+        kind: 'json_repaired',
+        message: `本次语言校对结果在解析前自动修复了模型返回的 JSON 语法：${repairResult.appliedStrategies.join('、')}。建议结合原始返回复核。`,
+        appliedStrategies: repairResult.appliedStrategies,
+      };
+    },
+  });
   const normalized = normalizeLanguageQa(parsed);
   const sensoryMismatchIssues = detectSensoryMismatchIssues(resolvedRequest.content);
+  const languageQa = injectDeterministicLanguageIssues(
+    formatWarning
+      ? {
+          ...normalized,
+          formatWarning,
+        }
+      : normalized,
+    sensoryMismatchIssues,
+  );
 
   return {
-    languageQa: injectDeterministicLanguageIssues(normalized, sensoryMismatchIssues),
+    languageQa,
     rawText,
   };
 }

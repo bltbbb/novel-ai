@@ -257,6 +257,7 @@ export interface GenerationContextBundleResult {
 
 interface FallbackContextParts {
   activeForeshadowBlocks: string[];
+  recentTextBlocks: string[];
   residualBundle: string;
 }
 
@@ -285,6 +286,7 @@ const GENERATION_CONTEXT_LIMITS = {
   questionPoolHintFullBlockMax: 1,
   resourceContinuityFullBlockMaxDefault: 3,
   resourceContinuityFullBlockMaxHighPressure: 4,
+  recentFullTextChapterMax: 2,
   memoryRetrievalLimit: 6,
 } as const;
 
@@ -690,16 +692,6 @@ function truncateText(value: string, maxLength: number) {
   return `${trimmed.slice(0, maxLength)}...`;
 }
 
-function tailText(value: string, maxLength: number) {
-  const trimmed = value.trim();
-
-  if (trimmed.length <= maxLength) {
-    return trimmed;
-  }
-
-  return `...${trimmed.slice(-maxLength)}`;
-}
-
 function countTextOccurrences(source: string | null | undefined, pattern: string) {
   const normalizedSource = normalizeText(source);
   const normalizedPattern = normalizeText(pattern);
@@ -739,31 +731,89 @@ function parseFallbackContextBundle(rawText?: string) {
   if (!input) {
     return {
       activeForeshadowBlocks: [],
+      recentTextBlocks: [],
       residualBundle: '',
     } satisfies FallbackContextParts;
   }
 
-  const marker = '激活伏笔：';
-  const markerIndex = input.indexOf(marker);
+  const matches = [
+    ...input.matchAll(/^(当前世界状态快照：|最近 20 章摘要：|最近 5 章原文尾部：|前 2 章正文全文：|激活伏笔：|【[^】]+】)$/gmu),
+  ];
 
-  if (markerIndex < 0) {
+  if (matches.length === 0) {
     return {
       activeForeshadowBlocks: [],
+      recentTextBlocks: [],
       residualBundle: input,
     } satisfies FallbackContextParts;
   }
 
-  const beforeMarker = input.slice(0, markerIndex).trim();
-  const foreshadowText = input.slice(markerIndex + marker.length).trim();
-  const activeForeshadowBlocks = foreshadowText
-    .split(/\n\n(?=- )/u)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .slice(0, 8);
+  const residualBlocks: string[] = [];
+  const activeForeshadowBlocks: string[] = [];
+  const recentTextBlocks: string[] = [];
+  let cursor = 0;
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const header = match[1];
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? input.length;
+
+    if (start > cursor) {
+      const gapText = input.slice(cursor, start).trim();
+
+      if (gapText) {
+        residualBlocks.push(gapText);
+      }
+    }
+
+    const block = input.slice(start, end).trim();
+    cursor = end;
+
+    if (header === '激活伏笔：') {
+      const foreshadowText = block.slice(header.length).trim();
+      activeForeshadowBlocks.push(
+        ...foreshadowText
+          .split(/\n\n(?=- )/u)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      );
+      continue;
+    }
+
+    if (header === '最近 5 章原文尾部：' || header === '前 2 章正文全文：') {
+      const recentText = block.slice(header.length).trim();
+      recentTextBlocks.push(
+        ...recentText
+          .split(/\n\n(?=- )/u)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      );
+      continue;
+    }
+
+    if (
+      header === '当前世界状态快照：'
+      || header === '最近 20 章摘要：'
+    ) {
+      continue;
+    }
+
+    residualBlocks.push(block);
+  }
+
+  if (cursor < input.length) {
+    const tailTextBlock = input.slice(cursor).trim();
+
+    if (tailTextBlock) {
+      residualBlocks.push(tailTextBlock);
+    }
+  }
 
   return {
-    activeForeshadowBlocks,
-    residualBundle: beforeMarker,
+    activeForeshadowBlocks: activeForeshadowBlocks.slice(0, 8),
+    recentTextBlocks: recentTextBlocks.slice(0, GENERATION_CONTEXT_LIMITS.recentFullTextChapterMax),
+    residualBundle: residualBlocks.join('\n\n').trim(),
   } satisfies FallbackContextParts;
 }
 
@@ -897,7 +947,6 @@ function buildFocusSignalTexts(input: GenerationContextBuildInput) {
     ].filter(Boolean) as string[],
     soft: [
       input.previousChapterTitle,
-      input.previousSummary,
       input.worldState,
     ].filter(Boolean) as string[],
   };
@@ -1352,8 +1401,39 @@ function buildRecentSummaryBlocks(rows: ChapterMemoryRow[]) {
 
 function buildRecentTextBlocks(rows: ChapterTextRow[]) {
   return rows.map((row) =>
-    [`- ${buildChapterLabel(row.chapterOrder, row.chapterTitle)}`, tailText(row.generatedText, 260)].join('\n'),
+    [`- ${buildChapterLabel(row.chapterOrder, row.chapterTitle)}`, row.generatedText.trim() || '暂无正文'].join('\n'),
   );
+}
+
+function mergeRecentTextBlocks(primary: string[], supplement: string[]) {
+  const merged: string[] = [];
+  const seenHeaders = new Set<string>();
+
+  for (const block of [...primary, ...supplement]) {
+    const trimmed = block.trim();
+
+    if (!trimmed) {
+      continue;
+    }
+
+    const header = normalizeText(trimmed.split('\n')[0] ?? trimmed);
+
+    if (header && seenHeaders.has(header)) {
+      continue;
+    }
+
+    if (header) {
+      seenHeaders.add(header);
+    }
+
+    merged.push(trimmed);
+
+    if (merged.length >= GENERATION_CONTEXT_LIMITS.recentFullTextChapterMax) {
+      break;
+    }
+  }
+
+  return merged;
 }
 
 function buildVolumeRecapEntriesFromHistoricalRows(
@@ -2908,7 +2988,6 @@ function buildWorkingMemoryBlocks(
 ) {
   const includeActiveForeshadows = (input.requiredForeshadowTitles?.length ?? 0) === 0;
   const blocks = [
-    input.previousSummary?.trim() ? `- 上章承接\n${truncateText(input.previousSummary.trim(), 180)}` : '',
     ...currentVolumeSnapshotBlocks,
     ...(includeActiveForeshadows ? activeForeshadowBlocks.map((block) => `- 激活伏笔\n${block}`) : []),
     ...questionPoolHintBlocks,
@@ -3792,7 +3871,8 @@ export async function buildGenerationContextBundle(
 
       return right.updatedAt.localeCompare(left.updatedAt);
     })
-    .slice(0, 5);
+    .slice(0, GENERATION_CONTEXT_LIMITS.recentFullTextChapterMax)
+    .sort(compareChapterRows);
   const entityRows = mergeEntityRowsWithSnapshotPriority(
     loadEntityRows(env, input.projectId).filter((row) => input.allowDraftContext || !row.draft),
     input.entitySnapshot,
@@ -3850,6 +3930,10 @@ export async function buildGenerationContextBundle(
   ]);
   const queryPhrases = buildQueryPhrases(input);
   const fallbackContext = parseFallbackContextBundle(input.fallbackContextBundle);
+  const recentTextBlocks = mergeRecentTextBlocks(
+    buildRecentTextBlocks(recentTextRows),
+    fallbackContext.recentTextBlocks,
+  );
   const volumeRecapBlocks = mergeVolumeRecapBlocks(
     buildVolumeRecapEntriesFromStoredRecaps(storedVolumeRecaps, input.volumeTitle),
     buildVolumeRecapEntriesFromHistoricalRows(historicalRows, input.volumeTitle),
@@ -3981,7 +4065,7 @@ export async function buildGenerationContextBundle(
     createSection('antagonist_agenda', '反派议程', antagonistAgendaBlocks),
     createSection('pov_permission', '信息控制', povPermissionBlocks),
     createSection('world_state_delta', '世界状态', worldStateDeltaBlocks),
-    createSection('immediate_memory', '即时记忆', buildRecentTextBlocks(recentTextRows)),
+    createSection('immediate_memory', '即时记忆', recentTextBlocks),
     createSection('short_term_memory', '短期记忆', buildRecentSummaryBlocks(recentSummaryRows)),
     createSection('long_term_memory', '长期记忆', volumeRecapBlocks),
     createSection('retrieval_memory', '外部检索', relatedChapterBlocks),
@@ -3998,7 +4082,7 @@ export async function buildGenerationContextBundle(
   return {
     bundle: sections.map((section) => buildSection(section.title, section.blocks)).filter(Boolean).join('\n\n'),
     recentSummaryCount: recentSummaryRows.length,
-    recentTextCount: recentTextRows.length,
+    recentTextCount: recentTextBlocks.length,
     volumeRecapCount: volumeRecapBlocks.length,
     relatedChapterCount: retrievalItems.filter((item) => item.sourceType === 'memory_chunk').length,
     dormantForeshadowRecallCount: retrievalItems.filter((item) => item.sourceType === 'dormant_foreshadow').length,

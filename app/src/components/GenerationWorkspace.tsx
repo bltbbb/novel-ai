@@ -249,6 +249,11 @@ function formatReviewSeverity(severity: NonNullable<GenerationJobRecord['review'
   }
 }
 
+function isFormatErrorMessage(message: string) {
+  const normalizedMessage = message.trim();
+  return normalizedMessage.includes('返回格式异常') || normalizedMessage.includes('JSON 无法解析');
+}
+
 function formatCheckerLabel(checker: NonNullable<GenerationJobRecord['review']>['checkerResults'][number]['checker']) {
   switch (checker) {
     case 'consistency':
@@ -2478,7 +2483,13 @@ export function GenerationWorkspace({
                       <p className="mt-2 text-xs text-sky-300">暂停时间：{formatTimeLabel(selectedServerJob.pausedAt)}</p>
                     )}
                     {selectedServerJob.errorMessage && (
-                      <p className="mt-2 text-xs text-red-300">{selectedServerJob.errorMessage}</p>
+                      <p
+                        className={`mt-2 text-xs ${
+                          isFormatErrorMessage(selectedServerJob.errorMessage) ? 'text-amber-300' : 'text-red-300'
+                        }`}
+                      >
+                        {selectedServerJob.errorMessage}
+                      </p>
                     )}
                     <div className="mt-4 flex flex-wrap gap-2">
                       {selectedServerJob.status === 'ready' && (
@@ -2736,6 +2747,12 @@ export function GenerationWorkspace({
                         </span>
                       </div>
                       <p className="mt-3 text-xs leading-6 text-neutral-400">{selectedServerJob.languageQa.summary}</p>
+                      {selectedServerJob.languageQa.formatWarning && (
+                        <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs leading-6 text-amber-100">
+                          <p className="font-medium text-amber-50">已自动修复模型返回格式</p>
+                          <p className="mt-1">{selectedServerJob.languageQa.formatWarning.message}</p>
+                        </div>
+                      )}
                       {selectedServerJob.languageQa.issues.length > 0 && (
                         <div className="mt-4 space-y-2">
                           {selectedServerJob.languageQa.issues.map((issue, index) => (

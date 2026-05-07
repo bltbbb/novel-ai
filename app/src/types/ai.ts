@@ -246,10 +246,17 @@ export interface ChapterReviewDraft {
   checkerResults: ReviewCheckerResult[];
 }
 
+export interface ResponseFormatWarning {
+  kind: 'json_repaired';
+  message: string;
+  appliedStrategies: string[];
+}
+
 export interface ChapterLanguageQaDraft {
   severity: ReviewSeverity;
   summary: string;
   issues: ReviewIssue[];
+  formatWarning?: ResponseFormatWarning | null;
 }
 
 export interface ChapterStyleDraft {

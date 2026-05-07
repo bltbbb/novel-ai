@@ -10,6 +10,11 @@ interface GenerationContextBundleInput {
   entities: LoreEntity[];
 }
 
+const LOCAL_GENERATION_CONTEXT_LIMITS = {
+  recentSummaryChapterMax: 20,
+  recentFullTextChapterMax: 2,
+} as const;
+
 function formatChapterLabel(chapter: Chapter) {
   return `第${chapter.order}章 ${chapter.title}`;
 }
@@ -20,11 +25,11 @@ function buildRecentChapterSection(chapters: Chapter[], queueMap: Map<Id, Genera
   }
 
   const lines = chapters.map((chapter) => {
-    const tail = getEffectiveChapterText(chapter, queueMap.get(chapter.id)).slice(-600);
-    return `- ${formatChapterLabel(chapter)}\n${tail || '暂无正文尾部'}`;
+    const fullText = getEffectiveChapterText(chapter, queueMap.get(chapter.id)).trim();
+    return `- ${formatChapterLabel(chapter)}\n${fullText || '暂无正文'}`;
   });
 
-  return ['最近 5 章原文尾部：', ...lines].join('\n\n');
+  return ['前 2 章正文全文：', ...lines].join('\n\n');
 }
 
 function buildRecentSummarySection(
@@ -73,8 +78,8 @@ export async function buildGenerationContextBundle(input: GenerationContextBundl
   const currentIndex = sortedChapters.findIndex((chapter) => chapter.id === input.currentChapterId);
   const previousChapters =
     currentIndex >= 0 ? sortedChapters.slice(0, currentIndex) : sortedChapters;
-  const recentChapters = previousChapters.slice(-5);
-  const recentSummaryChapters = previousChapters.slice(-20);
+  const recentChapters = previousChapters.slice(-LOCAL_GENERATION_CONTEXT_LIMITS.recentFullTextChapterMax);
+  const recentSummaryChapters = previousChapters.slice(-LOCAL_GENERATION_CONTEXT_LIMITS.recentSummaryChapterMax);
   const summaryIds = new Set(recentSummaryChapters.map((chapter) => chapter.id));
   const [summaries, foreshadows, queueItems] = await Promise.all([
     db.chapterSummaries.where('projectId').equals(input.projectId).toArray(),

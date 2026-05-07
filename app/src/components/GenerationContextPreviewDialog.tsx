@@ -367,13 +367,6 @@ export function GenerationContextPreviewDialog({
                   </div>
 
                   <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 p-4">
-                    {renderBlockHeader('上一章摘要', 'previous-summary', preview.previousSummary)}
-                    <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-neutral-300">
-                      {preview.previousSummary || '当前没有上一章摘要，会主要依赖已有上下文与规划。'}
-                    </p>
-                  </div>
-
-                  <div className="rounded-2xl border border-neutral-800 bg-neutral-950/40 p-4">
                     {renderBlockHeader('当前世界状态', 'world-state', preview.worldState)}
                     <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-neutral-300">
                       {preview.worldState || '当前没有可用的世界状态摘要。'}

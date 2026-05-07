@@ -859,6 +859,11 @@ export interface GenerationQueueLanguageQa {
   severity: ProjectGateSeverity;
   summary: string;
   issues: GenerationQueueReviewIssue[];
+  formatWarning?: {
+    kind: 'json_repaired';
+    message: string;
+    appliedStrategies: string[];
+  } | null;
 }
 
 export interface GenerationQueueItem {

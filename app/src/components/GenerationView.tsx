@@ -304,6 +304,26 @@ function formatForeshadowStatusLabel(status: GenerationDebugForeshadowRecord['st
   }
 }
 
+function getGenerationErrorMeta(errorMessage: string) {
+  const normalizedMessage = errorMessage.trim();
+  const isFormatError =
+    normalizedMessage.includes('返回格式异常') || normalizedMessage.includes('JSON 无法解析');
+
+  if (isFormatError) {
+    return {
+      title: '上次生成返回格式异常',
+      panelClassName: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+      titleClassName: 'text-amber-50',
+    };
+  }
+
+  return {
+    title: '上次生成失败',
+    panelClassName: 'border-red-500/30 bg-red-500/10 text-red-200',
+    titleClassName: 'text-red-100',
+  };
+}
+
 function formatStageDescription(
   stage: GenerationPipelineStage | null,
   beatIndex: number | null,
@@ -563,7 +583,6 @@ export function GenerationView({
   const [enableEditorRefine, setEnableEditorRefine] = useState(false);
   const [outline, setOutline] = useState<Awaited<ReturnType<typeof loadChapterOutline>> | null>(null);
   const [summary, setSummary] = useState<Awaited<ReturnType<typeof loadChapterSummary>> | null>(null);
-  const [previousSummaryText, setPreviousSummaryText] = useState('');
   const [stateChanges, setStateChanges] = useState<StateChange[]>([]);
   const [draftItem, setDraftItem] = useState<GenerationQueueItem | null>(null);
   const [reviewText, setReviewText] = useState('');
@@ -638,6 +657,7 @@ export function GenerationView({
   const [relationshipLimit, setRelationshipLimit] = useState(6);
   const [foreshadowLimit, setForeshadowLimit] = useState(6);
   const [volumeRecapLimit, setVolumeRecapLimit] = useState(6);
+  const errorMeta = useMemo(() => getGenerationErrorMeta(errorMessage), [errorMessage]);
   const selectedChapterContentText = useMemo(
     () => getChapterPlainText(selectedChapter?.content),
     [selectedChapter?.id, selectedChapter?.updatedAt],
@@ -660,7 +680,6 @@ export function GenerationView({
     if (!selectedChapter) {
       setOutline(null);
       setSummary(null);
-      setPreviousSummaryText('');
       setStateChanges([]);
       setDraftItem(null);
       setReviewText('');
@@ -675,7 +694,6 @@ export function GenerationView({
 
     setOutline(null);
     setSummary(null);
-    setPreviousSummaryText('');
     setStateChanges([]);
     setDraftItem(null);
     setReviewText('');
@@ -690,10 +708,9 @@ export function GenerationView({
       setIsLoadingArtifacts(true);
 
       try {
-        const [nextOutline, nextSummary, nextPreviousSummaryText, nextStateChanges, queueItems] = await Promise.all([
+        const [nextOutline, nextSummary, nextStateChanges, queueItems] = await Promise.all([
           loadChapterOutline(projectId, selectedChapter.id),
           loadChapterSummary(projectId, selectedChapter.id),
-          getPreviousSummaryText(selectedChapter),
           loadChapterStateChanges(selectedChapter.id),
           loadGenerationQueue(projectId),
         ]);
@@ -710,7 +727,6 @@ export function GenerationView({
 
         setOutline(nextOutline ?? null);
         setSummary(nextSummary ?? null);
-        setPreviousSummaryText(nextPreviousSummaryText);
         setStateChanges(nextStateChanges);
         setDraftItem(queueItem);
         setErrorMessage(queueItem?.status === 'error' ? queueItem.errorMessage : '');
@@ -2879,13 +2895,6 @@ export function GenerationView({
               </div>
 
               <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
-                <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">前一章摘要</p>
-                <p className="mt-3 text-sm leading-6 text-neutral-300">
-                  {previousSummaryText || '当前没有上一章摘要，生成时将主要依赖现有上下文与大纲。'}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 p-4">
                 <p className="text-xs uppercase tracking-[0.18em] text-neutral-500">当前正文</p>
                 <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-neutral-300">
                   {selectedChapterContentText || '当前还没有正文，生成通过或写入编辑器后会在这里同步预览。'}
@@ -2961,11 +2970,11 @@ export function GenerationView({
             </label>
 
             {errorMessage ? (
-              <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+              <div className={`mt-4 rounded-2xl border p-4 text-sm ${errorMeta.panelClassName}`}>
                 <div className="flex items-start gap-2">
                   <AlertTriangle size={16} className="mt-0.5" />
                   <div>
-                    <p className="font-medium text-red-100">上次生成失败</p>
+                    <p className={`font-medium ${errorMeta.titleClassName}`}>{errorMeta.title}</p>
                     <p className="mt-2 leading-6">{errorMessage}</p>
                   </div>
                 </div>
@@ -3180,6 +3189,12 @@ export function GenerationView({
                     {draftItem.languageQa.severity}
                   </span>
                   <p className="text-sm leading-6 text-neutral-300">{draftItem.languageQa.summary}</p>
+                  {draftItem.languageQa.formatWarning ? (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-xs leading-6 text-amber-100">
+                      <p className="font-medium text-amber-50">已自动修复模型返回格式</p>
+                      <p className="mt-1">{draftItem.languageQa.formatWarning.message}</p>
+                    </div>
+                  ) : null}
                   <div className="space-y-2">
                     {draftItem.languageQa.issues.slice(0, 4).map((issue, index) => (
                       <div key={`language-qa-${index}`} className="rounded-xl border border-neutral-800 px-3 py-3 text-sm text-neutral-300">
